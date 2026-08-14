@@ -12,10 +12,12 @@ deep-dreaming/
 ├── patches/                      # 全部补丁,一补丁一目录(代码 + 测试 + README)
 │   ├── session-cleanup/          # 会话日志自动清理(单文件插件)
 │   ├── dsh-project-memory/       # 跨会话项目记忆(目录包插件)
-│   └── ui-settings-plugin-manager/  # Web 设置「插件管理」标签页(UI 插件)
+│   ├── ui-settings-plugin-manager/  # Web 设置「插件管理」标签页(UI 插件)
+│   └── ui-settings-other/        # Web 设置「其他」页:重启服务按钮(UI + host 插件)
 └── scripts/
     ├── deploy.ps1                # 部署脚本:同步单文件插件 + 校验 patch 引用
-    └── verify-plugin-manager.mjs # plugin-manager 部署包的端到端功能验证
+    ├── verify-plugin-manager.mjs # plugin-manager 部署包的端到端功能验证
+    └── verify-settings-other.mjs # settings-other 补丁(host + client)功能验证
 ```
 
 ## 补丁清单
@@ -25,6 +27,7 @@ deep-dreaming/
 | [session-cleanup](patches/session-cleanup/) | 按天数/容量定期清理归档会话,跳过活跃会话 | `deploy.ps1` 同步到 `~/.dsh/plugins/` + `~/.dsh/cordis.patch.yml` 条目 | [README](patches/session-cleanup/README.md) |
 | [dsh-project-memory](patches/dsh-project-memory/) | 跨会话项目记忆:Agent 把确定性项目知识存为 Markdown 笔记,后续会话可检索 | `dsh plugin --profile web add` 安装到 profile | [README](patches/dsh-project-memory/README.md) |
 | [ui-settings-plugin-manager](patches/ui-settings-plugin-manager/) | Web 设置新增「插件管理」标签页:状态过滤 + 官方/自定义分类 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-settings-plugin-manager/README.md) |
+| [ui-settings-other](patches/ui-settings-other/) | Web 设置新增「其他」页:重启服务按钮(host 半自动重启 dsh 进程) | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-settings-other/README.md) |
 
 ## 快速部署
 
@@ -37,9 +40,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 # 2. 目录包插件(dsh-project-memory):装进 web profile,重启 dsh web 生效
 dsh plugin --profile web add D:\GitHub\deep-dreaming\patches\dsh-project-memory
 
-# 3. UI 插件(ui-settings-plugin-manager):建立 junction 链接 + patch 条目
-#    (patch 热加载,保存后刷新页面即可,无需重启)
+# 3. UI 插件(ui-settings-plugin-manager / ui-settings-other):建立 junction
+#    链接 + patch 条目(patch 热加载,保存后刷新页面即可,无需重启)
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-settings-plugin-manager" -Target "D:\GitHub\deep-dreaming\patches\ui-settings-plugin-manager"
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-settings-other" -Target "D:\GitHub\deep-dreaming\patches\ui-settings-other"
 ```
 
 > 路径写死为 `D:\GitHub\deep-dreaming`。仓库移动位置后,`dsh plugin add`
@@ -53,4 +57,5 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 node patches/session-cleanup/session-cleanup.test.mjs            # 清理规则
 node patches/dsh-project-memory/tests/store.test.mjs             # 记忆库逻辑
 node scripts/verify-plugin-manager.mjs                           # 部署后的 UI 插件端到端验证
+node scripts/verify-settings-other.mjs                           # settings-other host + client 验证
 ```
