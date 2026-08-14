@@ -193,6 +193,7 @@ console.log('exports contract OK:', JSON.stringify(exports_.inject), 'NS =', exp
 let registered = null
 let dictionaries = null
 let rpcCalls = []
+let updateQueueCalls = []
 const clientCtx = {
   effect: (fn) => fn(),
   locale: {
@@ -207,7 +208,7 @@ const clientCtx = {
       },
     },
   },
-  sessions: { scope: () => ({ get: () => ({ updateQueue: async () => {}, input: { for: () => ({ notify: () => {} }) } }) }) },
+  sessions: { scope: () => ({ get: () => ({ updateQueue: async (itemId, action) => { updateQueueCalls.push({ itemId, action }) }, input: { for: () => ({ notify: () => {} }) } }) }) },
   slots: {
     inject: (_key, callback) => { registered = callback() },
     register: (options, component) => ({ ...options, component }),
@@ -314,8 +315,22 @@ if (doc.querySelector('[role="tooltip"]') !== null) throw new Error('focusOut mu
 await act(async () => { fireEvent.mouseDown(editButton) })
 await act(async () => { fireEvent.click(editButton) })
 if (doc.querySelector('[role="tooltip"]') !== null) throw new Error('clicking edit must not leave a focus tooltip in edit mode')
-if (doc.querySelector('.qt-editor') === null) throw new Error('editor input missing after clicking edit')
-console.log('edit OK: no focus-triggered tooltip in edit mode; keyboard focus path intact')
+const editor = doc.querySelector('.qt-editor')
+if (editor === null) throw new Error('editor missing after clicking edit')
+if (editor.tagName !== 'TEXTAREA') throw new Error('editor must be a textarea (multiline editing)')
+console.log('edit OK: no focus-triggered tooltip in edit mode; multiline textarea editor')
+
+// multiline editing: type a two-line message and submit with Enter
+updateQueueCalls = []
+await act(async () => { fireEvent.change(editor, { target: { value: 'line one\nline two' } }) })
+await act(async () => { fireEvent.keyDown(editor, { key: 'Enter', shiftKey: true }) })
+if (updateQueueCalls.length !== 0) throw new Error('Shift+Enter must insert a newline, not submit')
+await act(async () => { fireEvent.keyDown(editor, { key: 'Enter' }) })
+if (updateQueueCalls.length !== 1) throw new Error('Enter must submit the edit')
+const editCall = updateQueueCalls[0]
+if (editCall.itemId !== 'm1' || editCall.action.kind !== 'edit') throw new Error(`edit call: ${JSON.stringify(editCall)}`)
+if (editCall.action.content[0].text !== 'line one\nline two') throw new Error('multiline text must be preserved in the edit action')
+console.log('multiline edit OK: Shift+Enter newline, Enter submits, text preserved')
 
 // single row: no reorder affordance (row not draggable)
 await act(async () => {

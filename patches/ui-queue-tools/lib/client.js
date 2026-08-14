@@ -48,7 +48,8 @@ const CSS = [
   '.qt-row-over{outline:2px dashed var(--dsw-alias-state-business-primary);outline-offset:-2px;background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 8%,transparent)}',
   '.qt-preview,.qt-editor{min-width:0;font:var(--dsw-font-xs-13);font-family:Inter, var(--dsw-font-family);flex:auto}',
   '.qt-preview{color:var(--dsw-alias-label-primary-dimmed);text-overflow:ellipsis;white-space:nowrap;word-break:break-word;overflow:hidden}',
-  '.qt-editor{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);height:28px;color:var(--dsw-alias-label-primary);border-radius:6px;outline:none;padding:0 8px}',
+  '.qt-row-editing{height:auto;min-height:36px;align-items:flex-start;padding-top:6px}',
+  '.qt-editor{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);min-height:28px;max-height:112px;color:var(--dsw-alias-label-primary);border-radius:6px;outline:none;padding:4px 8px;resize:none;overflow-y:auto;font:var(--dsw-font-xs-13);font-family:Inter, var(--dsw-font-family);line-height:18px}',
   '.qt-editor:focus{border-color:var(--dsw-alias-state-business-primary)}',
   '.qt-actions{flex:none;align-items:center;gap:10px;display:flex}',
   '.qt-actions .qt-action-group{display:inline-flex;align-items:center;gap:2px}',
@@ -191,7 +192,7 @@ function QueueToolsDock({ useSession, updateQueue, notify, reorder, t }) {
       className: 'qt-list',
       hidden: !listVisible,
       children: listVisible ? queue.map((row, index) => jsxs('li', {
-        className: 'qt-row' + (draggingId === row.id ? ' qt-row-dragging' : '') + (dragOverId === row.id && draggingId !== null && draggingId !== row.id ? ' qt-row-over' : ''),
+        className: 'qt-row' + (editing?.id === row.id ? ' qt-row-editing' : '') + (draggingId === row.id ? ' qt-row-dragging' : '') + (dragOverId === row.id && draggingId !== null && draggingId !== row.id ? ' qt-row-over' : ''),
         draggable: canReorder && editing?.id !== row.id ? true : undefined,
         'aria-grabbed': draggingId === row.id ? true : undefined,
         onDragStart: (event) => {
@@ -215,15 +216,30 @@ function QueueToolsDock({ useSession, updateQueue, notify, reorder, t }) {
         onDragEnd: endDrag,
         children: [
           queue.length === 1 ? jsx('span', { className: 'qt-lead', 'aria-hidden': true, children: jsx(IconQueueOutline14, {}) }, 'lead') : null,
-          editing?.id === row.id ? jsx('input', {
+          editing?.id === row.id ? jsx('textarea', {
             autoFocus: true,
+            rows: 1,
             className: 'qt-editor',
             'aria-label': t('edit'),
             value: editing.text,
-            onChange: (event) => { setEditing({ id: row.id, text: event.currentTarget.value }) },
+            ref: (el) => {
+              // Fit the box to the content once on mount (multiline editing).
+              if (el !== null && el.dataset.sized !== '1') {
+                el.dataset.sized = '1'
+                el.style.height = 'auto'
+                el.style.height = el.scrollHeight + 'px'
+              }
+            },
+            onChange: (event) => {
+              const el = event.currentTarget
+              el.style.height = 'auto'
+              el.style.height = el.scrollHeight + 'px'
+              setEditing({ id: row.id, text: el.value })
+            },
             onKeyDown: (event) => {
               if (event.key === 'Escape') { setEditing(null); return }
-              if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
+              // Enter submits (official behavior); Shift+Enter inserts a newline.
+              if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
                 event.preventDefault();
                 void saveEdit();
               }
