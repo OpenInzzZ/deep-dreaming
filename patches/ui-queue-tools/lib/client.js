@@ -42,6 +42,10 @@ const CSS = [
   '.qt-list{max-height:180px;margin:0;padding:0;list-style:none;overflow-y:auto}',
   '.qt-row{box-sizing:border-box;border-radius:8px;align-items:center;gap:10px;width:100%;height:36px;padding:4px 5px 4px 12px;display:flex}',
   '.qt-row+.qt-row{box-shadow:inset 0 1px 0 var(--dsw-alias-border-l1)}',
+  '.qt-row[draggable="true"]{cursor:grab}',
+  '.qt-row[draggable="true"]:active{cursor:grabbing}',
+  '.qt-row-dragging{opacity:.45}',
+  '.qt-row-over{outline:2px dashed var(--dsw-alias-state-business-primary);outline-offset:-2px;background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 8%,transparent)}',
   '.qt-preview,.qt-editor{min-width:0;font:var(--dsw-font-xs-13);font-family:Inter, var(--dsw-font-family);flex:auto}',
   '.qt-preview{color:var(--dsw-alias-label-primary-dimmed);text-overflow:ellipsis;white-space:nowrap;word-break:break-word;overflow:hidden}',
   '.qt-editor{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);height:28px;color:var(--dsw-alias-label-primary);border-radius:6px;outline:none;padding:0 8px}',
@@ -77,9 +81,7 @@ const zh = {
   editFailed: '编辑失败：这条消息可能已经开始发送。',
   removeFailed: '删除失败：这条消息可能已经开始发送。',
   steerFailed: '插话发送失败，请重试。',
-  moveUp: '上移',
-  moveDown: '下移',
-  moveFailed: '排序失败：这条消息可能已经开始发送。',
+  reorderFailed: '排序失败：这条消息可能已经开始发送。',
 };
 
 /** English dictionary checked against the Chinese key set. */
@@ -95,9 +97,7 @@ const en = {
   editFailed: 'Edit failed: this message may have already started sending.',
   removeFailed: 'Removal failed: this message may have already started sending.',
   steerFailed: 'Steering failed. Try again.',
-  moveUp: 'Move up',
-  moveDown: 'Move down',
-  moveFailed: 'Reorder failed: this message may have already started sending.',
+  reorderFailed: 'Reorder failed: this message may have already started sending.',
 };
 
 /** Dictionary namespace owned by this plugin. */
@@ -107,10 +107,10 @@ const NS = 'queue.tools';
 const inject = ['slots', 'locale', 'connection', 'conversation', 'sessions'];
 
 /**
- * Enhanced queue strip: the shipped dock plus full-text hover preview and
- * move-up/move-down reordering. Props arrive from the slot renderer
- * (`useSession`, `t`) and this registrant's inject face (`updateQueue`,
- * `notify`, `reorder`).
+ * Enhanced queue strip: the shipped dock plus full-text hover preview
+ * (Tooltip, same affordance as the action buttons) and drag-to-reorder.
+ * Props arrive from the slot renderer (`useSession`, `t`) and this
+ * registrant's inject face (`updateQueue`, `notify`, `reorder`).
  */
 function QueueToolsDock({ useSession, updateQueue, notify, reorder, t }) {
   const inbox = useSession((s) => s.queue);
@@ -120,6 +120,8 @@ function QueueToolsDock({ useSession, updateQueue, notify, reorder, t }) {
   const [editing, setEditing] = useState(null);
   const [busy, setBusy] = useState(null);
   const [collapsed, setCollapsed] = useState(true);
+  const [draggingId, setDraggingId] = useState(null);
+  const [dragOverId, setDragOverId] = useState(null);
   const listId = useId();
 
   useEffect(() => {
@@ -146,18 +148,20 @@ function QueueToolsDock({ useSession, updateQueue, notify, reorder, t }) {
     }
   };
 
-  const applyReorder = async (row, direction) => {
-    const index = queue.findIndex((candidate) => candidate.id === row.id);
-    if (index < 0) return;
-    const toIndex = direction === 'up' ? index - 1 : index + 1;
-    setBusy(row.id);
+  const applyReorder = async (itemId, toIndex) => {
+    setBusy(itemId);
     try {
-      await reorder(row.id, toIndex);
+      await reorder(itemId, toIndex);
     } catch {
-      notify('error', t('moveFailed'));
+      notify('error', t('reorderFailed'));
     } finally {
-      setBusy((current) => current === row.id ? null : current);
+      setBusy((current) => current === itemId ? null : current);
     }
+  };
+
+  const endDrag = () => {
+    setDraggingId(null);
+    setDragOverId(null);
   };
 
   const saveEdit = async () => {
@@ -187,7 +191,28 @@ function QueueToolsDock({ useSession, updateQueue, notify, reorder, t }) {
       className: 'qt-list',
       hidden: !listVisible,
       children: listVisible ? queue.map((row, index) => jsxs('li', {
-        className: 'qt-row',
+        className: 'qt-row' + (draggingId === row.id ? ' qt-row-dragging' : '') + (dragOverId === row.id && draggingId !== null && draggingId !== row.id ? ' qt-row-over' : ''),
+        draggable: canReorder && editing?.id !== row.id ? true : undefined,
+        'aria-grabbed': draggingId === row.id ? true : undefined,
+        onDragStart: (event) => {
+          if (!canReorder) return
+          setDraggingId(row.id)
+          try { event.dataTransfer.effectAllowed = 'move' } catch { /* jsdom has no dataTransfer */ }
+        },
+        onDragOver: (event) => {
+          if (draggingId === null || draggingId === row.id) return
+          event.preventDefault()
+          try { event.dataTransfer.dropEffect = 'move' } catch { /* jsdom */ }
+          setDragOverId(row.id)
+        },
+        onDrop: (event) => {
+          if (draggingId === null || draggingId === row.id) return
+          event.preventDefault()
+          const fromIndex = queue.findIndex((candidate) => candidate.id === draggingId)
+          if (fromIndex >= 0 && fromIndex !== index) void applyReorder(draggingId, index)
+          endDrag()
+        },
+        onDragEnd: endDrag,
         children: [
           queue.length === 1 ? jsx('span', { className: 'qt-lead', 'aria-hidden': true, children: jsx(IconQueueOutline14, {}) }, 'lead') : null,
           editing?.id === row.id ? jsx('input', {
@@ -203,11 +228,16 @@ function QueueToolsDock({ useSession, updateQueue, notify, reorder, t }) {
                 void saveEdit();
               }
             },
-          }, 'editor') : jsx('span', {
-            className: 'qt-preview',
-            title: row.text ?? row.preview,
-            children: row.preview,
-          }, 'preview'),
+          }, 'editor') : jsx(Tooltip, {
+            label: row.text ?? row.preview,
+            side: 'bottom',
+            delayMs: 500,
+            maxWidth: 480,
+            children: jsx('span', {
+              className: 'qt-preview',
+              children: row.preview,
+            }, 'preview'),
+          }, 'preview-tip'),
           queueMutable ? jsx('div', { className: 'qt-actions', children: editing?.id === row.id ? jsxs(Fragment, { children: [
             jsx(Tooltip, { label: t('save'), side: 'bottom', delayMs: 500, children: jsx('button', {
               type: 'button',
@@ -226,33 +256,24 @@ function QueueToolsDock({ useSession, updateQueue, notify, reorder, t }) {
               children: jsx(IconCloseOutline16, { size: 14 }),
             }, 'cancel') }),
           ] }) : jsxs(Fragment, { children: [
-            canReorder ? jsx('span', { className: 'qt-action-group', children: [
-              jsx(Tooltip, { label: t('moveUp'), side: 'bottom', delayMs: 500, children: jsx('button', {
-                type: 'button',
-                className: 'qt-action',
-                'aria-label': t('moveUp'),
-                title: t('moveUp'),
-                disabled: busy !== null || index === 0,
-                onClick: () => { void applyReorder(row, 'up') },
-                children: jsx(IconChevronUpOutline14, {}),
-              }, 'move-up') }),
-              jsx(Tooltip, { label: t('moveDown'), side: 'bottom', delayMs: 500, children: jsx('button', {
-                type: 'button',
-                className: 'qt-action',
-                'aria-label': t('moveDown'),
-                title: t('moveDown'),
-                disabled: busy !== null || index === queue.length - 1,
-                onClick: () => { void applyReorder(row, 'down') },
-                children: jsx(IconChevronDownOutline14, {}),
-              }, 'move-down') }),
-            ] }, 'move-group') : null,
             jsx(Tooltip, { label: t('edit'), side: 'bottom', delayMs: 500, disabled: row.text === null, children: jsx('button', {
               type: 'button',
               className: 'qt-action',
               'aria-label': t('edit'),
               title: row.text === null ? t('edit.unsupported') : undefined,
               disabled: busy !== null || row.text === null,
-              onClick: () => { if (row.text !== null) setEditing({ id: row.id, text: row.text }) },
+              onClick: (event) => {
+                // Drop focus so the button's focus-triggered tooltip cannot
+                // linger when the row swaps into edit mode.
+                if (event.currentTarget.blur) event.currentTarget.blur()
+                if (row.text !== null) setEditing({ id: row.id, text: row.text })
+              },
+              onMouseDown: (event) => {
+                // Prevent mouse clicks from focusing the button at all (the
+                // focus-triggered tooltip popping up on click is the reported
+                // glitch); keyboard Tab focus keeps working.
+                if (event.preventDefault) event.preventDefault()
+              },
               children: jsx(IconEditOutline16, { size: 14 }),
             }, 'edit') }),
             jsx(Tooltip, { label: t('remove'), side: 'bottom', delayMs: 500, children: jsx('button', {

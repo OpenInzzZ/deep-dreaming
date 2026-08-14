@@ -134,11 +134,42 @@ if (handoff === null) throw new Error('bundle never called __ModuleLoader__.load
 if (handoff.id !== PLUGIN_ID) throw new Error(`handoff id mismatch: ${handoff.id}`)
 
 const icon = (props) => React.createElement('svg', { ...props, 'data-icon': true })
+// Behavior-equivalent Tooltip: hover shows after delayMs, keyboard focus is
+// immediate — mirroring the shipped @deepseek-ai/dsh-client-ui-primitives
+// Tooltip (its node half cannot load in Node because it pulls katex CSS).
+const TooltipStub = ({ label, delayMs = 0, disabled = false, children }) => {
+  const [visible, setVisible] = React.useState(false)
+  const timer = React.useRef(null)
+  return React.createElement(React.Fragment, null,
+    React.cloneElement(children, {
+      onMouseEnter: (event) => {
+        children.props.onMouseEnter?.(event)
+        if (disabled) return
+        clearTimeout(timer.current)
+        timer.current = setTimeout(() => setVisible(true), delayMs)
+      },
+      onMouseLeave: (event) => {
+        children.props.onMouseLeave?.(event)
+        clearTimeout(timer.current)
+        setVisible(false)
+      },
+      onFocus: (event) => {
+        children.props.onFocus?.(event)
+        if (!disabled) setVisible(true)
+      },
+      onBlur: (event) => {
+        children.props.onBlur?.(event)
+        setVisible(false)
+      },
+    }),
+    visible && !disabled ? React.createElement('span', { role: 'tooltip' }, label) : null,
+  )
+}
+
 const requireTable = (spec) => {
   if (spec === 'react') return uiRequire('react')
   if (spec === 'react/jsx-runtime') return uiRequire('react/jsx-runtime')
   if (spec === '@deepseek-ai/dsh-client-ui-primitives') {
-    const Tooltip = ({ children }) => children
     return {
       IconChevronDownOutline14: icon,
       IconChevronUpOutline14: icon,
@@ -148,7 +179,7 @@ const requireTable = (spec) => {
       IconSendOutline14: icon,
       IconTrashOutline16: icon,
       IconCheckOutline16: icon,
-      Tooltip,
+      Tooltip: TooltipStub,
     }
   }
   throw new Error(`unexpected module-table word: ${spec}`)
@@ -227,39 +258,66 @@ if (header === null) throw new Error('collapsed header missing')
 if (doc.querySelectorAll('.qt-preview').length !== 0) throw new Error('rows must be hidden while collapsed')
 await act(async () => { fireEvent.click(header) })
 
+// hover full-text preview uses the Tooltip affordance (same as action buttons)
 const previews = [...doc.querySelectorAll('.qt-preview')]
 if (previews.length !== 2) throw new Error(`expected 2 previews, got ${previews.length}`)
-if (previews[0].getAttribute('title') !== 'short one') throw new Error(`hover title: ${previews[0].getAttribute('title')}`)
-if (previews[1].getAttribute('title') !== 'second message') throw new Error('hover title for second row missing')
-console.log('hover full-text preview OK (title = full text)')
-
-const moveUpButtons = [...doc.querySelectorAll('[aria-label="' + en.moveUp + '"]')]
-const moveDownButtons = [...doc.querySelectorAll('[aria-label="' + en.moveDown + '"]')]
-if (moveUpButtons.length !== 2 || moveDownButtons.length !== 2) {
-  throw new Error(`move buttons: up=${moveUpButtons.length} down=${moveDownButtons.length}`)
+if (previews[0].getAttribute('title') !== null) throw new Error('preview must not use the native title attribute')
+await act(async () => { fireEvent.mouseEnter(previews[0]) })
+await new Promise((resolve) => setTimeout(resolve, 600))
+await act(async () => {})
+const bubbles = [...doc.querySelectorAll('[role="tooltip"]')]
+if (bubbles.length !== 1 || bubbles[0].textContent !== 'short one') {
+  throw new Error(`hover bubble: ${bubbles.map((b) => b.textContent).join('|')}`)
 }
-if (moveUpButtons[0].disabled !== true) throw new Error('first row move-up must be disabled')
-if (moveDownButtons[1].disabled !== true) throw new Error('last row move-down must be disabled')
+await act(async () => { fireEvent.mouseLeave(previews[0]) })
+console.log('hover full-text preview OK (Tooltip bubble = full text)')
 
+// drag-to-reorder: drag m1 onto m2's row -> reorder(m1, index 1)
+const rowsEls = [...doc.querySelectorAll('.qt-row')]
+if (rowsEls.length !== 2) throw new Error(`expected 2 rows, got ${rowsEls.length}`)
+if (rowsEls[0].getAttribute('draggable') !== 'true') throw new Error('row must be draggable')
 rpcCalls = []
-await act(async () => { fireEvent.click(moveDownButtons[0]) })
-if (rpcCalls.length !== 1) throw new Error(`expected 1 RPC call, got ${rpcCalls.length}`)
+await act(async () => { fireEvent.dragStart(rowsEls[0]) })
+await act(async () => { fireEvent.dragOver(rowsEls[1]) })
+if (rowsEls[1].classList.contains('qt-row-over') !== true) throw new Error('drag-over highlight missing')
+await act(async () => { fireEvent.drop(rowsEls[1]) })
+if (rpcCalls.length !== 1) throw new Error(`expected 1 reorder RPC, got ${rpcCalls.length}`)
 const call = rpcCalls[0]
 if (call.channel !== '/queue' || call.endpoint !== 'reorder') throw new Error(`RPC target: ${JSON.stringify(call)}`)
 if (call.payload.args.sessionId !== 'session-1' || call.payload.args.itemId !== 'm1' || call.payload.args.toIndex !== 1) {
   throw new Error(`RPC args: ${JSON.stringify(call.payload)}`)
 }
-console.log('move-down OK: /queue reorder RPC with (session-1, m1, 1)')
+console.log('drag reorder OK: drag m1 onto m2 -> /queue reorder (session-1, m1, 1)')
 
-rpcCalls = []
-await act(async () => { fireEvent.click(moveUpButtons[1]) })
-if (call.payload) {} // no-op keep lint quiet
-if (rpcCalls.length !== 1 || rpcCalls[0].payload.args.itemId !== 'm2' || rpcCalls[0].payload.args.toIndex !== 0) {
-  throw new Error(`move-up RPC args: ${JSON.stringify(rpcCalls[0]?.payload)}`)
-}
-console.log('move-up OK: /queue reorder RPC with (session-1, m2, 0)')
+// editing the row blurs the edit button (no lingering focus tooltip)
+await act(async () => {
+  root.render(React.createElement(registered.component, {
+    useSession: (select) => select({ queue: rows, running: false, subagent: null }),
+    updateQueue: injected.updateQueue,
+    notify: () => {},
+    reorder: injected.reorder,
+    t: (key, params) => {
+      const value = en[key]
+      return params && params.n !== undefined ? value.replace('{n}', String(params.n)) : value
+    },
+  }))
+})
+const editButton = [...doc.querySelectorAll('.qt-action')].find((b) => b.getAttribute('aria-label') === en.edit)
+if (editButton === undefined) throw new Error('edit button missing')
+// keyboard focus shows the tooltip immediately (shipped Tooltip semantics)
+await act(async () => { fireEvent.focus(editButton) })
+if (doc.querySelectorAll('[role="tooltip"]').length === 0) throw new Error('focus must show the edit tooltip immediately')
+await act(async () => { fireEvent.focusOut(editButton) })
+if (doc.querySelector('[role="tooltip"]') !== null) throw new Error('focusOut must hide the tooltip')
+// mouse click path: mousedown preventDefault keeps the button unfocused, so
+// no focus-triggered tooltip can pop up when the row swaps into edit mode
+await act(async () => { fireEvent.mouseDown(editButton) })
+await act(async () => { fireEvent.click(editButton) })
+if (doc.querySelector('[role="tooltip"]') !== null) throw new Error('clicking edit must not leave a focus tooltip in edit mode')
+if (doc.querySelector('.qt-editor') === null) throw new Error('editor input missing after clicking edit')
+console.log('edit OK: no focus-triggered tooltip in edit mode; keyboard focus path intact')
 
-// single row: no reorder controls
+// single row: no reorder affordance (row not draggable)
 await act(async () => {
   root.render(React.createElement(registered.component, {
     useSession: (select) => select({ queue: [rows[0]], running: false, subagent: null }),
@@ -272,8 +330,10 @@ await act(async () => {
     },
   }))
 })
-if (doc.querySelectorAll('.qt-action-group').length !== 0) throw new Error('single-row queue must not render reorder controls')
-console.log('single-row queue hides reorder controls OK')
+const singleRow = doc.querySelector('.qt-row')
+if (singleRow === null) throw new Error('single row missing')
+if (singleRow.getAttribute('draggable') === 'true') throw new Error('single-row queue must not be draggable')
+console.log('single-row queue hides reorder affordance OK')
 
 console.log('\nALL HARNESS CHECKS PASSED')
 process.exit(0)
