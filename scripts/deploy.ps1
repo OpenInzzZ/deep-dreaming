@@ -1,40 +1,42 @@
-# dsh-dev 部署脚本 —— 同步自研资产到 dsh 运行时目录
-# 用法: powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
+﻿# dsh-dev deploy script - sync self-owned assets to dsh runtime dir
+# Usage: powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 $ErrorActionPreference = 'Stop'
 
 $dev = Split-Path -Parent $PSScriptRoot          # D:\GitHub\dsh-dev
 $dshHome = Join-Path $env:USERPROFILE '.dsh'     # ~/.dsh
 
-Write-Host "== dsh-dev 部署 ==" -ForegroundColor Cyan
+Write-Host '== dsh-dev deploy ==' -ForegroundColor Cyan
 
-# 1. 同步插件到 ~/.dsh/plugins/
+# 1. Sync plugins to ~/.dsh/plugins/
 $pluginsDir = Join-Path $dshHome 'plugins'
 New-Item -ItemType Directory -Path $pluginsDir -Force | Out-Null
 $synced = 0
-foreach ($file in Get-ChildItem (Join-Path $dev 'plugins') -Filter '*.mjs') {
+foreach ($file in Get-ChildItem (Join-Path $dev 'plugins') -Filter '*.mjs' | Where-Object { $_.Name -notlike '*.test.mjs' }) {
     Copy-Item $file.FullName (Join-Path $pluginsDir $file.Name) -Force
-    Write-Host "  ✓ 插件: $($file.Name)"
+    Write-Host "  [OK] plugin: $($file.Name)"
     $synced++
 }
-if ($synced -eq 0) { Write-Host '  ! 未发现插件文件' }
+if ($synced -eq 0) { Write-Host '  [!] no plugin files found' }
 
-# 2. 校验 ~/.dsh/cordis.patch.yml 引用的插件/命令是否存在
+# 2. Validate references in ~/.dsh/cordis.patch.yml
 $patchPath = Join-Path $dshHome 'cordis.patch.yml'
 if (Test-Path $patchPath) {
     $content = Get-Content $patchPath -Raw
-    Write-Host "`n== patch 引用校验 ==" -ForegroundColor Cyan
+    Write-Host ''
+    Write-Host '== patch reference check ==' -ForegroundColor Cyan
     if ($content -match 'name:\s*([A-Za-z]:\\[^\s]+\.mjs)') {
         $p = $Matches[1]
-        if (Test-Path $p) { Write-Host "  ✓ 插件引用: $p" }
-        else { Write-Host "  ✗ 插件缺失: $p" -ForegroundColor Red }
+        if (Test-Path $p) { Write-Host "  [OK] plugin ref: $p" }
+        else { Write-Host "  [FAIL] plugin missing: $p" -ForegroundColor Red }
     }
     if ($content -match 'command:\s*([A-Za-z]:\\[^\s]+\.exe)') {
         $c = $Matches[1]
-        if (Test-Path $c) { Write-Host "  ✓ 命令引用: $c" }
-        else { Write-Host "  ✗ 命令缺失: $c" -ForegroundColor Red }
+        if (Test-Path $c) { Write-Host "  [OK] command ref: $c" }
+        else { Write-Host "  [FAIL] command missing: $c" -ForegroundColor Red }
     }
 } else {
-    Write-Host '  ! 未找到 cordis.patch.yml' -ForegroundColor Yellow
+    Write-Host '  [!] cordis.patch.yml not found' -ForegroundColor Yellow
 }
 
-Write-Host "`n部署完成。重启 dsh 生效。" -ForegroundColor Green
+Write-Host ''
+Write-Host 'Deploy done. Restart dsh to take effect.' -ForegroundColor Green
