@@ -1,3 +1,6 @@
 # 跨会话项目记忆(dsh-project-memory 插件在工作区根生成的笔记目录)
 # 记忆属于本地 Agent 工作产物,不应入库;由插件自动维护。
 .dsh-memory/
+
+# 补丁目录内为本地测试解析 @deepseek-ai/* 依赖而建的 node_modules 链接
+node_modules/

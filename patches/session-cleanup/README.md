@@ -62,6 +62,28 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 
 **临时手动清理**:想立即触发一次,重启 dsh 即可(启动时自动清理一次)。
 
+## 配置方式
+
+配置来源(优先级从低到高):schema 默认值 < 组合层条目配置
+(`cordis.patch.yml` 的 `config`)< 设置文档用户层。**推荐在界面配置**:
+
+1. 打开 dsh Web → **设置** → **插件** → **插件配置** 标签页;
+2. 找到 **会话清理** 卡片,展开即可编辑全部字段;
+3. 修改后点 **保存** —— 配置写入 `~/.dsh/settings.yaml`(namespace
+   `session-cleanup`),**即时生效**(定时器按新间隔重建,保存即触发一次
+   清理);点字段旁的 **重置** 可回退到组合层配置。
+
+> 手动编辑 `~/.dsh/settings.yaml` 同样生效(文件被监听,改动即重载):
+>
+> ```yaml
+> session-cleanup:
+>   maxAgeDays: 30
+>   maxTotalMB: 1024
+>   keepSessions: 5
+>   intervalMinutes: 360
+>   dryRun: false
+> ```
+
 ## 配置项
 
 | 配置 | 默认 | 说明 |
@@ -93,8 +115,11 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 ## 测试
 
 ```powershell
-node patches/session-cleanup/session-cleanup.test.mjs
+node patches/session-cleanup/session-cleanup.test.mjs      # 清理规则纯逻辑
+node patches/session-cleanup/verify-session-cleanup.mjs    # settings 集成 + 配置卡片
 ```
 
 覆盖:超龄删除、`keepSessions` 保护、容量上限、活跃会话跳过、演练模式、
-空项目目录清理等场景。
+空项目目录清理;host 侧 settings 注册与配置变更重建定时器、无 settings
+时回退条目配置;client 侧配置卡片渲染、保存写 `scope.set`、重置写
+`scope.unset`、只读禁用。

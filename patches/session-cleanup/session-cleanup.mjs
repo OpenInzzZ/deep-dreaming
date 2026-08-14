@@ -4,6 +4,12 @@
  * 按保留天数 / 总大小上限定期清理 $DSH_HOME/sessions 下的归档会话，
  * 跳过当前活跃会话。通过 cordis.patch.yml 的 insert 装载。
  *
+ * 配置来源(优先级从低到高):schema 默认值 < 组合层 entry 配置
+ * (cordis.patch.yml 的 config)< 设置文档的用户层。配置经 dsh-settings
+ * 服务注册(namespace `session-cleanup`),可在 设置 → 插件 → 插件配置
+ * 中可视化编辑;`applies: live`,保存后即时生效(定时器按新间隔重建)。
+ * settings 服务不存在时回退到组合层配置,行为与旧版一致。
+ *
  * 配置项:
  *   enabled: boolean        插件开关 (默认 true)
  *   maxAgeDays: number      超过该天数的会话可删 (默认 30, 0 = 不按天数清理)
@@ -16,8 +22,24 @@
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { readdir, rm, stat } from 'node:fs/promises'
+import { installSettingsSection } from '@deepseek-ai/dsh-settings'
+import z from '@deepseek-ai/schemastery'
 
 export const name = 'session-cleanup'
+
+export const SETTINGS_NAMESPACE = 'session-cleanup'
+
+/** Settings schema: defaults here are the floor; the entry config and the
+ * user document layer resolve above them. */
+export const ConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  maxAgeDays: z.number().default(30),
+  maxTotalMB: z.number().default(1024),
+  keepSessions: z.number().default(5),
+  intervalMinutes: z.number().default(360),
+  dryRun: z.boolean().default(false),
+  sessionsRoot: z.string().default(''),
+})
 
 export const DEFAULTS = {
   enabled: true,
@@ -172,30 +194,57 @@ export function summarize(result) {
 /**
  * Cordis 插件入口: 注入 sessions 服务, 启动时立即清理一次, 之后按
  * intervalMinutes 周期清理。定时器注册为 effect, 插件卸载时自动释放。
+ * 配置经 dsh-settings 注册(namespace `session-cleanup`), 设置变更时
+ * (onChange) 按新配置重建定时器 —— 即时生效。
  */
 export function apply(ctx, config = {}) {
   const cfg = { ...DEFAULTS, ...config }
   if (!cfg.enabled) return
 
   return ctx.inject(['sessions'], (ctx) => {
-    const sessionsRoot = resolveSessionsRoot(cfg.sessionsRoot)
     const logger = ctx.logger
-    const tick = async (reason) => {
+    /** 当前权威配置: 设置文档 > 组合层 entry; settings 缺失时回退 entry。 */
+    let source = () => ({ ...DEFAULTS, ...config })
+    let timer = null
+    let disposed = false
+
+    const tick = async (reason, cfg) => {
+      const sessionsRoot = resolveSessionsRoot(cfg.sessionsRoot)
       const liveIds = new Set(ctx.sessions.list().map((s) => s.id))
       const result = await runCleanup(sessionsRoot, cfg, liveIds)
       logger.info(`[${reason}] ${summarize(result)}`)
       if (result.errors.length > 0) logger.warn(`cleanup errors: ${result.errors.join(' | ')}`)
     }
 
-    // 启动即清理一次; 失败不阻断启动
-    void tick('startup').catch((e) => logger.warn(`startup cleanup failed: ${e.message}`))
+    const stop = () => {
+      if (timer !== null) {
+        clearInterval(timer)
+        timer = null
+      }
+    }
 
-    // 周期清理; effect 卸载时清除定时器
-    return ctx.effect(() => {
-      const timer = setInterval(() => {
-        void tick('interval').catch((e) => logger.warn(`interval cleanup failed: ${e.message}`))
-      }, cfg.intervalMinutes * 60_000)
-      return () => clearInterval(timer)
+    const start = () => {
+      stop()
+      if (disposed) return
+      const current = source()
+      if (!current.enabled) return
+      // 启动/配置变更即清理一次; 失败不阻断
+      void tick('startup', current).catch((e) => logger.warn(`startup cleanup failed: ${e.message}`))
+      timer = setInterval(() => {
+        void tick('interval', source()).catch((e) => logger.warn(`interval cleanup failed: ${e.message}`))
+      }, current.intervalMinutes * 60_000)
+    }
+
+    installSettingsSection(ctx, SETTINGS_NAMESPACE, ConfigSchema, config, {
+      setSource: (current) => { source = current },
+      onChange: start,
+    })
+
+    start()
+
+    return ctx.effect(() => () => {
+      disposed = true
+      stop()
     })
   })
 }

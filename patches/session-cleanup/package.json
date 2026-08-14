@@ -2,15 +2,28 @@
   "name": "@local/dsh-plugin-session-cleanup",
   "version": "0.1.0",
   "private": true,
-  "description": "User-level plugin: periodically clean archived dsh session logs by age / total size, skipping live sessions",
+  "description": "User-level plugin: periodically clean archived dsh session logs by age / total size, skipping live sessions; settings editable in Plugins settings",
   "type": "module",
   "main": "session-cleanup.mjs",
   "exports": {
     ".": "./session-cleanup.mjs",
+    "./client": "./client.js",
     "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale"
+      ],
+      "platform": "web"
+    }
   },
   "files": [
     "session-cleanup.mjs",
+    "client.js",
     "README.md"
   ],
   "license": "MIT"

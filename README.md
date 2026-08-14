@@ -58,6 +58,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 ```powershell
 # 每个补丁自带无依赖或低依赖测试(测试与脚本随补丁目录):
 node patches/session-cleanup/session-cleanup.test.mjs            # 清理规则
+node patches/session-cleanup/verify-session-cleanup.mjs          # settings 集成 + 配置卡片
 node patches/dsh-project-memory/tests/store.test.mjs             # 记忆库逻辑
 node patches/ui-settings-plugin-manager/verify-plugin-manager.mjs  # 部署后的 UI 插件端到端验证
 node patches/ui-settings-other/verify-settings-other.mjs         # settings-other host + client 验证
