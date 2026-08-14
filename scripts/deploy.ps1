@@ -1,11 +1,11 @@
-﻿# dsh-dev deploy script - sync self-owned assets to dsh runtime dir
+# deep-dreaming deploy script - sync self-owned assets to dsh runtime dir
 # Usage: powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 $ErrorActionPreference = 'Stop'
 
-$dev = Split-Path -Parent $PSScriptRoot          # D:\GitHub\dsh-dev
+$dev = Split-Path -Parent $PSScriptRoot          # D:\GitHub\deep-dreaming
 $dshHome = Join-Path $env:USERPROFILE '.dsh'     # ~/.dsh
 
-Write-Host '== dsh-dev deploy ==' -ForegroundColor Cyan
+Write-Host '== deep-dreaming deploy ==' -ForegroundColor Cyan
 
 # 1. Sync plugins to ~/.dsh/plugins/
 $pluginsDir = Join-Path $dshHome 'plugins'

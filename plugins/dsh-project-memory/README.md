@@ -1,0 +1,81 @@
+# dsh-project-memory
+
+文档化跨会话项目记忆插件。会话中产生的确定性项目知识(重要决策、约定/规范、踩坑经验、接口与数据结构事实)由 Agent 自行判断,以 Markdown 笔记(带 `keywords` / `usage_scenario` 元数据)保存到项目根目录的 `.dsh-memory/` 下;后续会话中 Agent 可以检索这些记忆,让记忆跨会话生效。
+
+## 工作方式
+
+1. **常驻指令**(注入每个会话的 system prompt):
+   - 开始实质性工作前 → 先调用 `project_memory_search` 检索既有记忆,遵循既有约定;
+   - 完成产生确定性知识的工作后 → 调用 `project_memory_save` 记录(同主题更新而非重复新建)。
+2. **三个工具**(每个会话可见):
+   - `project_memory_save` — 保存/更新一条记忆笔记
+   - `project_memory_search` — 按关键词/标题/使用场景/正文检索记忆(中文分词友好:ASCII 词 + CJK 单字/二元组)
+   - `project_memory_list` — 浏览全部记忆(可按分类过滤)
+3. **会话完成自动回顾**(配置 `autoReview`,默认开):每轮用户消息被完整回答后,插件向 Agent 发送一条简短回顾消息,由 Agent 自行判断本轮是否产生值得记录的知识;无价值时回复"无需记录"。子代理会话与未完成(中断/出错)的轮次不会触发。
+4. **自动更新**:保存同主题笔记即更新(自动沿用已有分类,不产生重复);每次保存/更新都会"再次确认"该记忆(usage_count +1)。
+5. **重复清理与相似合并**(配置 `autoDedupe`,默认开):每次保存后自动扫描全库,命中以下任一规则即合并为一篇(保留使用次数最多、其次最早的原笔记;被合并笔记的关键词、使用场景、正文并集后删除):
+   - 标题相似度 ≥ 0.8;
+   - 内容相似度 ≥ `mergeContentThreshold`(默认 0.55);
+   - 内容包含度 ≥ 0.9(一篇正文几乎是另一篇的副本)。
+6. **成熟度**(配置 `trackUsage`,默认开):每条记忆带 `usage_count`(保存/更新确认 +1,检索命中 +1),映射为成熟度等级 `new(0-1)` → `developing(2-4)` → `mature(5-9)` → `authoritative(10+)`。检索/列表结果标注成熟度与使用次数,常驻指令提示 Agent:成熟度越高越值得采信,但任何记忆都可能过时,采信前仍应结合当前代码核对。
+
+## 笔记格式
+
+参考 Qoder 记忆格式(YAML front matter + 正文),存放在 `<项目根>/.dsh-memory/<分类>/<标题>.md`:
+
+```markdown
+---
+title: "禁止使用全限定类名"
+category: "development_code_specification"
+usage_scenario:
+    - "代码审查时检查是否存在冗余全限定类名"
+    - "重构代码时清理import后残留的全限定引用"
+keywords:
+    - "全限定类名"
+    - "import"
+    - "代码风格"
+usage_count: 3
+updated_at: "2026-08-14T12:00:00.000Z"
+---
+
+禁止在代码中使用全限定类名(如java.util.Map),当已通过import导入对应类时,应统一使用短类名(如Map)。
+```
+
+- 项目根 = 会话所属工作区目录(会话 header 的 cwd)
+- 分类默认 `general`,可用 `project_introduction` / `development_code_specification` / `common_pitfalls_experience` / `project_tech_stack` 等
+- 更新时若省略 category,自动沿用已有笔记的分类,避免产生重复
+
+## 安装
+
+```powershell
+dsh plugin --profile web add D:\GitHub\deep-dreaming\plugins\dsh-project-memory
+```
+
+然后**重启 `dsh web`**(插件在下次启动时随 profile 加载;`dsh plugin` 通过 pnpm 安装到 `~/.dsh/profiles/web`,包内 `dsh.bundle.patch` 声明使其自动进入 profile 的 bundle 层)。
+
+卸载:`dsh plugin --profile web remove dsh-project-memory`,重启生效。
+
+## 配置
+
+默认配置即开即用。如需覆盖,在 `~/.dsh/profiles/web/cordis.patch.yml` 中追加:
+
+```yaml
+- id: project-memory
+  config:
+    autoReview: false            # 关闭会话完成自动回顾(仍可用工具手动记录/检索)
+    memoryDirName: '.dsh-memory' # 记忆目录名
+    autoDedupe: true             # 保存后自动清理重复/合并相似记忆
+    mergeContentThreshold: 0.55  # 内容相似度合并阈值 (0.1..0.95)
+    trackUsage: true             # 检索命中/保存确认计入使用次数(成熟度)
+```
+
+## 测试
+
+```powershell
+# store 纯逻辑单测(无需 dsh 运行时):相似度/合并/成熟度/使用计数等
+node tests/store.test.mjs
+
+# 插件冒烟测试:需要 node_modules 能解析 @deepseek-ai/* 依赖
+# (在插件目录建一个指向 dsh 安装目录 node_modules 的 junction 后运行)
+node tests/plugin.smoke.mjs
+```

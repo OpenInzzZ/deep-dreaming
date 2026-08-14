@@ -1,0 +1,22 @@
+{
+  "name": "dsh-project-memory",
+  "version": "0.1.0",
+  "description": "Documented cross-session project memory for dsh: the agent records durable project knowledge (decisions, conventions, pitfalls, facts) into .dsh-memory/ markdown notes and recalls them in later sessions.",
+  "type": "module",
+  "main": "lib/index.js",
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6"
+  },
+  "license": "MIT"
+}
