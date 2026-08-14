@@ -1,0 +1,12 @@
+# Memorix MCP 记忆插件 —— DeepSeek Harness (dsh) overlay
+# 来源: deepseek-harness/examples/mcp-memory/memorix.cordis.yml
+# 使用: dsh web --patch "C:\Users\zhoukaiying\Documents\Qoder\2026-08-14\chat-1\memorix.cordis.yml"
+- insert:
+    - id: memory-memorix
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: memorix
+        transport: stdio
+        command: memorix
+        args: [serve]
+        cwd: !!js process.cwd()

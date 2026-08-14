@@ -1,0 +1,18 @@
+# Engram MCP 记忆插件 —— 跨多 Git 仓库，按启动目录作为记忆项目
+# 版本: v1.20.0（deepseek-harness 官方验证 pin）
+# 二进制: D:\Environment\engram\engram.exe
+# 项目身份: 优先 ENGRAM_PROJECT 环境变量，否则用 dsh 启动目录名（如 taikoo-saas）
+# 数据存储: ~/.engram（可用 ENGRAM_DATA_DIR 覆盖）
+- insert:
+    - id: memory-engram
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: engram
+        transport: stdio
+        command: D:\Environment\engram\engram.exe
+        args: [mcp, --tools=agent]
+        cwd: !!js process.cwd()
+        env:
+          ENGRAM_PROJECT: !!js >-
+            process.env.ENGRAM_PROJECT?.trim() ||
+            process.getBuiltinModule('node:path').basename(process.cwd())
