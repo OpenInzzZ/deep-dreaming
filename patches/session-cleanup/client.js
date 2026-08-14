@@ -13,7 +13,7 @@
  * The card renders nothing while the namespace is unavailable (a deployment
  * without the Host plugin shows no trace), mirroring the shipped cards.
  */
-window.__ModuleLoader__.load({ id: '@local/dsh-plugin-session-cleanup/client', factory: (require) => {
+window.__ModuleLoader__.load({ id: '@local/dsh-plugin-session-cleanup', factory: (require) => {
 var module = { exports: {} }; var exports = module.exports;
 
 const React = require('react');
@@ -84,6 +84,7 @@ const zh = {
   invalidNumber: '请输入有效数字',
   overridden: '已覆盖',
   reset: '重置',
+  resetAll: '恢复默认',
   enabled: '启用',
   enabledHint: '关闭后停止定期清理。',
   maxAgeDays: '保留天数',
@@ -115,6 +116,7 @@ const en = {
   invalidNumber: 'Enter a valid number',
   overridden: 'Overridden',
   reset: 'Reset',
+  resetAll: 'Restore defaults',
   enabled: 'Enabled',
   enabledHint: 'Turn off to stop periodic cleanup.',
   maxAgeDays: 'Max age (days)',
@@ -135,7 +137,7 @@ const en = {
 const NS = 'session-cleanup.card';
 
 /** Services required by the card registration. */
-const inject = ['slots', 'locale', 'settingsScope'];
+const inject = ['slots', 'locale', 'connection'];
 
 /** Field descriptors: which knob the card renders and how to parse it. */
 const FIELDS = [
@@ -184,22 +186,26 @@ function Field({ field, label, hint, text, overridden, invalid, disabled, onChan
   ] });
 }
 
-/** The configuration card shown in 插件配置. */
-function SessionCleanupCard({ t, scope }) {
-  const snapshot = useSyncExternalStore(scope.subscribe, scope.getSnapshot);
+/** The configuration card shown in 插件配置 / 插件管理. */
+function SessionCleanupCard({ t, getConfig, setConfig, resetConfig }) {
+  const [config, setConfigState] = useState({ status: 'loading' });
   const [open, setOpen] = useState(false);
   const [staged, setStaged] = useState(null);
   const [saving, setSaving] = useState(false);
   const [failed, setFailed] = useState(false);
-  const revision = snapshot.revision;
 
-  // External changes drop unsaved staged edits (the Host applied them already).
-  useEffect(() => { setStaged(null) }, [revision]);
+  useEffect(() => {
+    let current = true
+    void Promise.resolve().then(() => getConfig()).then(
+      (value) => { if (current) setConfigState({ status: 'ready', value }) },
+      () => { if (current) setConfigState({ status: 'error' }) },
+    )
+    return () => { current = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  if (snapshot.status !== 'ready') return null;
-  const value = snapshot.value ?? {};
-  const writable = snapshot.writable;
-  const user = snapshot.user ?? {};
+  if (config.status !== 'ready') return null;
+  const value = config.value ?? {};
   const dirty = staged !== null && Object.keys(staged).length > 0;
   const invalid = staged !== null && Object.entries(staged).some(([key, text]) => {
     const field = FIELDS.find((candidate) => candidate.key === key)
@@ -217,30 +223,34 @@ function SessionCleanupCard({ t, scope }) {
     if (current === undefined || current === null) return ''
     return String(current)
   };
-  const overriddenOf = (key) => Object.prototype.hasOwnProperty.call(user, key);
   const edit = (key, text) => {
     setFailed(false)
     setStaged((current) => ({ ...(current ?? {}), [key]: text }))
-  };
-  const resetField = (key) => {
-    setFailed(false)
-    setStaged((current) => {
-      const next = { ...(current ?? {}) }
-      delete next[key]
-      return next
-    })
-    void scope.unset(key).catch(() => { setFailed(true) })
   };
   const discard = () => { setStaged(null); setFailed(false) };
   const save = async () => {
     if (staged === null) return
     setSaving(true); setFailed(false)
     try {
+      const parsed = {}
       for (const [key, text] of Object.entries(staged)) {
         const field = FIELDS.find((candidate) => candidate.key === key)
-        const parsed = field?.type === 'number' ? Number(text) : field?.type === 'boolean' ? text === 'true' : text
-        await scope.set(key, parsed)
+        parsed[key] = field?.type === 'number' ? Number(text) : field?.type === 'boolean' ? text === 'true' : text
       }
+      const next = await setConfig(parsed)
+      setConfigState({ status: 'ready', value: next })
+      setStaged(null)
+    } catch {
+      setFailed(true)
+    } finally {
+      setSaving(false)
+    }
+  };
+  const resetAll = async () => {
+    setSaving(true); setFailed(false)
+    try {
+      const next = await resetConfig()
+      setConfigState({ status: 'ready', value: next })
       setStaged(null)
     } catch {
       setFailed(true)
@@ -266,42 +276,68 @@ function SessionCleanupCard({ t, scope }) {
       ],
     }, 'header'),
     open ? jsxs('div', { className: 'sc-body', children: [
-      !writable ? jsx('p', { className: 'sc-hint', role: 'status', children: t('readOnly') }, 'readonly') : null,
       FIELDS.map((field) => jsx(Field, {
         field,
         label: t(field.key),
         hint: t(field.key + 'Hint'),
         text: textOf(field.key),
-        overridden: overriddenOf(field.key),
+        overridden: false,
         invalid: staged !== null && field.key in staged && field.type === 'number'
           ? !(Number.isFinite(Number(staged[field.key])) && Number(staged[field.key]) >= 0)
           : false,
-        disabled: !writable || saving,
+        disabled: saving,
         onChange: (text) => { edit(field.key, text) },
-        onReset: () => { resetField(field.key) },
+        onReset: () => {},
         t,
       }, field.key)),
       jsxs('div', { className: 'sc-footer', children: [
         failed ? jsx('p', { className: 'sc-failed', role: 'status', children: t('saveFailed') }, 'failed') : null,
         jsx('button', { type: 'button', className: 'sc-discard', disabled: !dirty || saving, onClick: discard, children: t('discard') }, 'discard'),
+        jsx('button', { type: 'button', className: 'sc-discard', disabled: saving, onClick: () => { void resetAll() }, children: t('resetAll') }, 'reset-all'),
         jsx('button', { type: 'button', className: 'sc-save', disabled: blocked, onClick: () => { void save() }, children: saving ? t('saving') : t('save') }, 'save'),
       ] }, 'footer'),
     ] }, 'body') : null,
   ] });
 }
 
-/** Contribute the cleanup configuration card into 插件配置. */
+/** Contribute the cleanup configuration card into 插件配置 + 插件管理. */
 function apply(ctx) {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'session-cleanup: card dictionaries')
 
-  const scope = ctx.settingsScope.bind({ namespace: 'session-cleanup' })
+  const getConfig = async () => {
+    const result = await ctx.connection.rpc.call('/session-cleanup', 'getConfig', { args: {} })
+    if (!result.ok) throw new Error(result.error.code + ': ' + result.error.message)
+    return result.value
+  }
+  const setConfig = async (fields) => {
+    const result = await ctx.connection.rpc.call('/session-cleanup', 'setConfig', { args: { fields } })
+    if (!result.ok) throw new Error(result.error.code + ': ' + result.error.message)
+    return result.value
+  }
+  const resetConfig = async () => {
+    const result = await ctx.connection.rpc.call('/session-cleanup', 'resetConfig', { args: {} })
+    if (!result.ok) throw new Error(result.error.code + ': ' + result.error.message)
+    return result.value
+  }
+  const cardApi = () => ({ getConfig, setConfig, resetConfig })
 
+  // The shipped 插件配置 page (settings.plugin.item).
   ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
     name: 'settings.plugin.item',
-    id: 'session-cleanup',
+    id: '@local/dsh-plugin-session-cleanup',
     order: 30,
     locale: NS,
-    inject: () => ({ scope }),
+    inject: cardApi,
+  }, SessionCleanupCard))
+
+  // The plugin-manager page, keyed by the plugin's module name (the manager
+  // renders this slot with `only: entry.moduleName`).
+  ctx.slots.inject('settings.plugin.manager.item', () => ctx.slots.register({
+    name: 'settings.plugin.manager.item',
+    id: '@local/dsh-plugin-session-cleanup',
+    order: 30,
+    locale: NS,
+    inject: cardApi,
   }, SessionCleanupCard))
 }
 

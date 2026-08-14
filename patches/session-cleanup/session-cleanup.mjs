@@ -22,7 +22,6 @@
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { readdir, rm, stat } from 'node:fs/promises'
-import { installSettingsSection } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
 
 export const name = 'session-cleanup'
@@ -192,19 +191,47 @@ export function summarize(result) {
 }
 
 /**
+ * Register the settings namespace and hand the write scope to `onScope`.
+ * Same contract as dsh-settings' installSettingsSection, plus the scope:
+ * the config RPC writes through it (persisted to settings.yaml), so edits
+ * survive restarts and take effect live via the watcher.
+ */
+function registerConfigSection(ctx, ns, schema, entry, hooks, onScope) {
+  ctx.inject(['settings'], (sctx) => {
+    const scope = sctx.settings.register(ns, schema, { base: entry })
+    hooks.setSource(() => scope.get())
+    sctx.effect(() => () => {
+      hooks.setSource(() => entry)
+      hooks.onChange()
+    })
+    hooks.onChange()
+    scope.watch(() => { hooks.onChange() })
+    onScope(scope)
+  })
+}
+
+/** RPC failure envelope for the config channel. */
+function configError(code, message) {
+  return { ok: false, error: { code, message, details: {} } }
+}
+
+/**
  * Cordis 插件入口: 注入 sessions 服务, 启动时立即清理一次, 之后按
  * intervalMinutes 周期清理。定时器注册为 effect, 插件卸载时自动释放。
  * 配置经 dsh-settings 注册(namespace `session-cleanup`), 设置变更时
  * (onChange) 按新配置重建定时器 —— 即时生效。
+ * 配置经 /session-cleanup RPC 通道读写(getConfig/setConfig/resetConfig),由
+ * 插件管理页的配置卡片调用 —— 不受 dsh 设置白名单(apiproxy)限制。
  */
 export function apply(ctx, config = {}) {
   const cfg = { ...DEFAULTS, ...config }
   if (!cfg.enabled) return
 
-  return ctx.inject(['sessions'], (ctx) => {
+  return ctx.inject(['sessions', 'connection'], (ctx) => {
     const logger = ctx.logger
     /** 当前权威配置: 设置文档 > 组合层 entry; settings 缺失时回退 entry。 */
     let source = () => ({ ...DEFAULTS, ...config })
+    let configScope = null
     let timer = null
     let disposed = false
 
@@ -235,12 +262,42 @@ export function apply(ctx, config = {}) {
       }, current.intervalMinutes * 60_000)
     }
 
-    installSettingsSection(ctx, SETTINGS_NAMESPACE, ConfigSchema, config, {
+    registerConfigSection(ctx, SETTINGS_NAMESPACE, ConfigSchema, config, {
       setSource: (current) => { source = current },
       onChange: start,
-    })
+    }, (scope) => { configScope = scope })
 
     start()
+
+    ctx.connection.rpc.handle('/session-cleanup', async (endpoint, payload) => {
+      if (endpoint === 'getConfig') {
+        return { ok: true, value: source() }
+      }
+      if (configScope === null) {
+        return configError('settings-unavailable', 'settings service is not ready yet')
+      }
+      if (endpoint === 'setConfig') {
+        const fields = payload?.args?.fields
+        if (typeof fields !== 'object' || fields === null || Array.isArray(fields)) {
+          return configError('bad-request', 'fields must be a plain object')
+        }
+        try {
+          await configScope.update(fields)
+          return { ok: true, value: source() }
+        } catch (error) {
+          return configError('settings-rejected', String(error?.message ?? error))
+        }
+      }
+      if (endpoint === 'resetConfig') {
+        try {
+          await configScope.replace({})
+          return { ok: true, value: source() }
+        } catch (error) {
+          return configError('settings-rejected', String(error?.message ?? error))
+        }
+      }
+      return configError('bad-request', `unknown endpoint: ${endpoint}`)
+    }, { authority: 'loopback' })
 
     return ctx.effect(() => () => {
       disposed = true

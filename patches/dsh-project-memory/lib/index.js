@@ -350,8 +350,9 @@ function installReview(ctx, autoReview) {
 		const state = stateFor(agent);
 		if (event.type === "user/message") {
 			// The review followup itself is a user/message with kind "memory";
-			// it must not arm another review.
-			if (event.data.message?.source?.kind !== "memory") state.pending = true;
+			// it must not arm another review. The event data IS the message
+			// object (source sits on `data.source`, not `data.message.source`).
+			if (event.data.source?.kind !== "memory") state.pending = true;
 		} else if (event.type === "turn/end") {
 			state.reviewing = false;
 			// Only review work that finished cleanly; aborted/error/max-tokens

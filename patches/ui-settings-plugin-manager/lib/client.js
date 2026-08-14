@@ -186,7 +186,7 @@ function matches(entry, normalizedQuery) {
 }
 
 /** Render the filterable, categorized current Loader inventory. */
-function PluginManagerSettingsTab({ list, t }) {
+function PluginManagerSettingsTab({ list, t, renderSlot }) {
   const catalogId = useId();
   const [request, setRequest] = useState(0);
   const [query, setQuery] = useState('');
@@ -348,6 +348,11 @@ function PluginManagerSettingsTab({ list, t }) {
                   jsx('dd', { children: status }, 'dd-cordis'),
                 ] }, 'cordis-row') : null,
               ] }, 'details'),
+              // Config cards contributed by the plugin itself (keyed by its
+              // module name) — the shipped settings whitelist would refuse
+              // custom namespaces, so plugins expose their config over their
+              // own RPC channel and register here.
+              renderSlot('settings.plugin.manager.item', {}, { only: entry.moduleName }),
             ] }, 'details-body') : null,
           ],
         }, entry.entryId)
@@ -377,6 +382,10 @@ function apply(ctx) {
     label: () => t('tab'),
     locale: NS,
     inject: injected,
+    children: { 'settings.plugin.manager.item': {
+      kind: 'list',
+      scope: 'root',
+    } },
   }, PluginManagerSettingsTab))
 }
 

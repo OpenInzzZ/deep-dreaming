@@ -196,6 +196,7 @@ const zhCard = {
   invalidNumber: '请输入有效数字',
   overridden: '已覆盖',
   reset: '重置',
+  resetAll: '恢复默认',
   idleEnabled: '启用空闲自动停止',
   idleEnabledHint: '关闭后服务不会自动停止。',
   idleMinutes: '空闲时长 (分钟)',
@@ -217,6 +218,7 @@ const enCard = {
   invalidNumber: 'Enter a valid number',
   overridden: 'Overridden',
   reset: 'Reset',
+  resetAll: 'Restore defaults',
   idleEnabled: 'Idle auto-stop',
   idleEnabledHint: 'When off, the service never stops automatically.',
   idleMinutes: 'Idle minutes',
@@ -228,7 +230,7 @@ const NS = 'settings.other';
 const CARD_NS = 'settings.other.card';
 
 /** Services required by the registrations. */
-const inject = ['slots', 'locale', 'connection', 'settingsScope'];
+const inject = ['slots', 'locale', 'connection'];
 
 /** Compact duration formatting (labels via t()). */
 function formatUptime(t, seconds) {
@@ -446,22 +448,26 @@ function SettingsField({ field, label, hint, text, overridden, invalid, disabled
   ] });
 }
 
-/** The configuration card shown in 插件配置 (idle auto-stop settings). */
-function ServiceSettingsCard({ t, scope }) {
-  const snapshot = useSyncExternalStore((listener) => scope.subscribe(listener), () => scope.getSnapshot());
+/** The configuration card shown in 插件配置 / 插件管理 (idle auto-stop settings). */
+function ServiceSettingsCard({ t, getConfig, setConfig, resetConfig }) {
+  const [config, setConfigState] = useState({ status: 'loading' });
   const [open, setOpen] = useState(false);
   const [staged, setStaged] = useState(null);
   const [saving, setSaving] = useState(false);
   const [failed, setFailed] = useState(false);
-  const revision = snapshot.revision;
 
-  // External changes drop unsaved staged edits (the Host applied them already).
-  useEffect(() => { setStaged(null) }, [revision]);
+  useEffect(() => {
+    let current = true
+    void Promise.resolve().then(() => getConfig()).then(
+      (value) => { if (current) setConfigState({ status: 'ready', value }) },
+      () => { if (current) setConfigState({ status: 'error' }) },
+    )
+    return () => { current = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  if (snapshot.status !== 'ready') return null;
-  const value = snapshot.value ?? {};
-  const writable = snapshot.writable;
-  const user = snapshot.user ?? {};
+  if (config.status !== 'ready') return null;
+  const value = config.value ?? {};
   const dirty = staged !== null && Object.keys(staged).length > 0;
   const invalid = staged !== null && Object.entries(staged).some(([key, text]) => {
     const field = CARD_FIELDS.find((candidate) => candidate.key === key)
@@ -479,30 +485,34 @@ function ServiceSettingsCard({ t, scope }) {
     if (current === undefined || current === null) return ''
     return String(current)
   };
-  const overriddenOf = (key) => Object.prototype.hasOwnProperty.call(user, key);
   const edit = (key, text) => {
     setFailed(false)
     setStaged((current) => ({ ...(current ?? {}), [key]: text }))
-  };
-  const resetField = (key) => {
-    setFailed(false)
-    setStaged((current) => {
-      const next = { ...(current ?? {}) }
-      delete next[key]
-      return next
-    })
-    void scope.unset(key).catch(() => { setFailed(true) })
   };
   const discard = () => { setStaged(null); setFailed(false) };
   const save = async () => {
     if (staged === null) return
     setSaving(true); setFailed(false)
     try {
+      const parsed = {}
       for (const [key, text] of Object.entries(staged)) {
         const field = CARD_FIELDS.find((candidate) => candidate.key === key)
-        const parsed = field?.type === 'number' ? Number(text) : field?.type === 'boolean' ? text === 'true' : text
-        await scope.set(key, parsed)
+        parsed[key] = field?.type === 'number' ? Number(text) : field?.type === 'boolean' ? text === 'true' : text
       }
+      const next = await setConfig(parsed)
+      setConfigState({ status: 'ready', value: next })
+      setStaged(null)
+    } catch {
+      setFailed(true)
+    } finally {
+      setSaving(false)
+    }
+  };
+  const resetAll = async () => {
+    setSaving(true); setFailed(false)
+    try {
+      const next = await resetConfig()
+      setConfigState({ status: 'ready', value: next })
       setStaged(null)
     } catch {
       setFailed(true)
@@ -528,24 +538,24 @@ function ServiceSettingsCard({ t, scope }) {
       ],
     }, 'header'),
     open ? jsxs('div', { className: 'soc-body', children: [
-      !writable ? jsx('p', { className: 'soc-hint', role: 'status', children: t('readOnly') }, 'readonly') : null,
       CARD_FIELDS.map((field) => jsx(SettingsField, {
         field,
         label: t(field.key),
         hint: t(field.key + 'Hint'),
         text: textOf(field.key),
-        overridden: overriddenOf(field.key),
+        overridden: false,
         invalid: staged !== null && field.key in staged && field.type === 'number'
           ? !(Number.isFinite(Number(staged[field.key])) && Number(staged[field.key]) >= 1)
           : false,
-        disabled: !writable || saving,
+        disabled: saving,
         onChange: (text) => { edit(field.key, text) },
-        onReset: () => { resetField(field.key) },
+        onReset: () => {},
         t,
       }, field.key)),
       jsxs('div', { className: 'soc-footer', children: [
         failed ? jsx('p', { className: 'soc-failed', role: 'status', children: t('saveFailed') }, 'failed') : null,
         jsx('button', { type: 'button', className: 'soc-discard', disabled: !dirty || saving, onClick: discard, children: t('discard') }, 'discard'),
+        jsx('button', { type: 'button', className: 'soc-discard', disabled: saving, onClick: () => { void resetAll() }, children: t('resetAll') }, 'reset-all'),
         jsx('button', { type: 'button', className: 'soc-save', disabled: blocked, onClick: () => { void save() }, children: saving ? t('saving') : t('save') }, 'save'),
       ] }, 'footer'),
     ] }, 'body') : null,
@@ -582,13 +592,41 @@ function apply(ctx) {
     inject: injected,
   }, OtherSection))
 
-  const scope = ctx.settingsScope.bind({ namespace: 'ui-settings-other' })
+  const cardApi = () => ({
+    getConfig: async () => {
+      const result = await ctx.connection.rpc.call('/app', 'getSettings', { args: {} })
+      if (!result.ok) throw new Error(result.error.code + ': ' + result.error.message)
+      return result.value
+    },
+    setConfig: async (fields) => {
+      const result = await ctx.connection.rpc.call('/app', 'setSettings', { args: { fields } })
+      if (!result.ok) throw new Error(result.error.code + ': ' + result.error.message)
+      return result.value
+    },
+    resetConfig: async () => {
+      const result = await ctx.connection.rpc.call('/app', 'resetSettings', { args: {} })
+      if (!result.ok) throw new Error(result.error.code + ': ' + result.error.message)
+      return result.value
+    },
+  })
+
+  // The shipped 插件配置 page (settings.plugin.item).
   ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
     name: 'settings.plugin.item',
-    id: 'ui-settings-other',
+    id: '@local/dsh-client-ui-settings-other',
     order: 30,
     locale: CARD_NS,
-    inject: () => ({ scope }),
+    inject: cardApi,
+  }, ServiceSettingsCard))
+
+  // The plugin-manager page, keyed by the plugin's module name (the manager
+  // renders this slot with `only: entry.moduleName`).
+  ctx.slots.inject('settings.plugin.manager.item', () => ctx.slots.register({
+    name: 'settings.plugin.manager.item',
+    id: '@local/dsh-client-ui-settings-other',
+    order: 30,
+    locale: CARD_NS,
+    inject: cardApi,
   }, ServiceSettingsCard))
 }
 

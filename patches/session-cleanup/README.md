@@ -67,11 +67,16 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 配置来源(优先级从低到高):schema 默认值 < 组合层条目配置
 (`cordis.patch.yml` 的 `config`)< 设置文档用户层。**推荐在界面配置**:
 
-1. 打开 dsh Web → **设置** → **插件** → **插件配置** 标签页;
+1. 打开 dsh Web → **设置** → **插件** → **插件配置** 标签页(或 **插件管理**
+   页展开本插件卡片);
 2. 找到 **会话清理** 卡片,展开即可编辑全部字段;
 3. 修改后点 **保存** —— 配置写入 `~/.dsh/settings.yaml`(namespace
    `session-cleanup`),**即时生效**(定时器按新间隔重建,保存即触发一次
-   清理);点字段旁的 **重置** 可回退到组合层配置。
+   清理);点 **恢复默认** 可整体回退到组合层配置。
+
+> 配置卡片经插件自身的 `/session-cleanup` RPC 通道读写(getConfig /
+> setConfig / resetConfig),不依赖 dsh 设置的暴露白名单(apiproxy),
+> 因此在「插件配置」与「插件管理」两个页面均可编辑。
 
 > 手动编辑 `~/.dsh/settings.yaml` 同样生效(文件被监听,改动即重载):
 >

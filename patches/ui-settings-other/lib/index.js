@@ -42,7 +42,6 @@ import { spawn, execFileSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join, isAbsolute, dirname, resolve } from 'node:path'
 import { statSync, readFileSync } from 'node:fs'
-import { installSettingsSection } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
 
 export const SETTINGS_NAMESPACE = 'ui-settings-other'
@@ -200,6 +199,31 @@ function pickSettings(config) {
 
 let restarting = false
 
+/**
+ * Register the settings namespace and hand the write scope to `onScope`.
+ * Same contract as dsh-settings' installSettingsSection, plus the scope:
+ * the config RPC writes through it (persisted to settings.yaml), so edits
+ * survive restarts and take effect live via the watcher.
+ */
+function registerConfigSection(ctx, ns, schema, entry, hooks, onScope) {
+  ctx.inject(['settings'], (sctx) => {
+    const scope = sctx.settings.register(ns, schema, { base: entry })
+    hooks.setSource(() => scope.get())
+    sctx.effect(() => () => {
+      hooks.setSource(() => entry)
+      hooks.onChange()
+    })
+    hooks.onChange()
+    scope.watch(() => { hooks.onChange() })
+    onScope(scope)
+  })
+}
+
+/** RPC failure envelope for the config endpoints. */
+function settingsError(code, message) {
+  return { ok: false, error: { code, message, details: {} } }
+}
+
 /** Cordis plugin entry: register the `/app` RPC channel + the idle monitor. */
 export function apply(ctx, config = {}) {
   const settingsEntry = pickSettings(config)
@@ -207,6 +231,7 @@ export function apply(ctx, config = {}) {
   return ctx.inject(['connection', 'agents'], (ctx) => {
     const logger = ctx.logger
     let source = () => ({ ...DEFAULTS, ...settingsEntry })
+    let configScope = null
     let monitorApi = null
 
     const busyFailure = (sessions) => ({
@@ -249,13 +274,41 @@ export function apply(ctx, config = {}) {
       })
     }
 
-    installSettingsSection(ctx, SETTINGS_NAMESPACE, ConfigSchema, settingsEntry, {
+    registerConfigSection(ctx, SETTINGS_NAMESPACE, ConfigSchema, settingsEntry, {
       setSource: (current) => { source = current },
       onChange: rebuildMonitor,
-    })
+    }, (scope) => { configScope = scope })
     rebuildMonitor()
-
     return ctx.connection.rpc.handle('/app', async (endpoint, payload) => {
+      if (endpoint === 'getSettings') {
+        return { ok: true, value: source() }
+      }
+      if (endpoint === 'setSettings') {
+        if (configScope === null) {
+          return settingsError('settings-unavailable', 'settings service is not ready yet')
+        }
+        const fields = payload?.args?.fields
+        if (typeof fields !== 'object' || fields === null || Array.isArray(fields)) {
+          return settingsError('bad-request', 'fields must be a plain object')
+        }
+        try {
+          await configScope.update(fields)
+          return { ok: true, value: source() }
+        } catch (error) {
+          return settingsError('settings-rejected', String(error?.message ?? error))
+        }
+      }
+      if (endpoint === 'resetSettings') {
+        if (configScope === null) {
+          return settingsError('settings-unavailable', 'settings service is not ready yet')
+        }
+        try {
+          await configScope.replace({})
+          return { ok: true, value: source() }
+        } catch (error) {
+          return settingsError('settings-rejected', String(error?.message ?? error))
+        }
+      }
       if (endpoint === 'status') {
         const sessions = runningSessionIds(ctx.agents)
         const current = source()

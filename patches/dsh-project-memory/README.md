@@ -53,6 +53,17 @@ dsh plugin --profile web add D:\GitHub\deep-dreaming\patches\dsh-project-memory
 # corepack pnpm --dir "$env:USERPROFILE\.dsh\profiles\web" add D:\GitHub\deep-dreaming\patches\dsh-project-memory
 ```
 
+**再为插件目录建立宿主依赖链接**。插件代码 import `@deepseek-ai/*`(宿主包,
+位于 `~/.dsh/profiles/node_modules`);插件虽以 junction 装进 profile,Node 仍
+按仓库侧真实路径解析依赖,仓库树内必须暴露宿主 node_modules,否则 `dsh web`
+启动会在插件树加载阶段报 `Cannot find package '@deepseek-ai/dsh-llm' ...
+(ERR_MODULE_NOT_FOUND)`:
+
+```powershell
+New-Item -ItemType Junction -Path "D:\GitHub\deep-dreaming\patches\dsh-project-memory\node_modules" -Target "$env:USERPROFILE\.dsh\profiles\node_modules"
+# 或直接运行仓库根目录的 deploy.ps1,自动为所有需要宿主依赖的插件补齐/修复该链接
+```
+
 然后**在 `~/.dsh/profiles/web/cordis.patch.yml` 追加启用条目**(pnpm 安装
 不会自动把用户级插件注册进 bundle 层):
 
@@ -121,6 +132,7 @@ dsh plugin --profile web add D:\GitHub\deep-dreaming\patches\dsh-project-memory
 node tests/store.test.mjs
 
 # 插件冒烟测试:需要 node_modules 能解析 @deepseek-ai/* 依赖
-# (在插件目录建一个指向 dsh 安装目录 node_modules 的 junction 后运行)
+# (先运行 scripts/deploy.ps1 自动建立链接,或手工建 junction:
+#  node_modules -> ~/.dsh/profiles/node_modules)
 node tests/plugin.smoke.mjs
 ```
