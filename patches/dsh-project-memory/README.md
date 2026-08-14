@@ -49,11 +49,22 @@ updated_at: "2026-08-14T12:00:00.000Z"
 
 ```powershell
 dsh plugin --profile web add D:\GitHub\deep-dreaming\patches\dsh-project-memory
+# 若 pnpm 不在 PATH(dsh plugin 转发 pnpm),可用 corepack:
+# corepack pnpm --dir "$env:USERPROFILE\.dsh\profiles\web" add D:\GitHub\deep-dreaming\patches\dsh-project-memory
 ```
 
-然后**重启 `dsh web`**(插件在下次启动时随 profile 加载;`dsh plugin` 通过 pnpm 安装到 `~/.dsh/profiles/web`,包内 `dsh.bundle.patch` 声明使其自动进入 profile 的 bundle 层)。
+然后**在 `~/.dsh/profiles/web/cordis.patch.yml` 追加启用条目**(pnpm 安装
+不会自动把用户级插件注册进 bundle 层):
 
-卸载:`dsh plugin --profile web remove dsh-project-memory`,重启生效。
+```yaml
+- insert:
+    - id: project-memory
+      name: 'dsh-project-memory'
+```
+
+最后**重启 `dsh web`** 使插件加载(工具、常驻指令、自动回顾随之生效)。
+
+卸载:删除 profile patch 条目 + `dsh plugin --profile web remove dsh-project-memory`,重启生效。
 
 ## 如何使用
 
