@@ -48,7 +48,8 @@
   若端口(默认 3080)已有服务则直接退出(幂等);否则自动定位
   node.exe 与 npx 缓存中最新的 dsh CLI 入口,以 **隐藏窗口** 启动
   `node <bin> web`(日志重定向到 `~/.dsh/logs/dsh-web.<时间戳>.*.log`),
-  并轮询端口直到就绪。
+  并轮询端口直到就绪。支持 `-Port` / `-Force` / `-NodeArgs`
+  (透传额外参数,如 `-Port 3099 -NodeArgs '--port','3099'`)。
 - **`install-desktop-shortcut.ps1`**:在桌面创建 `dsh-web.lnk`,
   目标为 `powershell.exe -WindowStyle Hidden -File …start-dsh.ps1`,
   双击即静默启动(已运行时为无操作)。
