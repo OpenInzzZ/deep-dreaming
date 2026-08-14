@@ -11,7 +11,8 @@
 param(
     [int]$Port = 3080,
     [switch]$Force,
-    [string]$LogDir = (Join-Path $env:USERPROFILE '.dsh\logs')
+    [string]$LogDir = (Join-Path $env:USERPROFILE '.dsh\logs'),
+    [string[]]$NodeArgs = @()
 )
 $ErrorActionPreference = 'Stop'
 
@@ -51,12 +52,12 @@ $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $outLog = Join-Path $LogDir "dsh-web.$stamp.out.log"
 $errLog = Join-Path $LogDir "dsh-web.$stamp.err.log"
 try {
-    $started = Start-Process -FilePath $node -ArgumentList @($bin, 'web') -WindowStyle Hidden `
+    $started = Start-Process -FilePath $node -ArgumentList (@($bin, 'web') + $NodeArgs) -WindowStyle Hidden `
         -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
 } catch {
     # Log redirection can be unavailable in some sandboxes; fall back to a bare start.
     Log "log redirection failed ($($_.Exception.Message)); starting without logs"
-    $started = Start-Process -FilePath $node -ArgumentList @($bin, 'web') -WindowStyle Hidden -PassThru
+    $started = Start-Process -FilePath $node -ArgumentList (@($bin, 'web') + $NodeArgs) -WindowStyle Hidden -PassThru
 }
 Log "started dsh web PID $($started.Id) (hidden window)"
 Log "logs: $outLog / $errLog"

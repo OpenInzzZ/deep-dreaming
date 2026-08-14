@@ -202,11 +202,9 @@ let restarting = false
 
 /** Cordis plugin entry: register the `/app` RPC channel + the idle monitor. */
 export function apply(ctx, config = {}) {
-  console.log('[probe] ui-settings-other apply top-level')
   const settingsEntry = pickSettings(config)
 
   return ctx.inject(['connection', 'agents'], (ctx) => {
-    console.log('[probe] ui-settings-other inject(connection,agents) callback')
     const logger = ctx.logger
     let source = () => ({ ...DEFAULTS, ...settingsEntry })
     let monitorApi = null
@@ -238,7 +236,6 @@ export function apply(ctx, config = {}) {
 
     /** (Re)build the idle monitor from the current source (settings > entry). */
     const rebuildMonitor = () => {
-      console.log('[probe] ui-settings-other rebuildMonitor (settings registered)')
       if (monitorApi !== null) {
         monitorApi.stop()
         monitorApi = null
