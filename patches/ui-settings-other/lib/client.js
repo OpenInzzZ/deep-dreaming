@@ -20,7 +20,7 @@ window.__ModuleLoader__.load({ id: '@local/dsh-client-ui-settings-other', factor
 var module = { exports: {} }; var exports = module.exports;
 
 const React = require('react');
-const { useState } = React;
+const { useEffect, useState } = React;
 const { jsx, jsxs } = require('react/jsx-runtime');
 
 const PLUGIN_ID = '@local/dsh-client-ui-settings-other';
@@ -66,6 +66,10 @@ const zh = {
   scheduled: '已请求重启,服务即将断开,请稍后刷新页面。',
   error: '重启请求失败,请重试。',
   retry: '重试',
+  busy: '有 {n} 个会话正在运行,重启会中断它们。',
+  busyActionWait: '等待空闲后重启',
+  busyActionForce: '强制重启',
+  waiting: '等待会话结束…(剩余 {n})',
 };
 
 /** English dictionary checked against the Chinese key set. */
@@ -81,6 +85,10 @@ const en = {
   scheduled: 'Restart requested. The service is disconnecting; refresh the page shortly.',
   error: 'The restart request failed. Please try again.',
   retry: 'Retry',
+  busy: '{n} session(s) are running; restarting will interrupt them.',
+  busyActionWait: 'Restart when idle',
+  busyActionForce: 'Force restart',
+  waiting: 'Waiting for sessions… ({n} remaining)',
 };
 
 /** Dictionary namespace owned by this plugin. */
@@ -89,16 +97,55 @@ const NS = 'settings.other';
 /** Services required by the Settings registration. */
 const inject = ['slots', 'locale', 'connection'];
 
-/** Phase state machine: idle -> confirm -> calling -> scheduled | error. */
-function OtherSection({ restart, t }) {
+/**
+ * Phase state machine:
+ *   idle -> confirm -> calling -> scheduled | error
+ *   idle -> busy (sessions running) -> waiting (poll until idle) | calling(force)
+ */
+function OtherSection({ restart, status, t }) {
   const [phase, setPhase] = useState('idle');
+  const [busyInfo, setBusyInfo] = useState(null);
+  const [waitTimer, setWaitTimer] = useState(null);
 
-  const trigger = () => {
+  useEffect(() => () => {
+    if (waitTimer !== null) clearInterval(waitTimer);
+  }, [waitTimer]);
+
+  const trigger = (force) => {
     setPhase('calling')
-    void Promise.resolve().then(() => restart()).then(
-      (ok) => { setPhase(ok ? 'scheduled' : 'error') },
+    void Promise.resolve().then(() => restart(force)).then(
+      (result) => {
+        if (result.scheduled) setPhase('scheduled')
+        else if (result.busy) { setBusyInfo(result.busy); setPhase('busy') }
+        else setPhase('error')
+      },
       () => { setPhase('error') },
     )
+  };
+
+  const startWaiting = () => {
+    setPhase('waiting')
+    const timer = setInterval(() => {
+      void Promise.resolve().then(() => status()).then(
+        (value) => {
+          if (value.running === 0) {
+            clearInterval(timer)
+            setWaitTimer(null)
+            trigger(false)
+          } else {
+            setBusyInfo({ running: value.running })
+          }
+        },
+        () => { /* transient poll failure: keep waiting */ },
+      )
+    }, 2000)
+    setWaitTimer(timer)
+  };
+
+  const stopWaiting = () => {
+    if (waitTimer !== null) clearInterval(waitTimer)
+    setWaitTimer(null)
+    setPhase('idle')
   };
 
   const tone = phase === 'error' ? 'error' : phase === 'scheduled' ? 'ok' : undefined;
@@ -111,7 +158,7 @@ function OtherSection({ restart, t }) {
         phase === 'confirm'
           ? jsxs(React.Fragment, { children: [
               jsx('span', { className: 'so-status', 'data-tone': 'error', children: t('confirmPrompt') }, 'prompt'),
-              jsx('button', { type: 'button', className: 'so-btn so-danger', onClick: trigger, children: t('confirm') }, 'confirm'),
+              jsx('button', { type: 'button', className: 'so-btn so-danger', onClick: () => { trigger(false) }, children: t('confirm') }, 'confirm'),
               jsx('button', { type: 'button', className: 'so-btn', onClick: () => { setPhase('idle') }, children: t('cancel') }, 'cancel'),
             ] }, 'confirm-row')
           : jsx('button', {
@@ -121,6 +168,20 @@ function OtherSection({ restart, t }) {
               onClick: () => { if (phase === 'idle') setPhase('confirm') },
               children: phase === 'calling' ? t('restarting') : t('restart'),
             }, 'restart'),
+        phase === 'busy' || phase === 'waiting'
+          ? jsxs(React.Fragment, { children: [
+              jsx('span', { className: 'so-status', 'data-tone': 'error', children: phase === 'waiting'
+                ? t('waiting', { n: busyInfo?.running ?? 0 })
+                : t('busy', { n: busyInfo?.running ?? 0 }) }, 'busy-status'),
+              phase === 'busy'
+                ? jsx('button', { type: 'button', className: 'so-btn', onClick: startWaiting, children: t('busyActionWait') }, 'wait')
+                : null,
+              phase === 'busy'
+                ? jsx('button', { type: 'button', className: 'so-btn so-danger', onClick: () => { trigger(true) }, children: t('busyActionForce') }, 'force')
+                : null,
+              jsx('button', { type: 'button', className: 'so-btn', onClick: stopWaiting, children: t('cancel') }, 'busy-cancel'),
+            ] }, 'busy-row')
+          : null,
       ] }, 'row'),
       phase === 'scheduled' || phase === 'error'
         ? jsx('p', { className: 'so-status', 'data-tone': tone, children: phase === 'scheduled' ? t('scheduled') : t('error') }, 'status')
@@ -137,14 +198,20 @@ function apply(ctx) {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-settings-other: dictionaries')
 
   const t = ctx.locale.bind(NS)
-  const restart = async () => {
-    const result = await ctx.connection.rpc.call('/app', 'restart', { args: {} })
-    if (!result.ok) {
-      throw new Error('restart failed: ' + result.error.code + ': ' + result.error.message)
+  const restart = async (force) => {
+    const result = await ctx.connection.rpc.call('/app', 'restart', { args: force ? { force: true } : {} })
+    if (result.ok) return { scheduled: true }
+    if (result.error.code === 'sessions-running') {
+      return { busy: { running: result.error.details.running } }
     }
-    return true
+    throw new Error('restart failed: ' + result.error.code + ': ' + result.error.message)
   }
-  const injected = () => ({ restart })
+  const status = async () => {
+    const result = await ctx.connection.rpc.call('/app', 'status', { args: {} })
+    if (!result.ok) throw new Error('status failed: ' + result.error.code + ': ' + result.error.message)
+    return result.value
+  }
+  const injected = () => ({ restart, status })
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',

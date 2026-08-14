@@ -40,11 +40,28 @@ const host = await import(pathToFileURL(hostPath).href)
   if (invocation.file !== 'powershell' || invocation.args[3] !== '-File' || invocation.args[4] !== resolved) {
     throw new Error(`spawn invocation: ${JSON.stringify(invocation)}`)
   }
-  console.log('host helpers OK: resolveRestartScript + buildRestartSpawn')
+  const cancelled = []
+  const agents = {
+    list: () => [
+      { id: 'sess-a', status: 'running', cancel: (cause, opts) => cancelled.push({ id: 'sess-a', cause, opts }) },
+      { id: 'sess-b', status: 'idle', cancel: () => cancelled.push({ id: 'sess-b' }) },
+    ],
+    get: (id) => agents.list().find((a) => a.id === id),
+  }
+  const running = host.runningSessionIds(agents)
+  if (running.join(',') !== 'sess-a') throw new Error(`runningSessionIds: ${running}`)
+  console.log('host helpers OK: resolveRestartScript + buildRestartSpawn + runningSessionIds')
 }
 
 let handled = null
 let injected = null
+let cancelled = []
+const fakeAgents = {
+  list: () => [
+    { id: 'sess-a', status: 'running', cancel: (cause, opts) => cancelled.push({ id: 'sess-a', cause, opts }) },
+  ],
+  get: (id) => fakeAgents.list().find((a) => a.id === id),
+}
 const hostCtx = {
   inject: (services, callback) => {
     injected = { services, callback }
@@ -58,6 +75,7 @@ const hostCtx = {
           },
         },
       },
+      agents: fakeAgents,
     }
     return callback(fakeConnectionCtx)
   },
@@ -66,7 +84,7 @@ const hostCtx = {
 // cleanly (script-missing branch) instead of spawning a real restart.
 const MISSING_SCRIPT = 'C:\\__no_such_dir__\\restart-dsh.ps1'
 host.apply(hostCtx, { script: MISSING_SCRIPT })
-if (injected === null || injected.services.join(',') !== 'connection') throw new Error('host inject mismatch')
+if (injected === null || injected.services.join(',') !== 'connection,agents') throw new Error('host inject mismatch')
 if (handled === null || handled.channel !== '/app') throw new Error(`host channel mismatch: ${JSON.stringify(handled)}`)
 if (handled.options.authority !== 'loopback') throw new Error(`host authority mismatch: ${handled.options.authority}`)
 console.log('host contract OK: /app channel, authority = loopback')
@@ -75,12 +93,26 @@ const unknown = await handled.handler('nope', {})
 if (unknown.ok !== false || unknown.error.code !== 'bad-request') throw new Error('unknown endpoint must be rejected')
 console.log('host endpoint validation OK: unknown endpoint -> bad-request')
 
-const missingScript = await handled.handler('restart', {})
-if (missingScript.ok !== false || missingScript.error.code !== 'internal') {
-  throw new Error(`missing script must fail cleanly: ${JSON.stringify(missingScript)}`)
+// status endpoint reflects the running-session count
+const status0 = await handled.handler('status', {})
+if (!status0.ok || status0.value.running !== 1 || status0.value.sessions.join(',') !== 'sess-a') {
+  throw new Error(`status endpoint: ${JSON.stringify(status0)}`)
 }
-if (!missingScript.error.message.includes('restart script not found')) throw new Error('missing-script message unhelpful')
-console.log('host endpoint validation OK: restart without script -> internal (never spawns)')
+console.log('host endpoint validation OK: status reports running sessions')
+
+// restart while a session is running -> refused, nothing cancelled, nothing spawned
+const busy = await handled.handler('restart', { args: {} })
+if (busy.ok !== false || busy.error.code !== 'sessions-running') throw new Error(`busy must be refused: ${JSON.stringify(busy)}`)
+if (busy.error.details.running !== 1) throw new Error('busy details missing running count')
+if (cancelled.length !== 0) throw new Error('non-force restart must not cancel sessions')
+console.log('host endpoint validation OK: restart refused while sessions running')
+
+// force restart cancels the running session first, then fails on the missing script
+const forced = await handled.handler('restart', { args: { force: true } })
+if (forced.ok !== false || forced.error.code !== 'internal') throw new Error(`forced must reach script check: ${JSON.stringify(forced)}`)
+if (cancelled.length !== 1 || cancelled[0].id !== 'sess-a') throw new Error(`force must cancel running sessions: ${JSON.stringify(cancelled)}`)
+if (cancelled[0].opts?.keepInbox !== true) throw new Error('force cancel must keepInbox')
+console.log('host endpoint validation OK: force cancels running sessions (keepInbox) before restart')
 
 // --- client half: jsdom environment (what the browser shell provides) -------
 const dom = new JSDOM('<!doctype html><html><head></head><body><div id="root"></div></body></html>', {
@@ -122,7 +154,9 @@ console.log('exports contract OK:', JSON.stringify(exports_.inject), 'NS =', exp
 
 let registered = null
 let dictionaries = null
-let rpcTarget = null
+let rpcLog = []
+let restartResult = { ok: true, value: { scheduled: true, delayMs: 2600 } }
+let statusValue = { running: 0, sessions: [] }
 const clientCtx = {
   effect: (fn) => fn(),
   locale: {
@@ -131,11 +165,16 @@ const clientCtx = {
   },
   connection: {
     rpc: {
-      call: async (channel, endpoint) => {
-        rpcTarget = { channel, endpoint }
-        return { ok: true, value: { scheduled: true, delayMs: 2600 } }
+      call: async (channel, endpoint, payload) => {
+        rpcLog.push({ channel, endpoint, payload })
+        if (endpoint === 'status') return { ok: true, value: statusValue }
+        if (endpoint === 'restart') return restartResult
+        return { ok: false, error: { code: 'bad-request', message: 'unexpected', details: {} } }
       },
     },
+  },
+  sessions: {
+    scope: () => ({ get: () => ({ updateQueue: async () => {}, input: { for: () => ({ notify: () => {} }) } }) }),
   },
   slots: {
     inject: (_key, callback) => { registered = callback() },
@@ -162,19 +201,28 @@ const { fireEvent } = repoRequire('@testing-library/react')
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 const en = dictionaries.dicts.en
-const root = createRoot(dom.window.document.getElementById('root'))
-const restart = async () => {
-  const result = await clientCtx.connection.rpc.call('/app', 'restart')
-  return result.ok
+const clientInjected = registered.inject('session-1')
+const tWithParams = (key, params) => {
+  const value = en[key]
+  return params && params.n !== undefined ? value.replace('{n}', String(params.n)) : value
+}
+const renderInto = (host, props) => {
+  const root = createRoot(host)
+  return { root, props }
 }
 
+const root = createRoot(dom.window.document.getElementById('root'))
 await act(async () => {
-  root.render(React.createElement(registered.component, { restart, t: (key) => en[key] }))
+  root.render(React.createElement(registered.component, {
+    restart: clientInjected.restart,
+    status: clientInjected.status,
+    t: tWithParams,
+  }))
 })
 
 const doc = dom.window.document
 const buttons = () => [...doc.querySelectorAll('.so-btn')]
-const status = () => doc.querySelector('.so-status')
+const statusLine = () => doc.querySelector('.so-status')
 
 const restartButton = buttons().find((b) => b.textContent === en.restart)
 if (restartButton === undefined) throw new Error('restart button missing')
@@ -183,10 +231,10 @@ console.log('initial render OK: restart button present')
 
 // click -> confirm state (no call yet)
 await act(async () => { fireEvent.click(restartButton) })
-if (rpcTarget !== null) throw new Error('confirm state must not call the host yet')
+if (rpcLog.length !== 0) throw new Error('confirm state must not call the host yet')
 const confirmButton = buttons().find((b) => b.textContent === en.confirm)
 if (confirmButton === undefined) throw new Error('confirm button missing')
-if (status() === null || status().textContent !== en.confirmPrompt) throw new Error('confirm prompt missing')
+if (statusLine() === null || statusLine().textContent !== en.confirmPrompt) throw new Error('confirm prompt missing')
 console.log('confirm state OK')
 
 // cancel returns to idle
@@ -197,11 +245,73 @@ console.log('cancel OK')
 // confirm -> calling -> scheduled; host endpoint + payload shape
 await act(async () => { fireEvent.click(buttons()[0]) })
 await act(async () => { fireEvent.click(buttons().find((b) => b.textContent === en.confirm)) })
-if (rpcTarget === null || rpcTarget.channel !== '/app' || rpcTarget.endpoint !== 'restart') {
-  throw new Error(`rpc target mismatch: ${JSON.stringify(rpcTarget)}`)
+const restartCall = rpcLog.find((c) => c.endpoint === 'restart')
+if (restartCall === undefined || restartCall.channel !== '/app') throw new Error(`rpc target: ${JSON.stringify(restartCall)}`)
+if (JSON.stringify(restartCall.payload.args) !== '{}') throw new Error(`non-force args: ${JSON.stringify(restartCall.payload)}`)
+if (statusLine() === null || statusLine().textContent !== en.scheduled) throw new Error('scheduled status missing')
+console.log('restart flow OK: /app restart RPC (args {}) + scheduled status')
+
+// busy flow: sessions running -> busy view -> force restart passes force: true
+const busyHost = dom.window.document.createElement('div')
+const busyRoot = createRoot(busyHost)
+restartResult = { ok: false, error: { code: 'sessions-running', message: 'x', details: { running: 2, sessions: ['a', 'b'] } } }
+rpcLog = []
+await act(async () => {
+  busyRoot.render(React.createElement(registered.component, {
+    restart: clientInjected.restart,
+    status: clientInjected.status,
+    t: tWithParams,
+  }))
+})
+await act(async () => { fireEvent.click(busyHost.querySelector('.so-btn')) })
+await act(async () => { fireEvent.click([...busyHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.confirm)) })
+const busyLine = busyHost.querySelector('.so-status[data-tone="error"]')
+if (busyLine === null || busyLine.textContent !== en.busy.replace('{n}', '2')) {
+  throw new Error(`busy line: ${busyLine?.textContent}`)
 }
-if (status() === null || status().textContent !== en.scheduled) throw new Error('scheduled status missing')
-console.log('restart flow OK: /app restart RPC + scheduled status')
+const forceButton = [...busyHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.busyActionForce)
+if (forceButton === undefined) throw new Error('force button missing')
+const waitButton = [...busyHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.busyActionWait)
+if (waitButton === undefined) throw new Error('wait button missing')
+rpcLog = []
+await act(async () => { fireEvent.click(forceButton) })
+const forceCall = rpcLog.find((c) => c.endpoint === 'restart')
+if (forceCall === undefined || forceCall.payload.args.force !== true) {
+  throw new Error(`force call args: ${JSON.stringify(forceCall?.payload)}`)
+}
+console.log('busy flow OK: refused -> busy view -> force restart sends force:true')
+
+// wait flow: poll /app/status until idle, then auto-restart
+const waitHost = dom.window.document.createElement('div')
+const waitRoot = createRoot(waitHost)
+restartResult = { ok: false, error: { code: 'sessions-running', message: 'x', details: { running: 1, sessions: ['a'] } } }
+statusValue = { running: 1, sessions: ['a'] }
+rpcLog = []
+await act(async () => {
+  waitRoot.render(React.createElement(registered.component, {
+    restart: clientInjected.restart,
+    status: clientInjected.status,
+    t: tWithParams,
+  }))
+})
+await act(async () => { fireEvent.click(waitHost.querySelector('.so-btn')) })
+await act(async () => { fireEvent.click([...waitHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.confirm)) })
+await act(async () => { fireEvent.click([...waitHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.busyActionWait)) })
+// first status poll fires after the 2s interval
+await new Promise((resolve) => setTimeout(resolve, 2200))
+await act(async () => {})
+const waitingLine = waitHost.querySelector('.so-status')
+if (waitingLine === null || waitingLine.textContent !== en.waiting.replace('{n}', '1')) {
+  throw new Error(`waiting line: ${waitingLine?.textContent}`)
+}
+if (!rpcLog.some((c) => c.endpoint === 'status')) throw new Error('wait flow must poll /app/status')
+// sessions finish -> next poll triggers the auto restart (interval is 2s)
+statusValue = { running: 0, sessions: [] }
+await new Promise((resolve) => setTimeout(resolve, 2200))
+await act(async () => {})
+const autoCall = rpcLog.find((c) => c.endpoint === 'restart')
+if (autoCall === undefined) throw new Error('wait flow must auto-restart once idle')
+console.log('wait flow OK: polls status and auto-restarts when idle')
 
 // error state: host failure surfaces as error copy
 const errorHost = dom.window.document.createElement('div')
@@ -209,7 +319,8 @@ const root2 = createRoot(errorHost)
 await act(async () => {
   root2.render(React.createElement(registered.component, {
     restart: async () => { throw new Error('private detail') },
-    t: (key) => en[key],
+    status: clientInjected.status,
+    t: tWithParams,
   }))
 })
 await act(async () => { fireEvent.click(errorHost.querySelector('.so-btn')) })

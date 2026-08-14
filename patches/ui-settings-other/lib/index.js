@@ -15,6 +15,14 @@
  * independently testable (`-DryRun`) and keeps this host entry a thin,
  * dependency-free trigger.
  *
+ * Session safety: a restart kills the service process, which interrupts every
+ * RUNNING agent session. To keep restarts from silently breaking in-flight
+ * work the endpoint refuses to restart while sessions are running unless the
+ * caller passes `force: true`, in which case each running agent is cancelled
+ * first (`keepInbox` preserves pending queued work) so sessions are left in a
+ * resumable state. A companion `status` endpoint reports the running-session
+ * count for the UI's wait-until-idle flow.
+ *
  * The script path comes from the patch config (`script`), defaulting to
  * `~/.dsh/scripts/restart-dsh.ps1`.
  */
@@ -41,12 +49,30 @@ export function buildRestartSpawn(scriptPath, extraArgs = []) {
   }
 }
 
+/** Ids of live agents currently running a turn. */
+export function runningSessionIds(agents) {
+  return agents.list().filter((agent) => agent.status === 'running').map((agent) => agent.id)
+}
+
 let restarting = false
 
 /** Cordis plugin entry: register the `/app` RPC channel on the Connection. */
 export function apply(ctx, config = {}) {
-  return ctx.inject(['connection'], (ctx) => {
-    return ctx.connection.rpc.handle('/app', async (endpoint) => {
+  return ctx.inject(['connection', 'agents'], (ctx) => {
+    const busyFailure = (sessions) => ({
+      ok: false,
+      error: {
+        code: 'sessions-running',
+        message: `${sessions.length} 个会话正在运行,重启会中断它们(可强制重启)`,
+        details: { running: sessions.length, sessions },
+      },
+    })
+
+    return ctx.connection.rpc.handle('/app', async (endpoint, payload) => {
+      if (endpoint === 'status') {
+        const sessions = runningSessionIds(ctx.agents)
+        return { ok: true, value: { running: sessions.length, sessions } }
+      }
       if (endpoint !== 'restart') {
         return {
           ok: false,
@@ -56,7 +82,24 @@ export function apply(ctx, config = {}) {
       if (restarting) {
         return { ok: true, value: { scheduled: true, already: true, script: resolveRestartScript(config) } }
       }
+
+      const force = payload?.args?.force === true
+      const running = runningSessionIds(ctx.agents)
+      if (running.length > 0 && !force) {
+        return busyFailure(running)
+      }
+
       restarting = true
+
+      // Force path: cancel running agents first so sessions stay resumable.
+      if (running.length > 0) {
+        for (const id of running) {
+          const agent = ctx.agents.get(id)
+          if (agent !== undefined && agent.status === 'running') {
+            agent.cancel({ kind: 'user' }, { keepInbox: true })
+          }
+        }
+      }
 
       const scriptPath = resolveRestartScript(config)
       try {

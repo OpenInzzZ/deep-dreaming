@@ -38,6 +38,19 @@
   (`id: 'other'`, `order: 30`,同 seat 下的官方页面为通用设置/模型/插件/
   Agent 预设),按钮调用 `ctx.connection.rpc.call('/app', 'restart', …)`。
 
+**会话保护**:重启会终止服务进程,从而中断所有**正在运行**的会话。为避免
+静默打断进行中的工作,host 半在重启前检查 `agents` 服务:
+
+- 有会话正在运行时,`restart` **拒绝执行**并返回 `sessions-running`
+  (含数量);页面显示警告并提供两个选项:
+  - **等待空闲后重启**:每 2s 轮询 `/app/status`(新增端点,返回运行中会话
+    数),归零后自动发起重启 —— 不中断任何会话;
+  - **强制重启**:先对所有运行中会话执行
+    `agent.cancel({ kind: 'user' }, { keepInbox: true })`(有序取消、保留
+    排队消息,会话处于可恢复状态),再执行重启。
+- 手动运行 `restart-dsh.ps1` 时没有此检查(脚本无法访问会话状态),请在
+  运行前确认没有进行中的会话,或接受其中断。
+
 > 手动重启:直接运行
 > `powershell -ExecutionPolicy Bypass -File .\patches\ui-settings-other\restart-dsh.ps1`
 > (先 `-DryRun` 预览要执行的内容)。
