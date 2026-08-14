@@ -13,7 +13,7 @@
 ## 目录结构
 
 ```
-dsh-plugins/ui-settings-plugin-manager/
+patches/ui-settings-plugin-manager/
 ├── package.json   # 声明 dsh.client 浏览器入口 + 依赖顺序
 ├── lib/
 │   ├── index.js   # node 端空实现(仅让 Loader 挂载该条目)
@@ -33,7 +33,7 @@ dsh 运行时需要从 profile 的 node_modules 按包名解析该插件,因此�
   (junction),或把本目录复制过去:
 
 ```powershell
-New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-settings-plugin-manager" -Target "D:\GitHub\deep-dreaming\dsh-plugins\ui-settings-plugin-manager"
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-settings-plugin-manager" -Target "D:\GitHub\deep-dreaming\patches\ui-settings-plugin-manager"
 ```
 
 - 在 `~/.dsh/profiles/web/cordis.patch.yml` 中插入启用条目:
@@ -46,6 +46,22 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 
 `cordis.patch.yml` 由运行中的 dsh 热加载(watch-only HMR):保存后数秒内自动
 挂载,浏览器刷新一次页面即可看到新标签页,**无需重启服务器**。
+
+## 如何使用
+
+1. 打开 dsh Web 界面 → **设置(Settings)** → 左侧 **插件** 分区。
+2. 切换顶部标签页到 **管理(Manager)** —— 列表即当前 profile 的全部插件条目。
+3. 每个插件一张卡片,展示:名称、来源分类、启用/运行状态;点击卡片内容区
+   可展开查看详情(加载器条目信息)。
+4. 用三个下拉筛选器 + 搜索框收窄列表,各条件之间为 **AND(与)** 关系:
+   - **Category(分类)**:全部 / 官方 / 自定义 —— 官方指 `@deepseek-ai/*`
+     与 `cordis:` 内建,自定义指文件 URL、路径、第三方包等来源;
+   - **Enablement(启用状态)**:全部 / 已启用 / 已停用;
+   - **Runtime status(运行状态)**:全部 / 已挂载 / 挂载失败 / 加载中 /
+     等待依赖 / 卸载中 / 未挂载。
+   - 搜索框按插件名/模块名模糊匹配;无匹配时显示空状态提示文案。
+5. 常用排查场景:某个插件没生效 → 状态筛「挂载失败」,或筛选「自定义」+
+   「已停用」查看被禁用的条目。
 
 ## 启停与卸载
 

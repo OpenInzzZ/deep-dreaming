@@ -7,11 +7,11 @@ $dshHome = Join-Path $env:USERPROFILE '.dsh'     # ~/.dsh
 
 Write-Host '== deep-dreaming deploy ==' -ForegroundColor Cyan
 
-# 1. Sync plugins to ~/.dsh/plugins/
+# 1. Sync single-file plugins to ~/.dsh/plugins/ (each patch dir under patches/)
 $pluginsDir = Join-Path $dshHome 'plugins'
 New-Item -ItemType Directory -Path $pluginsDir -Force | Out-Null
 $synced = 0
-foreach ($file in Get-ChildItem (Join-Path $dev 'plugins') -Filter '*.mjs' | Where-Object { $_.Name -notlike '*.test.mjs' }) {
+foreach ($file in Get-ChildItem (Join-Path $dev 'patches') -Recurse -Filter '*.mjs' | Where-Object { $_.Name -notlike '*.test.mjs' -and $_.FullName -notmatch '\\(lib|tests)\\' }) {
     Copy-Item $file.FullName (Join-Path $pluginsDir $file.Name) -Force
     Write-Host "  [OK] plugin: $($file.Name)"
     $synced++

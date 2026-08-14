@@ -48,12 +48,46 @@ updated_at: "2026-08-14T12:00:00.000Z"
 ## 安装
 
 ```powershell
-dsh plugin --profile web add D:\GitHub\deep-dreaming\plugins\dsh-project-memory
+dsh plugin --profile web add D:\GitHub\deep-dreaming\patches\dsh-project-memory
 ```
 
 然后**重启 `dsh web`**(插件在下次启动时随 profile 加载;`dsh plugin` 通过 pnpm 安装到 `~/.dsh/profiles/web`,包内 `dsh.bundle.patch` 声明使其自动进入 profile 的 bundle 层)。
 
 卸载:`dsh plugin --profile web remove dsh-project-memory`,重启生效。
+
+## 如何使用
+
+安装并重启后无需任何手动操作,常驻指令会自动生效。以下是会话中的典型流程:
+
+**首次进入已有项目**
+
+1. 开始实质性工作前,Agent 会先调用 `project_memory_search`(关键词如项目名、
+   技术栈),拉出既有记忆 —— 新项目首次检索结果为空,属正常。
+2. 工作过程中产生了确定性知识(例如"本仓库约定:补丁统一放在 `patches/`
+   目录,每个补丁自带 README"),在轮次结束时由 Agent 调用
+   `project_memory_save` 记录。
+3. 后续轮次/后续会话再次检索到该记忆,Agent 会遵循其中的约定继续工作。
+
+**主动查看与管理**
+
+- 让 Agent「列出项目记忆」→ 触发 `project_memory_list`,可看到全部笔记及
+  分类、成熟度、使用次数。
+- 笔记即普通 Markdown 文件,位于 `<项目根>/.dsh-memory/<分类>/<标题>.md`,
+  也可直接用编辑器查看/手工编辑(注意保持 front matter 格式)。
+
+**自动回顾(autoReview,默认开)**
+
+- 每轮用户消息被完整回答后,插件会向 Agent 发送一条回顾消息;若本轮确实
+  产生了值得记录的知识,Agent 会自行调用 `project_memory_save`,否则回复
+  "无需记录",不产生任何文件。
+- 子代理会话与未完成(中断/出错)的轮次不会触发回顾。
+
+**验证插件已生效**
+
+- 新开会话,在 system prompt 中应能看到"开始实质性工作前先检索项目记忆"
+  之类的常驻指令;
+- 或直接询问 Agent「你有哪些工具可用」,应包含 `project_memory_save` /
+  `project_memory_search` / `project_memory_list` 三个工具。
 
 ## 配置
 
