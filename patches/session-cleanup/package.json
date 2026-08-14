@@ -1,0 +1,17 @@
+{
+  "name": "@local/dsh-plugin-session-cleanup",
+  "version": "0.1.0",
+  "private": true,
+  "description": "User-level plugin: periodically clean archived dsh session logs by age / total size, skipping live sessions",
+  "type": "module",
+  "main": "session-cleanup.mjs",
+  "exports": {
+    ".": "./session-cleanup.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "session-cleanup.mjs",
+    "README.md"
+  ],
+  "license": "MIT"
+}

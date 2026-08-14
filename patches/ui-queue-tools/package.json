@@ -1,0 +1,24 @@
+{
+  "name": "@local/dsh-client-ui-queue-tools",
+  "version": "0.1.0",
+  "private": true,
+  "description": "User-level plugin: enhanced queue dock — hover shows the full queued message text, and queued messages can be reordered (up/down) via a host RPC",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-locale"
+      ],
+      "platform": "web"
+    }
+  }
+}

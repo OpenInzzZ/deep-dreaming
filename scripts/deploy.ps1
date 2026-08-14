@@ -1,4 +1,4 @@
-# deep-dreaming deploy script - sync self-owned assets to dsh runtime dir
+# deep-dreaming deploy script - verify user-level patch wiring on the dsh runtime dir
 # Usage: powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 $ErrorActionPreference = 'Stop'
 
@@ -7,41 +7,41 @@ $dshHome = Join-Path $env:USERPROFILE '.dsh'     # ~/.dsh
 
 Write-Host '== deep-dreaming deploy ==' -ForegroundColor Cyan
 
-# 1. Sync single-file plugins to ~/.dsh/plugins/ (each patch dir under patches/)
-$pluginsDir = Join-Path $dshHome 'plugins'
-New-Item -ItemType Directory -Path $pluginsDir -Force | Out-Null
-$synced = 0
-foreach ($file in Get-ChildItem (Join-Path $dev 'patches') -Recurse -Filter '*.mjs' | Where-Object { $_.Name -notlike '*.test.mjs' -and $_.FullName -notmatch '\\(lib|tests)\\' }) {
-    Copy-Item $file.FullName (Join-Path $pluginsDir $file.Name) -Force
-    Write-Host "  [OK] plugin: $($file.Name)"
-    $synced++
-}
-if ($synced -eq 0) { Write-Host '  [!] no plugin files found' }
-
-# 2. Validate references in ~/.dsh/cordis.patch.yml
-$patchPath = Join-Path $dshHome 'cordis.patch.yml'
-if (Test-Path $patchPath) {
-    $content = Get-Content $patchPath -Raw
-    Write-Host ''
-    Write-Host '== patch reference check ==' -ForegroundColor Cyan
-    # plugin name 必须是 file:// URL 或相对路径；Windows 原生路径 (C:\...) 会触发
-    # ERR_UNSUPPORTED_ESM_URL_SCHEME，此处兼容两种形态并提示错误写法
-    if ($content -match 'name:\s*([A-Za-z]:\\[^\s]+\.mjs)') {
-        Write-Host "  [WARN] plugin ref uses raw Windows path (must be file:// URL): $($Matches[1])" -ForegroundColor Yellow
-    }
-    elseif ($content -match 'name:\s*(?:file:///)?([A-Za-z]:[\\/][^\s]+\.mjs)') {
-        $p = $Matches[1]
-        if (Test-Path $p) { Write-Host "  [OK] plugin ref: $p" }
-        else { Write-Host "  [FAIL] plugin missing: $p" -ForegroundColor Red }
-    }
-    if ($content -match 'command:\s*([A-Za-z]:\\[^\s]+\.exe)') {
-        $c = $Matches[1]
-        if (Test-Path $c) { Write-Host "  [OK] command ref: $c" }
-        else { Write-Host "  [FAIL] command missing: $c" -ForegroundColor Red }
+# 1. Validate every @local/... reference in the web profile patch layer: the
+#    package must be linked (junction) into the profile node_modules.
+$profilePatch = Join-Path $dshHome 'profiles\web\cordis.patch.yml'
+$modulesBase = Join-Path $dshHome 'profiles\node_modules'
+$checked = 0
+$failed = 0
+if (Test-Path $profilePatch) {
+    $content = Get-Content $profilePatch -Raw
+    $matches = [regex]::Matches($content, "name:\s*'?(@local/[A-Za-z0-9._/-]+)'?")
+    if ($matches.Count -eq 0) { Write-Host '  [!] no @local plugin references found in profile patch' }
+    foreach ($m in $matches) {
+        $pkg = $m.Groups[1].Value
+        $path = Join-Path $modulesBase ($pkg -replace '/', '\')
+        if (Test-Path $path) {
+            $item = Get-Item $path
+            Write-Host "  [OK] $pkg -> $($item.Target)"
+        } else {
+            Write-Host "  [FAIL] $pkg not linked under $modulesBase" -ForegroundColor Red
+            $failed++
+        }
+        $checked++
     }
 } else {
-    Write-Host '  [!] cordis.patch.yml not found' -ForegroundColor Yellow
+    Write-Host '  [!] profile patch not found' -ForegroundColor Yellow
+}
+
+# 2. Legacy home-layer file:// plugin references (no longer used; warn only).
+$homePatch = Join-Path $dshHome 'cordis.patch.yml'
+if (Test-Path $homePatch) {
+    $content = Get-Content $homePatch -Raw
+    if ($content -match 'name:\s*(file://[^\s]+)') {
+        Write-Host "  [WARN] legacy file:// plugin ref in ~/.dsh/cordis.patch.yml: $($Matches[1])" -ForegroundColor Yellow
+    }
 }
 
 Write-Host ''
-Write-Host 'Deploy done. Restart dsh to take effect.' -ForegroundColor Green
+if ($failed -gt 0) { Write-Host "Deploy check FAILED ($failed broken link(s))." -ForegroundColor Red; exit 1 }
+Write-Host "Deploy check done ($checked reference(s) verified). Restart dsh if patch entries changed." -ForegroundColor Green
