@@ -1,9 +1,20 @@
-# deep-dreaming deploy script - verify user-level patch wiring on the dsh runtime dir
+# deep-dreaming deploy script - sync scripts + verify user-level patch wiring
 # Usage: powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 $ErrorActionPreference = 'Stop'
 
 $dev = Split-Path -Parent $PSScriptRoot          # D:\GitHub\deep-dreaming
 $dshHome = Join-Path $env:USERPROFILE '.dsh'     # ~/.dsh
+
+# 0. Sync helper scripts to ~/.dsh/scripts/ (the restart button triggers these).
+$scriptsDir = Join-Path $dshHome 'scripts'
+New-Item -ItemType Directory -Path $scriptsDir -Force | Out-Null
+foreach ($name in @('restart-dsh.ps1')) {
+    $src = Join-Path $dev "scripts\$name"
+    if (Test-Path $src) {
+        Copy-Item $src (Join-Path $scriptsDir $name) -Force
+        Write-Host "  [OK] script: $name -> ~/.dsh/scripts/"
+    }
+}
 
 Write-Host '== deep-dreaming deploy ==' -ForegroundColor Cyan
 

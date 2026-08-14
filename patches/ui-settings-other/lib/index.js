@@ -6,80 +6,92 @@
  * its own channel through `ctx.connection.rpc.handle` with the loopback
  * authority — the web page only ever reaches this from 127.0.0.1).
  *
- * The `restart` endpoint respawns this exact dsh process (same node binary,
- * same argv, inherited cwd/env) as a detached background child, then exits the
- * current process after a short grace so the RPC response reaches the browser
- * first and the listening port is free before the child finishes booting.
+ * The `restart` endpoint delegates the whole job to the standalone script
+ * `restart-dsh.ps1` (deployed to `~/.dsh/scripts/` by scripts/deploy.ps1):
+ * the script finds the process listening on the web port, recovers its exact
+ * command line, lets the RPC response settle, stops the old process, starts a
+ * replacement with the same command line (logs redirected), and polls until
+ * the service answers. Keeping the lifecycle in a script makes the restart
+ * independently testable (`-DryRun`) and keeps this host entry a thin,
+ * dependency-free trigger.
  *
- * Deliberately dependency-free on the host side: only `node:child_process`
- * plus globals, so the file:// or @local loader entry needs nothing else to
- * resolve.
+ * The script path comes from the patch config (`script`), defaulting to
+ * `~/.dsh/scripts/restart-dsh.ps1`.
  */
 
 import { spawn } from 'node:child_process'
+import { homedir } from 'node:os'
+import { join, isAbsolute } from 'node:path'
+import { statSync } from 'node:fs'
 
-/** Grace before the current process exits, after the child was spawned (ms). */
-const EXIT_GRACE_MS = 2000
-/** Delay before the child is spawned, letting the RPC response land first (ms). */
-const SPAWN_DELAY_MS = 600
+/** Resolve the restart-script path: config > default under the dsh home. */
+export function resolveRestartScript(config = {}) {
+  const configured = config.script
+  if (typeof configured === 'string' && configured.length > 0) {
+    return isAbsolute(configured) ? configured : join(homedir(), '.dsh', configured)
+  }
+  return join(homedir(), '.dsh', 'scripts', 'restart-dsh.ps1')
+}
+
+/** Build the spawn invocation for the restart script (pure, testable). */
+export function buildRestartSpawn(scriptPath, extraArgs = []) {
+  return {
+    file: 'powershell',
+    args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, ...extraArgs],
+  }
+}
 
 let restarting = false
 
-/**
- * Spawn a detached copy of this process (same binary, argv, cwd, env) that
- * survives the current process exiting.
- */
-function spawnReplacement() {
-  const child = spawn(process.execPath, process.argv.slice(1), {
-    detached: true,
-    stdio: 'ignore',
-    cwd: process.cwd(),
-    env: process.env,
-    windowsHide: true,
-  })
-  child.unref()
-  return child.pid ?? null
-}
-
-/** Handle one endpoint on the `/app` channel. */
-async function handleEndpoint(endpoint) {
-  if (endpoint !== 'restart') {
-    return {
-      ok: false,
-      error: { code: 'bad-request', message: `unknown endpoint: ${endpoint}`, details: {} },
-    }
-  }
-  if (restarting) {
-    return { ok: true, value: { scheduled: true, already: true, delayMs: 0 } }
-  }
-  restarting = true
-  let pid = null
-  try {
-    setTimeout(() => {
-      try {
-        pid = spawnReplacement()
-      } catch (error) {
-        // The process still exits below; the child failed to start, so the
-        // operator restarts from the terminal instead.
-        console.error('[ui-settings-other] respawn failed:', error)
-      }
-    }, SPAWN_DELAY_MS)
-  } catch (error) {
-    restarting = false
-    return {
-      ok: false,
-      error: { code: 'internal', message: String(error), details: {} },
-    }
-  }
-  setTimeout(() => process.exit(0), SPAWN_DELAY_MS + EXIT_GRACE_MS)
-  return { ok: true, value: { scheduled: true, pid, delayMs: SPAWN_DELAY_MS + EXIT_GRACE_MS } }
-}
-
 /** Cordis plugin entry: register the `/app` RPC channel on the Connection. */
-export function apply(ctx) {
+export function apply(ctx, config = {}) {
   return ctx.inject(['connection'], (ctx) => {
-    return ctx.connection.rpc.handle('/app', handleEndpoint, { authority: 'loopback' })
+    return ctx.connection.rpc.handle('/app', async (endpoint) => {
+      if (endpoint !== 'restart') {
+        return {
+          ok: false,
+          error: { code: 'bad-request', message: `unknown endpoint: ${endpoint}`, details: {} },
+        }
+      }
+      if (restarting) {
+        return { ok: true, value: { scheduled: true, already: true, script: resolveRestartScript(config) } }
+      }
+      restarting = true
+
+      const scriptPath = resolveRestartScript(config)
+      try {
+        statSync(scriptPath)
+      } catch {
+        restarting = false
+        return {
+          ok: false,
+          error: {
+            code: 'internal',
+            message: `restart script not found: ${scriptPath} (run scripts/deploy.ps1 to install it)`,
+            details: {},
+          },
+        }
+      }
+
+      const invocation = buildRestartSpawn(scriptPath)
+      try {
+        const child = spawn(invocation.file, invocation.args, {
+          detached: true,
+          stdio: 'ignore',
+          cwd: process.cwd(),
+          env: process.env,
+          windowsHide: true,
+        })
+        child.unref()
+        child.on('error', () => {}) // spawn failure is observed by the script's absence; nothing to surface here
+      } catch (error) {
+        restarting = false
+        return {
+          ok: false,
+          error: { code: 'internal', message: String(error), details: {} },
+        }
+      }
+      return { ok: true, value: { scheduled: true, script: scriptPath } }
+    }, { authority: 'loopback' })
   })
 }
-
-export { handleEndpoint }

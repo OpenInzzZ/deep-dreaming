@@ -17,26 +17,36 @@
 
 ## 工作原理
 
-补丁分 host / client 两半,挂载在同一个 loader 条目上:
+补丁分 host / client 两半,挂载在同一个 loader 条目上,**重启逻辑收敛在
+独立脚本** `scripts/restart-dsh.ps1`(由 `deploy.ps1` 同步到
+`~/.dsh/scripts/`),可脱离插件单独运行与测试:
 
 - **Host 半(`lib/index.js`)**:通过 `ctx.connection.rpc.handle('/app', …)`
   注册一个独立 RPC 通道(权限 `loopback`,仅本机页面可达;共享的 `/api`
-  通道由 dsh 的 Typert gateway 独占,用户级插件不能抢占)。
-  `restart` 端点的实现:
-  1. `setTimeout(600ms)` 后 `spawn(process.execPath, process.argv.slice(1),
-     { detached, stdio: 'ignore', cwd, env })` —— 以完全相同的 node 与
-     命令行参数拉起一个脱离当前进程的后台副本;
-  2. `setTimeout(2600ms)` 后 `process.exit(0)` —— 给浏览器留出收到 RPC
-     响应的时间;旧进程退出释放端口时,新进程仍在 boot(通常数秒),之后
-     监听同一地址,因此不会端口冲突。
+  通道由 dsh 的 Typert gateway 独占,用户级插件不能抢占)。`restart`
+  端点只做一件事:detached 调起 `restart-dsh.ps1`(路径取自补丁 config
+  的 `script`,默认 `~/.dsh/scripts/restart-dsh.ps1`),不做任何进程管理。
+- **脚本(`scripts/restart-dsh.ps1`)**:完整生命周期 ——
+  1. 通过端口(默认 3080)找到当前 dsh 进程,恢复其**原始命令行**
+     (引号感知 tokenizer,保留 npx / 直接 node 等任意启动方式);
+  2. `SettleSeconds`(默认 2s)让 RPC 响应先送达浏览器;
+  3. 停止旧进程;
+  4. 以相同命令行启动新进程(日志重定向到 `~/.dsh/logs/`);
+  5. 轮询端口直至服务就绪(最多 120s)。
+  支持 `-DryRun`(只打印计划)、`-Port`、`-SettleSeconds` 参数。
 - **Client 半(`lib/client.js`)**:注册 `settings.section` slot
   (`id: 'other'`, `order: 30`,同 seat 下的官方页面为通用设置/模型/插件/
   Agent 预设),按钮调用 `ctx.connection.rpc.call('/app', 'restart', …)`。
 
+> 手动重启:直接运行
+> `powershell -ExecutionPolicy Bypass -File .\scripts\restart-dsh.ps1`
+> (先 `-DryRun` 预览要执行的内容)。
+
 ## 部署(加载到 dsh)
 
 与 ui-settings-plugin-manager 相同的机制:实现来源在本仓库,部署侧建立
-junction 链接 + patch 条目。
+junction 链接 + patch 条目;另外 `deploy.ps1` 会把重启脚本同步到
+`~/.dsh/scripts/`。
 
 1. 建立指向本目录的目录联接(junction):
 
@@ -44,12 +54,20 @@ junction 链接 + patch 条目。
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-settings-other" -Target "D:\GitHub\deep-dreaming\patches\ui-settings-other"
 ```
 
-2. 在 `~/.dsh/profiles/web/cordis.patch.yml` 中追加启用条目:
+2. 同步重启脚本并校验部署:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
+```
+
+3. 在 `~/.dsh/profiles/web/cordis.patch.yml` 中追加启用条目:
 
 ```yaml
 - insert:
     - id: ui-settings-other
       name: '@local/dsh-client-ui-settings-other'
+      config:
+        # script: 'D:\path\to\restart-dsh.ps1'   # 可选:自定义脚本路径
 ```
 
 `cordis.patch.yml` 由运行中的 dsh 热加载:保存后数秒内自动挂载

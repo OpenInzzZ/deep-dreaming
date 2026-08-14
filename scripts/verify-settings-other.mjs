@@ -30,6 +30,19 @@ const PLUGIN_ID = '@local/dsh-client-ui-settings-other'
 // --- host half: registration + endpoint validation ---------------------------
 const host = await import(pathToFileURL(hostPath).href)
 
+// Pure helpers
+{
+  const resolved = host.resolveRestartScript({})
+  if (!resolved.toLowerCase().endsWith('.dsh\\scripts\\restart-dsh.ps1')) throw new Error(`default script path: ${resolved}`)
+  const custom = host.resolveRestartScript({ script: 'C:\\Custom\\restart.ps1' })
+  if (custom !== 'C:\\Custom\\restart.ps1') throw new Error(`custom script path: ${custom}`)
+  const invocation = host.buildRestartSpawn(resolved)
+  if (invocation.file !== 'powershell' || invocation.args[3] !== '-File' || invocation.args[4] !== resolved) {
+    throw new Error(`spawn invocation: ${JSON.stringify(invocation)}`)
+  }
+  console.log('host helpers OK: resolveRestartScript + buildRestartSpawn')
+}
+
 let handled = null
 let injected = null
 const hostCtx = {
@@ -49,7 +62,10 @@ const hostCtx = {
     return callback(fakeConnectionCtx)
   },
 }
-host.apply(hostCtx)
+// config.script points at a NON-EXISTENT path so the restart endpoint fails
+// cleanly (script-missing branch) instead of spawning a real restart.
+const MISSING_SCRIPT = 'C:\\__no_such_dir__\\restart-dsh.ps1'
+host.apply(hostCtx, { script: MISSING_SCRIPT })
 if (injected === null || injected.services.join(',') !== 'connection') throw new Error('host inject mismatch')
 if (handled === null || handled.channel !== '/app') throw new Error(`host channel mismatch: ${JSON.stringify(handled)}`)
 if (handled.options.authority !== 'loopback') throw new Error(`host authority mismatch: ${handled.options.authority}`)
@@ -58,6 +74,13 @@ console.log('host contract OK: /app channel, authority = loopback')
 const unknown = await handled.handler('nope', {})
 if (unknown.ok !== false || unknown.error.code !== 'bad-request') throw new Error('unknown endpoint must be rejected')
 console.log('host endpoint validation OK: unknown endpoint -> bad-request')
+
+const missingScript = await handled.handler('restart', {})
+if (missingScript.ok !== false || missingScript.error.code !== 'internal') {
+  throw new Error(`missing script must fail cleanly: ${JSON.stringify(missingScript)}`)
+}
+if (!missingScript.error.message.includes('restart script not found')) throw new Error('missing-script message unhelpful')
+console.log('host endpoint validation OK: restart without script -> internal (never spawns)')
 
 // --- client half: jsdom environment (what the browser shell provides) -------
 const dom = new JSDOM('<!doctype html><html><head></head><body><div id="root"></div></body></html>', {
