@@ -1,13 +1,14 @@
 /**
  * Browser half of the ui-settings-other patch: an "Other" settings section
- * with a restart-service button.
+ * with a restart-service button and a live runtime-status block, plus a
+ * configuration card inside 设置 → 插件 → 插件配置 for the idle auto-stop.
  *
  * Hand-written in the client-bundle contract (no build step): the shell's
  * module loader receives this file through `window.__ModuleLoader__.load` and
  * answers every `require()` from the frozen module table. Only platform seed
  * words are used: `react`, `react/jsx-runtime`, and the icon set from
  * `@deepseek-ai/dsh-client-ui-primitives`. Everything else (slots, locale,
- * connection) arrives as services on the `apply(ctx)` context.
+ * connection, settingsScope) arrives as services on the `apply(ctx)` context.
  *
  * The section registers into the `settings.section` slot (same seat as the
  * shipped General / Models / Plugins / Agent presets pages) under id `other`,
@@ -15,13 +16,24 @@
  * `/app` RPC channel (`ctx.connection.rpc.call('/app', 'restart', …)`); the
  * host respawns the dsh process and exits the current one, so the page will
  * briefly disconnect — the copy tells the user to refresh afterwards.
+ *
+ * The status block polls `/app/status` every 10 s and shows the live process
+ * snapshot (pid, ports, uptime, memory, versions, running sessions, idle
+ * auto-stop countdown) with a manual refresh button.
+ *
+ * The configuration card binds the Host-registered settings namespace
+ * `ui-settings-other` through `ctx.settingsScope` and edits the idle
+ * auto-stop toggle + idle-minutes threshold with staged edits (the Host
+ * applies changes live and rebuilds its monitor). It renders nothing while
+ * the namespace is unavailable, mirroring the shipped cards.
  */
 window.__ModuleLoader__.load({ id: '@local/dsh-client-ui-settings-other', factory: (require) => {
 var module = { exports: {} }; var exports = module.exports;
 
 const React = require('react');
-const { useEffect, useState } = React;
+const { useEffect, useState, useSyncExternalStore } = React;
 const { jsx, jsxs } = require('react/jsx-runtime');
+const { IconChevronDownOutline14 } = require('@deepseek-ai/dsh-client-ui-primitives');
 
 const PLUGIN_ID = '@local/dsh-client-ui-settings-other';
 
@@ -38,9 +50,51 @@ const CSS = [
   '.so-btn:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}',
   '.so-btn[disabled]{opacity:.55;cursor:default}',
   '.so-btn.so-danger{border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 45%,var(--dsw-alias-border-l2));color:var(--dsw-alias-state-error-primary)}',
+  '.so-btn-sm{height:26px;padding:0 10px;font-size:12px}',
   '.so-status{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}',
   '.so-status[data-tone="error"]{color:var(--dsw-alias-state-error-primary)}',
   '.so-status[data-tone="ok"]{color:var(--dsw-alias-state-success-primary)}',
+  '.so-status-block{border-top:1px solid var(--dsw-alias-border-l2);margin-top:2px;padding-top:12px;display:flex;flex-direction:column;gap:8px}',
+  '.so-info-head{display:flex;align-items:center;justify-content:space-between;gap:12px}',
+  '.so-status-title{font-size:13px;font-weight:600;line-height:20px;color:var(--dsw-alias-label-primary)}',
+  '.so-info{display:flex;flex-direction:column;gap:2px}',
+  '.so-info-row{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px;line-height:20px}',
+  '.so-info-label{color:var(--dsw-alias-label-tertiary);flex:none}',
+  '.so-info-value{color:var(--dsw-alias-label-primary);font-family:ui-monospace,Consolas,monospace;text-align:right;word-break:break-all}',
+  /* configuration card (设置 → 插件 → 插件配置) */
+  '.soc-card{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:12px;list-style:none;transition:border-color .16s,background .16s}',
+  '.soc-card:hover{border-color:var(--dsw-alias-label-dimmed)}',
+  '.soc-card-open{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}',
+  '.soc-header{appearance:none;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;background:0 0;border:0;border-radius:12px;align-items:center;gap:12px;padding:14px 16px;display:flex}',
+  '.soc-header:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}',
+  '.soc-head-text{flex-direction:column;flex:1;gap:4px;min-width:0;display:flex}',
+  '.soc-name{color:var(--dsw-alias-label-primary);font-size:15px;font-weight:600;line-height:1.4}',
+  '.soc-description{color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1.5}',
+  '.soc-chevron{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .16s}',
+  '.soc-chevron-open{transform:rotate(180deg)}',
+  '.soc-body{border-top:1px solid var(--dsw-alias-border-l2);margin:0 16px;padding-bottom:8px}',
+  '.soc-pending{white-space:nowrap;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;flex:none;padding:1px 8px;font-size:11px;font-weight:500;line-height:17px}',
+  '.soc-field{flex-direction:column;gap:6px;padding:12px 0;display:flex}',
+  '.soc-field+.soc-field{border-top:1px solid var(--dsw-alias-border-l2)}',
+  '.soc-field-head{align-items:center;gap:8px;display:flex}',
+  '.soc-label{min-width:0;color:var(--dsw-alias-label-primary);flex:1;font-size:13px;font-weight:500;line-height:1.5}',
+  '.soc-overridden{white-space:nowrap;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:1px 8px;font-size:11px;font-weight:500;line-height:17px}',
+  '.soc-reset{font:inherit;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;padding:0;font-size:12px;line-height:1.5}',
+  '.soc-reset:hover:not(:disabled){color:var(--dsw-alias-label-primary)}',
+  '.soc-reset:disabled{cursor:default}',
+  '.soc-input{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}',
+  '.soc-input:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:none}',
+  '.soc-input:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}',
+  '.soc-invalid{border-color:var(--dsw-alias-label-error)}',
+  '.soc-invalid-text{color:var(--dsw-alias-label-error);margin:0;font-size:12px;line-height:1.5}',
+  '.soc-hint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:1.5}',
+  '.soc-toggle{accent-color:var(--dsw-alias-brand-primary);width:16px;height:16px}',
+  '.soc-footer{border-top:1px solid var(--dsw-alias-border-l2);justify-content:flex-end;align-items:center;gap:8px;padding:12px 0 4px;display:flex}',
+  '.soc-failed{min-width:0;color:var(--dsw-alias-label-error);flex:1;margin:0;font-size:12px;line-height:1.5}',
+  '.soc-discard,.soc-save{appearance:none;font:inherit;cursor:pointer;border:1px solid transparent;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5}',
+  '.soc-discard{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);background:0 0}',
+  '.soc-save{background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-on-brand)}',
+  '.soc-save:disabled,.soc-discard:disabled{opacity:.5;cursor:default}',
 ].join('\n');
 (function () {
   if (typeof document === 'undefined') return
@@ -53,7 +107,7 @@ const CSS = [
   document.head.appendChild(tag)
 })();
 
-/** Simplified Chinese dictionary and key source of truth. */
+/** Simplified Chinese dictionary and key source of truth (settings section). */
 const zh = {
   nav: '其他',
   serviceTitle: '服务',
@@ -70,6 +124,24 @@ const zh = {
   busyActionWait: '等待空闲后重启',
   busyActionForce: '强制重启',
   waiting: '等待会话结束…(剩余 {n})',
+  statusTitle: '运行状态',
+  refresh: '刷新',
+  loading: '获取中…',
+  infoError: '运行状态获取失败',
+  pid: '进程 ID',
+  ports: '监听端口',
+  uptime: '运行时长',
+  memory: '内存占用',
+  node: 'Node 版本',
+  dshVersion: 'dsh 版本',
+  running: '运行中会话',
+  idle: '空闲自动停止',
+  idleDisabled: '已禁用',
+  idleEnabledWith: '已启用 · 剩余 {n} 分钟自动停止',
+  unitDay: '天',
+  unitHour: '小时',
+  unitMin: '分',
+  unitSec: '秒',
 };
 
 /** English dictionary checked against the Chinese key set. */
@@ -89,13 +161,150 @@ const en = {
   busyActionWait: 'Restart when idle',
   busyActionForce: 'Force restart',
   waiting: 'Waiting for sessions… ({n} remaining)',
+  statusTitle: 'Runtime',
+  refresh: 'Refresh',
+  loading: 'Loading…',
+  infoError: 'Failed to fetch runtime status',
+  pid: 'Process ID',
+  ports: 'Listening ports',
+  uptime: 'Uptime',
+  memory: 'Memory',
+  node: 'Node',
+  dshVersion: 'dsh version',
+  running: 'Running sessions',
+  idle: 'Idle auto-stop',
+  idleDisabled: 'Disabled',
+  idleEnabledWith: 'Enabled · stops in {n} min',
+  unitDay: 'd',
+  unitHour: 'h',
+  unitMin: 'm',
+  unitSec: 's',
 };
 
-/** Dictionary namespace owned by this plugin. */
-const NS = 'settings.other';
+/** Simplified Chinese dictionary for the 插件配置 card. */
+const zhCard = {
+  title: '服务(空闲自动停止)',
+  description: 'dsh web 持续没有运行中的会话超过设定时长后自动停止服务,可通过桌面快捷方式重新启动。',
+  unsaved: '未保存',
+  collapse: '收起',
+  expand: '展开',
+  readOnly: '当前设置为只读,无法保存。',
+  save: '保存',
+  saving: '保存中…',
+  discard: '放弃',
+  saveFailed: '保存失败,请重试。',
+  invalidNumber: '请输入有效数字',
+  overridden: '已覆盖',
+  reset: '重置',
+  idleEnabled: '启用空闲自动停止',
+  idleEnabledHint: '关闭后服务不会自动停止。',
+  idleMinutes: '空闲时长 (分钟)',
+  idleMinutesHint: '无运行中会话超过该时长后自动停止服务;默认 120(2 小时)。',
+};
 
-/** Services required by the Settings registration. */
-const inject = ['slots', 'locale', 'connection'];
+/** English dictionary for the 插件配置 card. */
+const enCard = {
+  title: 'Service (idle auto-stop)',
+  description: 'Stop dsh web automatically after no session has been running for a while; restart it from the desktop shortcut.',
+  unsaved: 'Unsaved',
+  collapse: 'Collapse',
+  expand: 'Expand',
+  readOnly: 'Settings are read-only and cannot be saved.',
+  save: 'Save',
+  saving: 'Saving…',
+  discard: 'Discard',
+  saveFailed: 'Save failed. Try again.',
+  invalidNumber: 'Enter a valid number',
+  overridden: 'Overridden',
+  reset: 'Reset',
+  idleEnabled: 'Idle auto-stop',
+  idleEnabledHint: 'When off, the service never stops automatically.',
+  idleMinutes: 'Idle minutes',
+  idleMinutesHint: 'Stop after this many minutes without a running session; default 120 (2 h).',
+};
+
+/** Dictionary namespaces owned by this plugin. */
+const NS = 'settings.other';
+const CARD_NS = 'settings.other.card';
+
+/** Services required by the registrations. */
+const inject = ['slots', 'locale', 'connection', 'settingsScope'];
+
+/** Compact duration formatting (labels via t()). */
+function formatUptime(t, seconds) {
+  const s = Math.floor(seconds)
+  if (!(s >= 0)) return '—'
+  const d = Math.floor(s / 86400)
+  const h = Math.floor((s % 86400) / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  if (d > 0) return d + ' ' + t('unitDay') + ' ' + h + ' ' + t('unitHour')
+  if (h > 0) return h + ' ' + t('unitHour') + ' ' + m + ' ' + t('unitMin')
+  if (m > 0) return m + ' ' + t('unitMin') + ' ' + sec + ' ' + t('unitSec')
+  return s + ' ' + t('unitSec')
+}
+
+/** One label/value row of the runtime snapshot. */
+function InfoRow({ label, value }) {
+  return jsxs('div', { className: 'so-info-row', children: [
+    jsx('span', { className: 'so-info-label', children: label }, 'label'),
+    jsx('span', { className: 'so-info-value', children: value }, 'value'),
+  ] });
+}
+
+/** Live runtime snapshot: polls /app/status every 10 s, manual refresh. */
+function StatusBlock({ status, t }) {
+  const [info, setInfo] = useState(null);
+  const [failed, setFailed] = useState(false);
+
+  const fetchInfo = () => {
+    void Promise.resolve().then(() => status()).then(
+      (value) => { setInfo(value); setFailed(false) },
+      () => { setFailed(true) },
+    )
+  };
+
+  useEffect(() => {
+    fetchInfo()
+    const timer = setInterval(fetchInfo, 10_000)
+    return () => clearInterval(timer)
+  }, []);
+
+  const svc = info?.service ?? {};
+  const idle = info?.idle;
+  const idleValue = () => {
+    if (idle === undefined) return '—'
+    if (!idle.enabled) return t('idleDisabled')
+    const remainingMs = idle.idleMinutes * 60_000 - (Date.now() - (idle.lastBusyAt ?? Date.now()))
+    return t('idleEnabledWith', { n: Math.max(0, Math.ceil(remainingMs / 60_000)) })
+  };
+  const rows = [
+    ['pid', t('pid'), svc.pid !== undefined ? String(svc.pid) : '—'],
+    ['ports', t('ports'), svc.ports !== undefined ? (svc.ports.join(', ') || '—') : '—'],
+    ['uptime', t('uptime'), svc.uptime !== undefined ? formatUptime(t, svc.uptime) : '—'],
+    ['memory', t('memory'), svc.rss !== undefined ? (svc.rss / 1048576).toFixed(1) + ' MB' : '—'],
+    ['node', t('node'), svc.node ?? '—'],
+    ['dshVersion', t('dshVersion'), svc.version ?? '—'],
+    ['running', t('running'), info !== null ? String(info.running ?? 0) : '—'],
+    ['idle', t('idle'), idleValue()],
+  ];
+
+  return jsx('div', { className: 'so-status-block', children: [
+    jsxs('div', { className: 'so-info-head', children: [
+      jsx('span', { className: 'so-status-title', children: t('statusTitle') }, 'title'),
+      jsx('button', { type: 'button', className: 'so-btn so-btn-sm', onClick: fetchInfo, children: t('refresh') }, 'refresh'),
+    ] }, 'head'),
+    info === null && !failed
+      ? jsx('span', { className: 'so-status', children: t('loading') }, 'loading')
+      : null,
+    failed
+      ? jsx('span', { className: 'so-status', 'data-tone': 'error', children: t('infoError') }, 'failed')
+      : null,
+    info !== null
+      ? jsx('div', { className: 'so-info', children: rows.map((row) => jsx(InfoRow, { label: row[1], value: row[2] }, row[0])) }, 'info')
+      : null,
+  ] });
+}
 
 /**
  * Phase state machine:
@@ -154,10 +363,11 @@ function OtherSection({ restart, status, t }) {
     jsx('div', { className: 'so-card', children: [
       jsx('h3', { children: t('serviceTitle') }, 'title'),
       jsx('p', { children: t('serviceDesc') }, 'desc'),
+      jsx(StatusBlock, { status, t }, 'status-block'),
       jsx('div', { className: 'so-row', children: [
         phase === 'confirm'
           ? jsxs(React.Fragment, { children: [
-              jsx('span', { className: 'so-status', 'data-tone': 'error', children: t('confirmPrompt') }, 'prompt'),
+              jsx('span', { className: 'so-status so-flow-status', 'data-tone': 'error', children: t('confirmPrompt') }, 'prompt'),
               jsx('button', { type: 'button', className: 'so-btn so-danger', onClick: () => { trigger(false) }, children: t('confirm') }, 'confirm'),
               jsx('button', { type: 'button', className: 'so-btn', onClick: () => { setPhase('idle') }, children: t('cancel') }, 'cancel'),
             ] }, 'confirm-row')
@@ -170,7 +380,7 @@ function OtherSection({ restart, status, t }) {
             }, 'restart'),
         phase === 'busy' || phase === 'waiting'
           ? jsxs(React.Fragment, { children: [
-              jsx('span', { className: 'so-status', 'data-tone': 'error', children: phase === 'waiting'
+              jsx('span', { className: 'so-status so-flow-status', 'data-tone': 'error', children: phase === 'waiting'
                 ? t('waiting', { n: busyInfo?.running ?? 0 })
                 : t('busy', { n: busyInfo?.running ?? 0 }) }, 'busy-status'),
               phase === 'busy'
@@ -184,7 +394,7 @@ function OtherSection({ restart, status, t }) {
           : null,
       ] }, 'row'),
       phase === 'scheduled' || phase === 'error'
-        ? jsx('p', { className: 'so-status', 'data-tone': tone, children: phase === 'scheduled' ? t('scheduled') : t('error') }, 'status')
+        ? jsx('p', { className: 'so-status so-flow-status', 'data-tone': tone, children: phase === 'scheduled' ? t('scheduled') : t('error') }, 'status')
         : null,
       phase === 'error'
         ? jsx('button', { type: 'button', className: 'so-btn', onClick: () => { setPhase('idle') }, children: t('retry') }, 'retry')
@@ -193,9 +403,159 @@ function OtherSection({ restart, status, t }) {
   ] });
 }
 
-/** Contribute the Other settings section with the restart-service button. */
+/** Field descriptors of the idle auto-stop configuration card. */
+const CARD_FIELDS = [
+  { key: 'idleEnabled', type: 'boolean' },
+  { key: 'idleMinutes', type: 'number' },
+];
+
+/** One labelled field row with staged text, override badge, and reset. */
+function SettingsField({ field, label, hint, text, overridden, invalid, disabled, onChange, onReset, t }) {
+  return jsxs('div', { className: 'soc-field', children: [
+    jsxs('div', { className: 'soc-field-head', children: [
+      jsx('label', { className: 'soc-label', htmlFor: 'soc-' + field.key, children: label }, 'label'),
+      overridden ? jsx('span', { className: 'soc-overridden', children: t('overridden') }, 'overridden') : null,
+      jsx('button', {
+        type: 'button',
+        className: 'soc-reset',
+        disabled: disabled || !overridden,
+        onClick: onReset,
+        children: t('reset'),
+      }, 'reset'),
+    ] }, 'head'),
+    field.type === 'boolean'
+      ? jsx('input', {
+          id: 'soc-' + field.key,
+          type: 'checkbox',
+          className: 'soc-toggle',
+          checked: text === 'true',
+          disabled,
+          onChange: (event) => { onChange(event.currentTarget.checked ? 'true' : 'false') },
+        }, 'control')
+      : jsx('input', {
+          id: 'soc-' + field.key,
+          type: 'number',
+          className: 'soc-input' + (invalid ? ' soc-invalid' : ''),
+          value: text,
+          disabled,
+          min: 1,
+          onChange: (event) => { onChange(event.currentTarget.value) },
+        }, 'control'),
+    invalid ? jsx('p', { className: 'soc-invalid-text', children: t('invalidNumber') }, 'invalid') : null,
+    jsx('p', { className: 'soc-hint', children: hint }, 'hint'),
+  ] });
+}
+
+/** The configuration card shown in 插件配置 (idle auto-stop settings). */
+function ServiceSettingsCard({ t, scope }) {
+  const snapshot = useSyncExternalStore((listener) => scope.subscribe(listener), () => scope.getSnapshot());
+  const [open, setOpen] = useState(false);
+  const [staged, setStaged] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const revision = snapshot.revision;
+
+  // External changes drop unsaved staged edits (the Host applied them already).
+  useEffect(() => { setStaged(null) }, [revision]);
+
+  if (snapshot.status !== 'ready') return null;
+  const value = snapshot.value ?? {};
+  const writable = snapshot.writable;
+  const user = snapshot.user ?? {};
+  const dirty = staged !== null && Object.keys(staged).length > 0;
+  const invalid = staged !== null && Object.entries(staged).some(([key, text]) => {
+    const field = CARD_FIELDS.find((candidate) => candidate.key === key)
+    if (field === undefined || field.type !== 'number') return false
+    const parsed = Number(text)
+    return text.trim() === '' || !Number.isFinite(parsed) || parsed < 1
+  });
+  const blocked = !dirty || invalid || saving;
+
+  const textOf = (key) => {
+    const field = CARD_FIELDS.find((candidate) => candidate.key === key)
+    if (staged !== null && key in staged) return staged[key]
+    const current = value[key]
+    if (field?.type === 'boolean') return current === true ? 'true' : 'false'
+    if (current === undefined || current === null) return ''
+    return String(current)
+  };
+  const overriddenOf = (key) => Object.prototype.hasOwnProperty.call(user, key);
+  const edit = (key, text) => {
+    setFailed(false)
+    setStaged((current) => ({ ...(current ?? {}), [key]: text }))
+  };
+  const resetField = (key) => {
+    setFailed(false)
+    setStaged((current) => {
+      const next = { ...(current ?? {}) }
+      delete next[key]
+      return next
+    })
+    void scope.unset(key).catch(() => { setFailed(true) })
+  };
+  const discard = () => { setStaged(null); setFailed(false) };
+  const save = async () => {
+    if (staged === null) return
+    setSaving(true); setFailed(false)
+    try {
+      for (const [key, text] of Object.entries(staged)) {
+        const field = CARD_FIELDS.find((candidate) => candidate.key === key)
+        const parsed = field?.type === 'number' ? Number(text) : field?.type === 'boolean' ? text === 'true' : text
+        await scope.set(key, parsed)
+      }
+      setStaged(null)
+    } catch {
+      setFailed(true)
+    } finally {
+      setSaving(false)
+    }
+  };
+
+  return jsxs('li', { className: 'soc-card' + (open ? ' soc-card-open' : ''), children: [
+    jsxs('button', {
+      type: 'button',
+      className: 'soc-header',
+      'aria-expanded': open,
+      'aria-label': (open ? t('collapse') : t('expand')) + ': ' + t('title'),
+      onClick: () => { setOpen(!open) },
+      children: [
+        jsxs('span', { className: 'soc-head-text', children: [
+          jsx('span', { className: 'soc-name', children: t('title') }, 'name'),
+          jsx('span', { className: 'soc-description', children: t('description') }, 'desc'),
+        ] }, 'head-text'),
+        dirty ? jsx('span', { className: 'soc-pending', children: t('unsaved') }, 'pending') : null,
+        jsx(IconChevronDownOutline14, { className: 'soc-chevron' + (open ? ' soc-chevron-open' : ''), 'aria-hidden': true }, 'chevron'),
+      ],
+    }, 'header'),
+    open ? jsxs('div', { className: 'soc-body', children: [
+      !writable ? jsx('p', { className: 'soc-hint', role: 'status', children: t('readOnly') }, 'readonly') : null,
+      CARD_FIELDS.map((field) => jsx(SettingsField, {
+        field,
+        label: t(field.key),
+        hint: t(field.key + 'Hint'),
+        text: textOf(field.key),
+        overridden: overriddenOf(field.key),
+        invalid: staged !== null && field.key in staged && field.type === 'number'
+          ? !(Number.isFinite(Number(staged[field.key])) && Number(staged[field.key]) >= 1)
+          : false,
+        disabled: !writable || saving,
+        onChange: (text) => { edit(field.key, text) },
+        onReset: () => { resetField(field.key) },
+        t,
+      }, field.key)),
+      jsxs('div', { className: 'soc-footer', children: [
+        failed ? jsx('p', { className: 'soc-failed', role: 'status', children: t('saveFailed') }, 'failed') : null,
+        jsx('button', { type: 'button', className: 'soc-discard', disabled: !dirty || saving, onClick: discard, children: t('discard') }, 'discard'),
+        jsx('button', { type: 'button', className: 'soc-save', disabled: blocked, onClick: () => { void save() }, children: saving ? t('saving') : t('save') }, 'save'),
+      ] }, 'footer'),
+    ] }, 'body') : null,
+  ] });
+}
+
+/** Contribute the Other settings section + the idle auto-stop configuration card. */
 function apply(ctx) {
-  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-settings-other: dictionaries')
+  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-settings-other: section dictionaries')
+  ctx.effect(() => ctx.locale.register(CARD_NS, { zh: zhCard, en: enCard }), 'ui-settings-other: card dictionaries')
 
   const t = ctx.locale.bind(NS)
   const restart = async (force) => {
@@ -221,6 +581,15 @@ function apply(ctx) {
     locale: NS,
     inject: injected,
   }, OtherSection))
+
+  const scope = ctx.settingsScope.bind({ namespace: 'ui-settings-other' })
+  ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
+    name: 'settings.plugin.item',
+    id: 'ui-settings-other',
+    order: 30,
+    locale: CARD_NS,
+    inject: () => ({ scope }),
+  }, ServiceSettingsCard))
 }
 
 module.exports = { apply, inject, NS };

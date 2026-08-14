@@ -9,7 +9,7 @@ $dshHome = Join-Path $env:USERPROFILE '.dsh'     # ~/.dsh
 #    Sources live inside their owning patch directory.
 $scriptsDir = Join-Path $dshHome 'scripts'
 New-Item -ItemType Directory -Path $scriptsDir -Force | Out-Null
-foreach ($name in @('restart-dsh.ps1')) {
+foreach ($name in @('restart-dsh.ps1', 'start-dsh.ps1', 'install-desktop-shortcut.ps1')) {
     $src = Join-Path $dev "patches\ui-settings-other\$name"
     if (Test-Path $src) {
         Copy-Item $src (Join-Path $scriptsDir $name) -Force
@@ -51,6 +51,40 @@ if (Test-Path $homePatch) {
     $content = Get-Content $homePatch -Raw
     if ($content -match 'name:\s*(file://[^\s]+)') {
         Write-Host "  [WARN] legacy file:// plugin ref in ~/.dsh/cordis.patch.yml: $($Matches[1])" -ForegroundColor Yellow
+    }
+}
+
+# 3. Ensure every host-side plugin that imports @deepseek-ai/* has a node_modules
+#    junction to the dsh host dependencies (~/.dsh/profiles/node_modules). Plugins
+#    are junction-linked into the profile, but Node resolves their imports from the
+#    repo-side real path, so the repo tree must expose the host node_modules.
+#    Missing/dangling/empty-dir links are (re)created; real dirs that already
+#    provide @deepseek-ai are kept as-is.
+$depPlugins = @('dsh-project-memory', 'session-cleanup', 'ui-settings-other')
+if (-not (Test-Path $modulesBase)) {
+    Write-Host '  [!] ~/.dsh/profiles/node_modules not found; run `dsh plugin --profile web add` first' -ForegroundColor Yellow
+} else {
+    foreach ($p in $depPlugins) {
+        $link = Join-Path $dev "patches\$p\node_modules"
+        if (Test-Path $link) {
+            $item = Get-Item $link -Force
+            if ($item.LinkType -eq 'Junction') {
+                if (Test-Path $item.Target) {
+                    Write-Host "  [OK] $p/node_modules -> $($item.Target)"
+                } else {
+                    Remove-Item $link -Force
+                    New-Item -ItemType Junction -Path $link -Target $modulesBase | Out-Null
+                    Write-Host "  [FIXED] $p/node_modules was dangling; relinked -> $modulesBase" -ForegroundColor Yellow
+                }
+            } elseif (Test-Path (Join-Path $link '@deepseek-ai')) {
+                Write-Host "  [OK] $p/node_modules already provides @deepseek-ai deps; kept as-is"
+            } else {
+                Write-Host "  [WARN] $p/node_modules is a non-empty real dir; leaving as-is (may fail to load)" -ForegroundColor Yellow
+            }
+        } else {
+            New-Item -ItemType Junction -Path $link -Target $modulesBase | Out-Null
+            Write-Host "  [OK] $p/node_modules created -> $modulesBase"
+        }
     }
 }
 
