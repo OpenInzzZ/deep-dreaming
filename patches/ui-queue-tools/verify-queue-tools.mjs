@@ -23,8 +23,8 @@ const { JSDOM } = repoRequire('jsdom')
 const React = uiRequire('react')
 
 const here = dirname(fileURLToPath(import.meta.url))
-const hostPath = join(here, '..', 'patches', 'ui-queue-tools', 'lib', 'index.js')
-const clientPath = join(here, '..', 'patches', 'ui-queue-tools', 'lib', 'client.js')
+const hostPath = join(here, 'lib', 'index.js')
+const clientPath = join(here, 'lib', 'client.js')
 const PLUGIN_ID = '@local/dsh-client-ui-queue-tools'
 
 // --- host half: /queue channel + reorder semantics ----------------------------

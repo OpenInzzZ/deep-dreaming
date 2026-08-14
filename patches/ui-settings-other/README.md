@@ -18,7 +18,7 @@
 ## 工作原理
 
 补丁分 host / client 两半,挂载在同一个 loader 条目上,**重启逻辑收敛在
-独立脚本** `scripts/restart-dsh.ps1`(由 `deploy.ps1` 同步到
+本目录的独立脚本** `restart-dsh.ps1`(由 `scripts/deploy.ps1` 同步到
 `~/.dsh/scripts/`),可脱离插件单独运行与测试:
 
 - **Host 半(`lib/index.js`)**:通过 `ctx.connection.rpc.handle('/app', …)`
@@ -26,7 +26,7 @@
   通道由 dsh 的 Typert gateway 独占,用户级插件不能抢占)。`restart`
   端点只做一件事:detached 调起 `restart-dsh.ps1`(路径取自补丁 config
   的 `script`,默认 `~/.dsh/scripts/restart-dsh.ps1`),不做任何进程管理。
-- **脚本(`scripts/restart-dsh.ps1`)**:完整生命周期 ——
+- **脚本(`restart-dsh.ps1`)**:完整生命周期 ——
   1. 通过端口(默认 3080)找到当前 dsh 进程,恢复其**原始命令行**
      (引号感知 tokenizer,保留 npx / 直接 node 等任意启动方式);
   2. `SettleSeconds`(默认 2s)让 RPC 响应先送达浏览器;
@@ -39,7 +39,7 @@
   Agent 预设),按钮调用 `ctx.connection.rpc.call('/app', 'restart', …)`。
 
 > 手动重启:直接运行
-> `powershell -ExecutionPolicy Bypass -File .\scripts\restart-dsh.ps1`
+> `powershell -ExecutionPolicy Bypass -File .\patches\ui-settings-other\restart-dsh.ps1`
 > (先 `-DryRun` 预览要执行的内容)。
 
 ## 部署(加载到 dsh)
@@ -102,7 +102,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 ## 测试
 
 ```powershell
-node scripts/verify-settings-other.mjs
+node verify-settings-other.mjs          # 在本补丁目录下运行
 ```
 
 覆盖:host 半 `/app` 通道注册与端点校验(不真正重启)、client 半契约

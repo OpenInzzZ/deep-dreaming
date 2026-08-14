@@ -9,17 +9,14 @@
 ```
 deep-dreaming/
 ├── README.md                     # 本文件:总览 + 补丁清单
-├── patches/                      # 全部补丁,一补丁一目录(代码 + 测试 + README)
+├── patches/                      # 全部补丁,一补丁一目录(代码 + 测试 + 脚本 + README)
 │   ├── session-cleanup/          # 会话日志自动清理(目录包插件)
 │   ├── dsh-project-memory/       # 跨会话项目记忆(目录包插件)
-│   ├── ui-settings-plugin-manager/  # Web 设置「插件管理」标签页(UI 插件)
-│   ├── ui-settings-other/        # Web 设置「其他」页:重启服务按钮(UI + host 插件)
-│   └── ui-queue-tools/           # 排队消息增强:hover 全文预览 + 上下移排序(UI + host 插件)
+│   ├── ui-settings-plugin-manager/  # Web 设置「插件管理」标签页(UI 插件)+ verify
+│   ├── ui-settings-other/        # Web 设置「其他」页:重启服务按钮 + restart-dsh.ps1 + verify
+│   └── ui-queue-tools/           # 排队消息增强:hover 全文预览 + 上下移排序 + verify
 └── scripts/
-    ├── deploy.ps1                # 部署校验脚本:核对 patch 层 @local 引用与 junction
-    ├── verify-plugin-manager.mjs # plugin-manager 部署包的端到端功能验证
-    ├── verify-settings-other.mjs # settings-other 补丁(host + client)功能验证
-    └── verify-queue-tools.mjs    # queue-tools 补丁(host + client)功能验证
+    └── deploy.ps1                # 全局部署工具:同步补丁脚本 + 校验 patch 层引用与 junction
 ```
 
 ## 补丁清单
@@ -59,10 +56,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 ## 测试
 
 ```powershell
-# 每个补丁自带无依赖或低依赖测试:
+# 每个补丁自带无依赖或低依赖测试(测试与脚本随补丁目录):
 node patches/session-cleanup/session-cleanup.test.mjs            # 清理规则
 node patches/dsh-project-memory/tests/store.test.mjs             # 记忆库逻辑
-node scripts/verify-plugin-manager.mjs                           # 部署后的 UI 插件端到端验证
-node scripts/verify-settings-other.mjs                           # settings-other host + client 验证
-node scripts/verify-queue-tools.mjs                              # queue-tools host + client 验证
+node patches/ui-settings-plugin-manager/verify-plugin-manager.mjs  # 部署后的 UI 插件端到端验证
+node patches/ui-settings-other/verify-settings-other.mjs         # settings-other host + client 验证
+node patches/ui-queue-tools/verify-queue-tools.mjs               # queue-tools host + client 验证
 ```

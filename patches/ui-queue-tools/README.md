@@ -73,7 +73,7 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 ## 测试
 
 ```powershell
-node scripts/verify-queue-tools.mjs
+node verify-queue-tools.mjs             # 在本补丁目录下运行
 ```
 
 覆盖:host 半 `/queue` 通道与参数校验、重排语义(下移/上移/置顶/置底/
