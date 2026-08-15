@@ -32,32 +32,41 @@ deep-dreaming/
 
 ## 快速部署
 
-补丁的装载方式分为两类,各自 README 里有完整步骤:
+**推荐一条命令**(任何机器克隆后即可,路径自动推导,无需改动):
 
 ```powershell
-# 1. 目录包插件(session-cleanup / ui-settings-plugin-manager /
-#    ui-settings-other / ui-queue-tools):建立 junction 链接 + profile patch 条目
-#    (条目增删/配置修改保存后数秒热生效,无需重启)
-New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-plugin-session-cleanup" -Target "D:\GitHub\deep-dreaming\patches\session-cleanup"
-New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-settings-plugin-manager" -Target "D:\GitHub\deep-dreaming\patches\ui-settings-plugin-manager"
-New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-settings-other" -Target "D:\GitHub\deep-dreaming\patches\ui-settings-other"
-New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-queue-tools" -Target "D:\GitHub\deep-dreaming\patches\ui-queue-tools"
+# 在仓库根目录执行:建全部 junction + 合并 patch 条目 + 安装
+# dsh-project-memory bundle + 部署校验(幂等,可重复运行)
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+# 完成后重启 dsh web:
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.dsh\scripts\restart-dsh.ps1"
+```
 
-# 2. 组合包插件(dsh-project-memory):pnpm 装进 web profile,并把它追加进
-#    profile package.json 的 dsh.profile.bundles(装载层由 bundle 提供)
-corepack pnpm --dir "$env:USERPROFILE\.dsh\profiles\web" add D:\GitHub\deep-dreaming\patches\dsh-project-memory
-# (然后手动在 ~/.dsh/profiles/web/package.json 的 dsh.profile.bundles 追加
+手工方式(路径用变量,不写死):
+
+```powershell
+$repo = (Resolve-Path .).Path          # 在仓库根执行;其它位置请指向克隆目录
+
+# 1. 目录包插件:建立 junction 链接 + profile patch 条目
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-plugin-session-cleanup" -Target "$repo\patches\session-cleanup"
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-settings-plugin-manager" -Target "$repo\patches\ui-settings-plugin-manager"
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-settings-other" -Target "$repo\patches\ui-settings-other"
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-queue-tools" -Target "$repo\patches\ui-queue-tools"
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-plugin-dom-inspect" -Target "$repo\patches\dom-inspect"
+
+# 2. 组合包插件(dsh-project-memory):pnpm 装进 profile,并追加进 bundles
+corepack pnpm --dir "$env:USERPROFILE\.dsh\profiles\web" add "$repo\patches\dsh-project-memory"
+# (然后在 ~/.dsh/profiles/web/package.json 的 dsh.profile.bundles 追加
 #  "dsh-project-memory";bundle 层变更需重启 dsh web 生效)
 
 # 3. 部署校验(可随时运行):核对 patch 层引用与 junction,
-#    并自动为需要宿主依赖的插件(dsh-project-memory / session-cleanup /
-#    ui-settings-other)补齐或修复 node_modules junction
+#    并自动为需要宿主依赖的插件补齐或修复 node_modules junction
 powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 ```
 
-> 路径写死为 `D:\GitHub\deep-dreaming`。仓库移动位置后,`dsh plugin add`
-> 命令、junction 与各 README 中的路径需要同步更新(`deploy.ps1` 基于
-> `$PSScriptRoot` 推导,自动跟随)。
+> 仓库内**不写死任何绝对路径**:所有脚本基于 `$PSScriptRoot` 推导,补丁
+> 代码基于 `import.meta.url` / `%USERPROFILE%` 解析;克隆到任何位置、
+> 任何用户名下均可直接使用(`install.ps1` / `deploy.ps1` 自动跟随)。
 
 ## 热插拔(启停/改配置免重启)
 

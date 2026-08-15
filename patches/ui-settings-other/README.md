@@ -134,12 +134,14 @@ junction 链接 + patch 条目;`deploy.ps1` 会把 `restart-dsh.ps1` /
 1. 建立指向本目录的目录联接(junction):
 
 ```powershell
-New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-settings-other" -Target "D:\GitHub\deep-dreaming\patches\ui-settings-other"
+# 在仓库根执行:\$repo = (Resolve-Path .).Path
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-settings-other" -Target "$repo\patches\ui-settings-other"
 ```
 
 2. 同步脚本并校验部署:
 
 ```powershell
+# 在仓库根执行:\$repo = (Resolve-Path .).Path
 powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 ```
 
@@ -199,6 +201,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 ## 测试
 
 ```powershell
+# 在仓库根执行:\$repo = (Resolve-Path .).Path
 node verify-settings-other.mjs          # 在本补丁目录下运行
 ```
 

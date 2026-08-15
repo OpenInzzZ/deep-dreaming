@@ -40,8 +40,9 @@
 与 ui-settings-* 插件相同的机制:
 
 ```powershell
+# 在仓库根执行:\$repo = (Resolve-Path .).Path
 # 1. 建立指向本目录的目录联接(junction)
-New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-queue-tools" -Target "D:\GitHub\deep-dreaming\patches\ui-queue-tools"
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-queue-tools" -Target "$repo\patches\ui-queue-tools"
 ```
 
 2. 在 `~/.dsh/profiles/web/cordis.patch.yml` 中追加启用条目:
@@ -86,6 +87,7 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 ## 测试
 
 ```powershell
+# 在仓库根执行:\$repo = (Resolve-Path .).Path
 node verify-queue-tools.mjs             # 在本补丁目录下运行
 node tests/load-smoke.mjs               # 真实 Cordis 加载冒烟(需能解析到 @deepseek-ai/cordis,
                                         # 见 tests/load-smoke.mjs 文件头注释)

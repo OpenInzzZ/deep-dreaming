@@ -16,8 +16,9 @@
 链接 + patch 条目。
 
 ```powershell
+# 在仓库根执行:\$repo = (Resolve-Path .).Path
 # 1. 建立指向本目录的目录联接(junction)
-New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-plugin-session-cleanup" -Target "D:\GitHub\deep-dreaming\patches\session-cleanup"
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-plugin-session-cleanup" -Target "$repo\patches\session-cleanup"
 
 # 2. 在 ~/.dsh/profiles/web/cordis.patch.yml 中追加启用条目
 ```
@@ -130,6 +131,7 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 ## 测试
 
 ```powershell
+# 在仓库根执行:\$repo = (Resolve-Path .).Path
 node patches/session-cleanup/session-cleanup.test.mjs      # 清理规则纯逻辑
 node patches/session-cleanup/verify-session-cleanup.mjs    # settings 集成 + 配置卡片
 node patches/session-cleanup/tests/load-smoke.mjs          # 真实 Cordis 加载冒烟

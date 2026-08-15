@@ -66,6 +66,18 @@ Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue
 try { Wait-Process -Id $oldPid -Timeout 10 -ErrorAction Stop | Out-Null } catch { }
 Log 'old process stopped'
 
+# --- 4.5 wait for the port to be released ---------------------------------------
+# Process termination is asynchronous; the replacement must not race the old
+# listener's socket teardown (observed as EADDRINUSE on the new webserver).
+for ($i = 0; $i -lt 40; $i++) {
+    $still = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+    if (-not $still) { break }
+    Start-Sleep -Milliseconds 500
+}
+if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
+    throw "port $Port still in use after stopping PID $oldPid; giving up"
+}
+
 # --- 5. start the replacement with logs ----------------------------------------
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'

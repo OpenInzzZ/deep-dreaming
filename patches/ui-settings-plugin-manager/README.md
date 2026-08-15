@@ -37,7 +37,8 @@ dsh 运行时需要从 profile 的 node_modules 按包名解析该插件,因此�
   (junction),或把本目录复制过去:
 
 ```powershell
-New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-settings-plugin-manager" -Target "D:\GitHub\deep-dreaming\patches\ui-settings-plugin-manager"
+# 在仓库根执行:\$repo = (Resolve-Path .).Path
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-settings-plugin-manager" -Target "$repo\patches\ui-settings-plugin-manager"
 ```
 
 - 在 `~/.dsh/profiles/web/cordis.patch.yml` 中插入启用条目:
@@ -102,6 +103,7 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 ## 测试
 
 ```powershell
+# 在仓库根执行:\$repo = (Resolve-Path .).Path
 node verify-plugin-manager.mjs          # 契约验证(host 启停逻辑用临时 patch 文件)
 node tests/load-smoke.mjs               # 真实 Cordis 加载冒烟
 ```

@@ -69,9 +69,11 @@ updated_at: "2026-08-14T12:00:00.000Z"
 ## 安装
 
 ```powershell
-dsh plugin --profile web add D:\GitHub\deep-dreaming\patches\dsh-project-memory
+# 在仓库根执行:\$repo = (Resolve-Path .).Path
+# 在仓库根执行: \ = (Resolve-Path .).Path
+dsh plugin --profile web add $repo\patches\dsh-project-memory
 # 若 pnpm 不在 PATH(dsh plugin 转发 pnpm),可用 corepack:
-# corepack pnpm --dir "$env:USERPROFILE\.dsh\profiles\web" add D:\GitHub\deep-dreaming\patches\dsh-project-memory
+# corepack pnpm --dir "$env:USERPROFILE\.dsh\profiles\web" add $repo\patches\dsh-project-memory
 ```
 
 **再为插件目录建立宿主依赖链接**。插件代码 import `@deepseek-ai/*`(宿主包,
@@ -81,7 +83,9 @@ dsh plugin --profile web add D:\GitHub\deep-dreaming\patches\dsh-project-memory
 (ERR_MODULE_NOT_FOUND)`:
 
 ```powershell
-New-Item -ItemType Junction -Path "D:\GitHub\deep-dreaming\patches\dsh-project-memory\node_modules" -Target "$env:USERPROFILE\.dsh\profiles\node_modules"
+# 在仓库根执行:\$repo = (Resolve-Path .).Path
+# 在仓库根执行: \ = (Resolve-Path .).Path
+New-Item -ItemType Junction -Path "$repo\patches\dsh-project-memory\node_modules" -Target "$env:USERPROFILE\.dsh\profiles\node_modules"
 # 或直接运行仓库根目录的 scripts\deploy.ps1,自动为所有需要宿主依赖的插件补齐/修复该链接
 ```
 
@@ -89,6 +93,8 @@ New-Item -ItemType Junction -Path "D:\GitHub\deep-dreaming\patches\dsh-project-m
 注册层;`dsh plugin add` 会做,直接跑 pnpm 时需手工):
 
 ```powershell
+# 在仓库根执行:\$repo = (Resolve-Path .).Path
+# 在仓库根执行: \ = (Resolve-Path .).Path
 # ~/.dsh/profiles/web/package.json
 # "dsh": { "profile": { "bundles": [ "@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-project-memory" ] } }
 ```
@@ -158,6 +164,8 @@ New-Item -ItemType Junction -Path "D:\GitHub\deep-dreaming\patches\dsh-project-m
 ## 测试
 
 ```powershell
+# 在仓库根执行:\$repo = (Resolve-Path .).Path
+# 在仓库根执行: \ = (Resolve-Path .).Path
 # store 纯逻辑单测(无需 dsh 运行时):相似度/合并/成熟度/使用计数等
 node tests/store.test.mjs
 

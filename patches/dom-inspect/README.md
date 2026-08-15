@@ -29,7 +29,8 @@
 (条目增删热生效,无需重启;client 源码变更才需重启):
 
 ```powershell
-New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-plugin-dom-inspect" -Target "D:\GitHub\deep-dreaming\patches\dom-inspect"
+# 在仓库根执行:\$repo = (Resolve-Path .).Path
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-plugin-dom-inspect" -Target "$repo\patches\dom-inspect"
 ```
 
 ```yaml
@@ -59,6 +60,7 @@ notice 行是否存在等。
 ## 测试
 
 ```powershell
+# 在仓库根执行:\$repo = (Resolve-Path .).Path
 node patches/dom-inspect/tests/load-smoke.mjs          # 真实 Cordis:工具+通道端到端
 node patches/dom-inspect/tests/client-contract.mjs      # client 契约 + collect/apply(需 jsdom)
 ```

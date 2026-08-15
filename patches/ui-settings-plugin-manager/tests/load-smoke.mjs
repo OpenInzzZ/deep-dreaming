@@ -22,7 +22,7 @@
  *   3. the deployed profile junction tree `~/.dsh/profiles/node_modules`.
  * If resolution fails, run with NODE_PATH pointing at a node_modules that
  * contains @deepseek-ai/cordis, e.g.:
- *   NODE_PATH=C:\Users\98645\.dsh\profiles\node_modules node patches/ui-settings-plugin-manager/tests/load-smoke.mjs
+ *   NODE_PATH=%USERPROFILE%\.dsh\profiles\node_modules node patches/ui-settings-plugin-manager/tests/load-smoke.mjs
  */
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
