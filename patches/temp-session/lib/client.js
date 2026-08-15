@@ -32,6 +32,11 @@ const NS = 'sidebar.tempSession';
 /* Injected once per page; the module loader tracks `style[data-plugin]` tags
    and removes them when the bundle unloads. */
 const CSS = [
+  /* Wrap: the footerActions seat is a flex row, so the wrapper must claim the
+     full width — otherwise the button's calc(100% + 8px) collapses to the
+     content width and the hover chrome only covers the label (unlike the
+     settings trigger, which sits in a block container). */
+  '.ts-wrap{flex:1 1 auto;min-width:0;display:flex;flex-direction:column}',
   /* Wide footer row: compact 34px rhythm like the settings trigger. */
   '.ts-btn{flex:none;display:flex;align-items:center;gap:8px;width:calc(100% + 8px);height:34px;margin:4px -4px 4px;padding:6px 2px 6px 10px;box-sizing:border-box;border:none;border-radius:12px;background:transparent;cursor:pointer;overflow:hidden;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:14px;line-height:22px}',
   '.ts-btn:hover{background:var(--dsw-alias-interactive-bg-hover)}',
@@ -39,6 +44,7 @@ const CSS = [
   '.ts-btn[disabled]{opacity:.6;cursor:default}',
   /* Rail: the same 36x36 circle box as the other rail controls. */
   '.ts-btn.ts-rail{width:36px;height:36px;margin:8px 0 10px;justify-content:center;gap:0;padding:0;border-radius:50%}',
+  '.ts-wrap.ts-rail-wrap{flex:none;align-items:center}',
   '.ts-label{overflow:hidden;white-space:nowrap}',
   '.ts-error{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:11px;line-height:16px;color:var(--dsw-alias-state-error-primary);margin:0 0 2px 10px}',
 ].join('');
@@ -79,7 +85,7 @@ function TempSessionAction({ wide, startTempSession, t }) {
     )
   };
 
-  return jsxs('div', { className: 'ts-wrap', children: [
+  return jsxs('div', { className: 'ts-wrap' + (wide ? '' : ' ts-rail-wrap'), children: [
     failed ? jsx('p', { className: 'ts-error', role: 'alert', children: t('error') }, 'error') : null,
     jsx('button', {
       type: 'button',

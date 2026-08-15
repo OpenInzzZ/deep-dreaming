@@ -14,7 +14,9 @@ deep-dreaming/
 │   ├── dsh-project-memory/       # 跨会话项目记忆(目录包插件)
 │   ├── ui-settings-plugin-manager/  # Web 设置「插件管理」标签页(UI 插件)+ verify
 │   ├── ui-settings-other/        # Web 设置「其他」页:服务状态/重启/空闲自动停止 + 静默启动脚本 + verify
-│   └── ui-queue-tools/           # 排队消息增强:hover 全文预览 + 上下移排序 + verify
+│   ├── ui-queue-tools/           # 排队消息增强:hover 全文预览 + 上下移排序 + verify
+│   ├── temp-session/             # 侧边栏一键发起不绑定项目的临时会话(目录包插件)
+│   └── dom-inspect/              # 浏览器 DOM 快照工具(目录包插件)
 └── scripts/
     └── deploy.ps1                # 全局部署工具:同步补丁脚本 + 校验 patch 层引用与 junction,并为需要宿主依赖的插件自动补齐 node_modules 链接
 ```
@@ -28,6 +30,7 @@ deep-dreaming/
 | [ui-settings-plugin-manager](patches/ui-settings-plugin-manager/) | Web 设置新增「插件管理」标签页:状态过滤 + 官方/自定义分类 + **启停开关(热生效)** | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-settings-plugin-manager/README.md) |
 | [ui-settings-other](patches/ui-settings-other/) | Web 设置新增「其他」页:服务运行状态(pid/端口/内存/版本)+ **重载用户插件(热,不中断会话)** + **创建桌面快捷方式(鲸鱼娘图标)** + 重启服务(危险)+ 空闲自动停止(可配,默认 2h);**覆盖 Web 标题栏 favicon 为鲸鱼娘图标**;配套静默启动脚本与品牌资产 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-settings-other/README.md) |
 | [ui-queue-tools](patches/ui-queue-tools/) | 排队消息增强:hover 预览全文 + 上移/下移排序(host 半经 Inbox.splice 重排) | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-queue-tools/README.md) |
+| [temp-session](patches/temp-session/) | 侧边栏底部「临时会话」按钮:一键发起绑定**用户级临时目录**的会话,不关联任何项目 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/temp-session/README.md) |
 | [dom-inspect](patches/dom-inspect/) | **浏览器 DOM 快照工具**:`dom_inspect` 返回页面记忆卡/折叠行/关键词的 DOM 快照,agent 直接核查插件渲染效果 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/dom-inspect/README.md) |
 
 ## 快速部署
@@ -52,6 +55,7 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-settings-plugin-manager" -Target "$repo\patches\ui-settings-plugin-manager"
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-settings-other" -Target "$repo\patches\ui-settings-other"
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-queue-tools" -Target "$repo\patches\ui-queue-tools"
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-temp-session" -Target "$repo\patches\temp-session"
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-plugin-dom-inspect" -Target "$repo\patches\dom-inspect"
 
 # 2. 组合包插件(dsh-project-memory):pnpm 装进 profile,并追加进 bundles
@@ -97,6 +101,7 @@ node patches/ui-settings-other/verify-settings-other.mjs         # settings-othe
 node patches/ui-settings-other/tests/load-smoke.mjs              # 真实 Cordis 加载冒烟
 node patches/ui-queue-tools/verify-queue-tools.mjs               # queue-tools host + client 验证
 node patches/ui-queue-tools/tests/load-smoke.mjs                 # 真实 Cordis 加载冒烟
+node patches/temp-session/verify-temp-session.mjs               # temp-session host + client 契约 + 点击流程(需 jsdom 的部分自动跳过)
 node patches/dom-inspect/tests/load-smoke.mjs                    # 真实 Cordis:工具+通道端到端
 node patches/dom-inspect/tests/client-contract.mjs               # client 契约 + collect/apply(需 jsdom)
 ```

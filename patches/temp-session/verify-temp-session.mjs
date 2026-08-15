@@ -250,7 +250,12 @@ const btn = rootHost.querySelector('.ts-btn')
 if (btn === null) throw new Error('action button missing')
 if (btn.getAttribute('aria-label') !== en.title) throw new Error(`aria-label: ${btn.getAttribute('aria-label')}`)
 if (btn.textContent !== en.label) throw new Error(`wide label: ${btn.textContent}`)
-console.log('render OK: wide row shows icon + label, aria-label set')
+// The wrapper must claim the flex-row width (footerActions is display:flex),
+// or the button's calc(100%+8px) collapses to the label width and the hover
+// chrome only covers the text (the reported bug).
+const wrap = rootHost.querySelector('.ts-wrap')
+if (wrap === null || wrap.classList.contains('ts-rail-wrap')) throw new Error('wide wrapper must not be rail-mode')
+console.log('render OK: wide row shows icon + label, aria-label set, wrapper claims full width')
 
 // click -> /temp-session ensure -> workspaces.refresh -> startSession
 await act(async () => { fireClick(btn) })
@@ -284,7 +289,9 @@ await act(async () => {
 const railBtn = railHost.querySelector('.ts-btn')
 if (railBtn === null || !railBtn.classList.contains('ts-rail')) throw new Error('rail button missing/classless')
 if (railBtn.textContent !== '') throw new Error(`rail must hide the label: '${railBtn.textContent}'`)
-console.log('rail OK: icon-only circle without label')
+const railWrap = railHost.querySelector('.ts-wrap')
+if (railWrap === null || !railWrap.classList.contains('ts-rail-wrap')) throw new Error('rail wrapper must be rail-mode')
+console.log('rail OK: icon-only circle without label, centered wrapper')
 
 console.log('\nALL HARNESS CHECKS PASSED')
 process.exit(0)

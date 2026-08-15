@@ -18,20 +18,30 @@
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs/promises'
+import z from '@deepseek-ai/schemastery'
 
-/** Config schema handled by the loader (name must be `Config`). */
-export const Config = {
+/**
+ * Default user-level directory hosting the temporary workspace. Evaluated at
+ * module load (schemastery 3.x `.default()` stores the value as-is and cannot
+ * take a function), so the user cannot switch OS user mid-process anyway.
+ */
+const DEFAULT_TEMP_DIR = path.join(os.homedir(), '.dsh', 'tmp-workspaces')
+
+/**
+ * Entry config schema. The Cordis loader validates the raw config against it
+ * through the schemastery `~standard` protocol (a plain object here makes the
+ * loader crash with "Cannot read properties of undefined (reading 'validate')")
+ * and fills the defaults, so `apply` receives a complete, validated config.
+ */
+export const Config = z.object({
   /**
    * User-level directory hosting the temporary workspace. Defaults to
    * `~/.dsh/tmp-workspaces/`; must be absolute. Created on first use.
    */
-  dir: {
-    type: 'string',
-    default: () => path.join(os.homedir(), '.dsh', 'tmp-workspaces'),
-  },
+  dir: z.string().default(DEFAULT_TEMP_DIR),
   /** Display title of the temporary workspace group. */
-  title: { type: 'string', default: '临时会话' },
-}
+  title: z.string().default('临时会话'),
+})
 
 /** Serialize ensure calls so concurrent clicks cannot create two workspaces. */
 let ensureTail = Promise.resolve()
