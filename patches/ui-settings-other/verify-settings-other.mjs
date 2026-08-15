@@ -258,6 +258,21 @@ writeFileSync(tmpPatchFile, '- insert: []\n')
   if (cancelled.length !== 1 || cancelled[0].id !== 'sess-a') throw new Error(`force must cancel running sessions: ${JSON.stringify(cancelled)}`)
   if (cancelled[0].opts?.keepInbox !== true) throw new Error('force cancel must keepInbox')
 
+  // stop endpoint: non-force refused while sessions run; force cancels + exits
+  appExitCalls = []
+  const stopBusy = await handled.handler('stop', { args: {} })
+  if (stopBusy.ok !== false || stopBusy.error.code !== 'sessions-running') throw new Error(`stop busy: ${JSON.stringify(stopBusy)}`)
+  if (stopBusy.error.details?.running !== 1) throw new Error(`stop busy details: ${JSON.stringify(stopBusy.error.details)}`)
+  if (cancelled.length !== 1) throw new Error('non-force stop must not cancel sessions')
+  const stopForced = await handled.handler('stop', { args: { force: true } })
+  if (stopForced.ok !== true || stopForced.value.stopping !== true) throw new Error(`stop forced: ${JSON.stringify(stopForced)}`)
+  if (cancelled.length !== 2 || cancelled[1].id !== 'sess-a') throw new Error(`stop force must cancel running sessions: ${JSON.stringify(cancelled)}`)
+  if (cancelled[1].opts?.keepInbox !== true) throw new Error('stop force cancel must keepInbox')
+  // the graceful exit is deferred 500ms so the RPC response settles first
+  await new Promise((resolve) => setTimeout(resolve, 600))
+  if (appExitCalls.length !== 1 || appExitCalls[0] !== 0) throw new Error(`stop must call appExit(0): ${JSON.stringify(appExitCalls)}`)
+  appExitCalls = []
+
   // reloadPlugins: touches the temp patch file, marker line is idempotent
   const reloaded = await handled.handler('reloadPlugins', { args: {} })
   if (!reloaded.ok) throw new Error(`reloadPlugins: ${JSON.stringify(reloaded)}`)
@@ -346,6 +361,7 @@ let dicts = []
 let rpcLog = []
 let restartResult = { ok: true, value: { scheduled: true, delayMs: 2600 } }
 let reloadResult = { ok: true, value: { requested: true, patchFile: 'x' } }
+let stopResult = { ok: true, value: { stopping: true } }
 let cardValue = { idleEnabled: true, idleMinutes: 45 }
 let statusValue = {
   running: 0,
@@ -375,6 +391,7 @@ const clientCtx = {
         if (endpoint === 'status') return { ok: true, value: statusValue }
         if (endpoint === 'restart') return restartResult
         if (endpoint === 'reloadPlugins') return reloadResult
+        if (endpoint === 'stop') return stopResult
         if (endpoint === 'installShortcut') return { ok: true, value: { created: true, icon: 'C:/icon.ico', output: 'created C:\\Users\\x\\Desktop\\dsh-web.lnk' } }
         if (endpoint === 'getSettings') return { ok: true, value: cardValue }
         if (endpoint === 'setSettings') {
@@ -404,6 +421,7 @@ if (sectionReg.id !== 'other' || sectionReg.order !== 30) {
 }
 if (typeof sectionReg.inject().reloadPlugins !== 'function') throw new Error('section inject must expose reloadPlugins')
 if (typeof sectionReg.inject().installShortcut !== 'function') throw new Error('section inject must expose installShortcut')
+if (typeof sectionReg.inject().stopService !== 'function') throw new Error('section inject must expose stopService')
 if (cardReg === undefined) throw new Error('settings.plugin.item never registered')
 if (cardReg.id !== CARD_ID || cardReg.order !== 30 || cardReg.locale !== 'settings.other.card') {
   throw new Error(`card options mismatch: ${JSON.stringify(cardReg)}`)
@@ -456,6 +474,7 @@ await act(async () => {
     status: clientInjected.status,
     reloadPlugins: clientInjected.reloadPlugins,
     installShortcut: clientInjected.installShortcut,
+    stopService: clientInjected.stopService,
     t: tWithParams,
   }))
 })
@@ -485,10 +504,12 @@ const shortcutButton = buttons().find((b) => b.textContent === en.createShortcut
 if (shortcutButton === undefined) throw new Error('create-shortcut button missing')
 const restartButton = buttons().find((b) => b.textContent === en.restart)
 if (restartButton === undefined) throw new Error('restart button missing')
-if (buttons().length !== 4) throw new Error(`expected 4 buttons (shortcut+reload+restart+refresh), got ${buttons().length}`)
+const stopButton = buttons().find((b) => b.textContent === en.stopService)
+if (stopButton === undefined) throw new Error('stop button missing')
+if (buttons().length !== 5) throw new Error(`expected 5 buttons (shortcut+reload+restart+stop+refresh), got ${buttons().length}`)
 if (doc.querySelector('.so-danger-note') === null) throw new Error('danger note missing')
 rpcLog = [] // the mount already polled status once; reset before interaction
-console.log('status block OK: 8 rows render pid/ports/versions, shortcut + reload + refresh + restart present')
+console.log('status block OK: 8 rows render pid/ports/versions, shortcut + reload + refresh + restart + stop present')
 
 // refresh button re-polls /app/status
 await act(async () => { fireClick(refreshButton) })
@@ -524,7 +545,7 @@ console.log('confirm state OK')
 
 // cancel returns to idle
 await act(async () => { fireClick(buttons().find((b) => b.textContent === en.cancel)) })
-if (buttons().length !== 4) throw new Error('cancel should restore shortcut+reload+restart+refresh buttons')
+if (buttons().length !== 5) throw new Error('cancel should restore shortcut+reload+restart+stop+refresh buttons')
 console.log('cancel OK')
 
 // confirm -> calling -> scheduled; host endpoint + payload shape
@@ -535,6 +556,53 @@ if (restartCall === undefined || restartCall.channel !== '/app') throw new Error
 if (JSON.stringify(restartCall.payload.args) !== '{}') throw new Error(`non-force args: ${JSON.stringify(restartCall.payload)}`)
 if (flowLine() === null || flowLine().textContent !== en.scheduled) throw new Error('scheduled status missing')
 console.log('restart flow OK: /app restart RPC (args {}) + scheduled status')
+
+// stop flow: confirm -> /app stop (non-force) -> stopped status
+rpcLog = []
+await act(async () => { fireClick(buttons().find((b) => b.textContent === en.stopService)) })
+if (rpcLog.length !== 0) throw new Error('stop confirm state must not call the host yet')
+const stopConfirmButton = buttons().find((b) => b.textContent === en.confirmStop)
+if (stopConfirmButton === undefined) throw new Error('stop-confirm button missing')
+const stopPromptLine = [...doc.querySelectorAll('.so-flow-status')].find((el) => el.textContent === en.stopConfirmPrompt)
+if (stopPromptLine === undefined) throw new Error('stop confirm prompt missing')
+await act(async () => { fireClick(stopConfirmButton) })
+const stopCall = rpcLog.find((c) => c.endpoint === 'stop')
+if (stopCall === undefined || stopCall.channel !== '/app') throw new Error(`stop rpc target: ${JSON.stringify(stopCall)}`)
+if (JSON.stringify(stopCall.payload.args) !== '{"force":false}') throw new Error(`non-force stop args: ${JSON.stringify(stopCall.payload)}`)
+if (flowLine() === null || flowLine().textContent !== en.stopped) throw new Error('stopped status missing')
+console.log('stop flow OK: /app stop RPC (force:false) + stopped status')
+
+// stop busy flow: sessions running -> force stop passes force: true
+const stopBusyHost = dom.window.document.createElement('div')
+const stopBusyRoot = createRoot(stopBusyHost)
+stopResult = { ok: false, error: { code: 'sessions-running', message: 'x', details: { running: 2, sessions: ['a', 'b'] } } }
+rpcLog = []
+await act(async () => {
+  stopBusyRoot.render(React.createElement(sectionReg.component, {
+    restart: clientInjected.restart,
+    status: clientInjected.status,
+    reloadPlugins: clientInjected.reloadPlugins,
+    installShortcut: clientInjected.installShortcut,
+    stopService: clientInjected.stopService,
+    t: tWithParams,
+  }))
+})
+await act(async () => { fireClick([...stopBusyHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.stopService)) })
+await act(async () => { fireClick([...stopBusyHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.confirmStop)) })
+const stopBusyLine = stopBusyHost.querySelector('.so-flow-status[data-tone="error"]')
+if (stopBusyLine === null || stopBusyLine.textContent !== en.stopBusyPrompt.replace('{n}', '2')) {
+  throw new Error(`stop busy line: ${stopBusyLine?.textContent}`)
+}
+const stopForceButton = [...stopBusyHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.busyActionForce)
+if (stopForceButton === undefined) throw new Error('stop force button missing')
+rpcLog = []
+await act(async () => { fireClick(stopForceButton) })
+const stopForceCall = rpcLog.find((c) => c.endpoint === 'stop')
+if (stopForceCall === undefined || stopForceCall.payload.args.force !== true) {
+  throw new Error(`stop force call args: ${JSON.stringify(stopForceCall?.payload)}`)
+}
+console.log('stop busy flow OK: refused -> busy view -> force stop sends force:true')
+stopResult = { ok: true, value: { stopping: true } }
 
 // busy flow: sessions running -> busy view -> force restart passes force: true
 const busyHost = dom.window.document.createElement('div')

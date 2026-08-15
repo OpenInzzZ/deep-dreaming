@@ -116,3 +116,5 @@ powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dev 'scripts\dep
 Write-Host ''
 Write-Host 'Install done. Restart dsh web (bundle layer + new source need a restart):' -ForegroundColor Green
 Write-Host "  powershell -ExecutionPolicy Bypass -File `"$env:USERPROFILE\.dsh\scripts\restart-dsh.ps1`""
+Write-Host 'Stop the service (no auto-restart):'
+Write-Host "  powershell -ExecutionPolicy Bypass -File `"$env:USERPROFILE\.dsh\scripts\stop-dsh.ps1`""

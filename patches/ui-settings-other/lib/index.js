@@ -450,6 +450,45 @@ export function apply(ctx, config = {}) {
         }
         return { ok: true, value: { created: true, icon: result.icon, output: result.output } }
       }
+      if (endpoint === 'stop') {
+        // Stop (not restart) the service: graceful exit through the launcher's
+        // appExit hook. The exit is deferred so the RPC response reaches the
+        // browser first; sessions-running is protected like restart.
+        const force = payload?.args?.force === true
+        const running = runningSessionIds(ctx.agents)
+        if (running.length > 0 && !force) {
+          return {
+            ok: false,
+            error: {
+              code: 'sessions-running',
+              message: `${running.length} 个会话正在运行,中断会打断它们(可强制中断)`,
+              details: { running: running.length, sessions: running },
+            },
+          }
+        }
+        if (running.length > 0) {
+          for (const id of running) {
+            const agent = ctx.agents.get(id)
+            if (agent !== undefined && agent.status === 'running') {
+              agent.cancel({ kind: 'user' }, { keepInbox: true })
+            }
+          }
+        }
+        logger.info(`[ui-settings-other] stop requested${force ? ' (force)' : ''}; exiting gracefully`)
+        setTimeout(() => {
+          try {
+            const exit = ctx.get('appExit')
+            if (typeof exit === 'function') {
+              exit(0)
+              return
+            }
+          } catch {
+            /* fall through to a hard exit */
+          }
+          process.exit(0)
+        }, 500)
+        return { ok: true, value: { stopping: true } }
+      }
       if (endpoint === 'reloadPlugins') {
         // Hot-reload the user patch layer: touching the profile's
         // cordis.patch.yml triggers dsh's watchUserPatches (a Cordis HMR

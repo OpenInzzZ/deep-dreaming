@@ -9,7 +9,7 @@ $dshHome = Join-Path $env:USERPROFILE '.dsh'     # ~/.dsh
 #    Sources live inside their owning patch directory.
 $scriptsDir = Join-Path $dshHome 'scripts'
 New-Item -ItemType Directory -Path $scriptsDir -Force | Out-Null
-foreach ($name in @('restart-dsh.ps1', 'start-dsh.ps1', 'install-desktop-shortcut.ps1')) {
+foreach ($name in @('restart-dsh.ps1', 'stop-dsh.ps1', 'start-dsh.ps1', 'install-desktop-shortcut.ps1')) {
     $src = Join-Path $dev "patches\ui-settings-other\$name"
     if (Test-Path $src) {
         Copy-Item $src (Join-Path $scriptsDir $name) -Force

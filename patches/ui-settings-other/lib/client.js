@@ -154,6 +154,13 @@ const zh = {
   shortcutExists: '快捷方式已存在:',
   shortcutFailed: '快捷方式创建失败:',
   shortcutHint: '在桌面创建 dsh-web 快捷方式(鲸鱼娘图标),双击即可静默启动服务。',
+  stopService: '中断服务',
+  stopConfirmPrompt: '确定中断服务?服务将停止,需用桌面快捷方式或 start-dsh.ps1 重新启动。',
+  confirmStop: '确认中断',
+  stopBusy: '正在中断…',
+  stopBusyPrompt: '{n} 个会话正在运行,中断会打断它们(可强制中断)。',
+  stopped: '服务已停止,可用桌面快捷方式或 start-dsh.ps1 重新启动。',
+  stopFailed: '中断请求失败,请重试。',
 };
 
 /** English dictionary checked against the Chinese key set. */
@@ -202,6 +209,13 @@ const en = {
   shortcutExists: 'Shortcut already exists:',
   shortcutFailed: 'Shortcut creation failed:',
   shortcutHint: 'Creates a dsh-web desktop shortcut (whale-girl icon) that silently starts the service on double-click.',
+  stopService: 'Stop service',
+  stopConfirmPrompt: 'Stop the service? It will not restart; use the desktop shortcut or start-dsh.ps1 to bring it back.',
+  confirmStop: 'Stop',
+  stopBusy: 'Stopping…',
+  stopBusyPrompt: '{n} session(s) are running; stopping will interrupt them (force is available).',
+  stopped: 'Service stopped. Restart it with the desktop shortcut or start-dsh.ps1.',
+  stopFailed: 'The stop request failed. Try again.',
 };
 
 /** Simplified Chinese dictionary for the 插件配置 card. */
@@ -334,7 +348,7 @@ function StatusBlock({ status, t }) {
  *   idle -> confirm -> calling -> scheduled | error
  *   idle -> busy (sessions running) -> waiting (poll until idle) | calling(force)
  */
-function OtherSection({ restart, status, reloadPlugins, installShortcut, t }) {
+function OtherSection({ restart, status, reloadPlugins, installShortcut, stopService, t }) {
   const [phase, setPhase] = useState('idle');
   const [busyInfo, setBusyInfo] = useState(null);
   const [waitTimer, setWaitTimer] = useState(null);
@@ -399,6 +413,23 @@ function OtherSection({ restart, status, reloadPlugins, installShortcut, t }) {
     )
   };
 
+  const [stopPhase, setStopPhase] = useState('idle'); // idle | confirm | calling | busy | stopped | error
+  const [stopBusy, setStopBusy] = useState(null);
+  const doStop = (force) => {
+    setStopPhase('calling')
+    void Promise.resolve().then(() => stopService(force)).then(
+      () => setStopPhase('stopped'),
+      (err) => {
+        if (err && err.code === 'sessions-running') {
+          setStopBusy(err.details || { running: 0 });
+          setStopPhase('busy');
+        } else {
+          setStopPhase('error');
+        }
+      },
+    )
+  };
+
   const tone = phase === 'error' ? 'error' : phase === 'scheduled' ? 'ok' : undefined;
 
   return jsx('div', { className: 'so-section', children: [
@@ -455,6 +486,27 @@ function OtherSection({ restart, status, reloadPlugins, installShortcut, t }) {
               onClick: () => { if (phase === 'idle') setPhase('confirm') },
               children: phase === 'calling' ? t('restarting') : t('restart'),
             }, 'restart'),
+        // Stop service — same row as restart; separate confirm state.
+        stopPhase === 'confirm'
+          ? jsxs(React.Fragment, { children: [
+              jsx('span', { className: 'so-status so-flow-status', 'data-tone': 'error', children: t('stopConfirmPrompt') }, 'stop-prompt'),
+              jsx('button', { type: 'button', className: 'so-btn so-danger', onClick: () => { doStop() }, children: t('confirmStop') }, 'stop-confirm'),
+              jsx('button', { type: 'button', className: 'so-btn', onClick: () => { setStopPhase('idle') }, children: t('cancel') }, 'stop-cancel'),
+            ] }, 'stop-confirm-row')
+          : jsx('button', {
+              type: 'button',
+              className: 'so-btn so-danger',
+              disabled: stopPhase === 'calling' ? true : undefined,
+              onClick: () => { if (stopPhase === 'idle') setStopPhase('confirm') },
+              children: stopPhase === 'calling' ? t('stopBusy') : t('stopService'),
+            }, 'stop'),
+        stopPhase === 'busy'
+          ? jsxs(React.Fragment, { children: [
+              jsx('span', { className: 'so-status so-flow-status', 'data-tone': 'error', children: t('stopBusyPrompt', { n: stopBusy?.running ?? 0 }) }, 'stop-busy-status'),
+              jsx('button', { type: 'button', className: 'so-btn so-danger', onClick: () => { doStop(true) }, children: t('busyActionForce') }, 'stop-force'),
+              jsx('button', { type: 'button', className: 'so-btn', onClick: () => { setStopPhase('idle') }, children: t('cancel') }, 'stop-busy-cancel'),
+            ] }, 'stop-busy-row')
+          : null,
         phase === 'busy' || phase === 'waiting'
           ? jsxs(React.Fragment, { children: [
               jsx('span', { className: 'so-status so-flow-status', 'data-tone': 'error', children: phase === 'waiting'
@@ -475,6 +527,12 @@ function OtherSection({ restart, status, reloadPlugins, installShortcut, t }) {
         : null,
       phase === 'error'
         ? jsx('button', { type: 'button', className: 'so-btn', onClick: () => { setPhase('idle') }, children: t('retry') }, 'retry')
+        : null,
+      stopPhase === 'stopped' || stopPhase === 'error'
+        ? jsx('p', { className: 'so-status so-flow-status', 'data-tone': stopPhase === 'stopped' ? 'ok' : 'error', children: stopPhase === 'stopped' ? t('stopped') : t('stopFailed') }, 'stop-status')
+        : null,
+      stopPhase === 'error'
+        ? jsx('button', { type: 'button', className: 'so-btn', onClick: () => { setStopPhase('idle') }, children: t('retry') }, 'stop-retry')
         : null,
     ] }, 'card'),
   ] });
@@ -666,7 +724,17 @@ function apply(ctx) {
     if (!result.ok) throw new Error('installShortcut failed: ' + result.error.code + ': ' + result.error.message)
     return result.value
   }
-  const injected = () => ({ restart, status, reloadPlugins, installShortcut })
+  const stopService = async (force) => {
+    const result = await ctx.connection.rpc.call('/app', 'stop', { args: { force: !!force } })
+    if (!result.ok) {
+      const err = new Error('stop failed: ' + result.error.code + ': ' + result.error.message)
+      err.code = result.error.code
+      err.details = result.error.details
+      throw err
+    }
+    return result.value
+  }
+  const injected = () => ({ restart, status, reloadPlugins, installShortcut, stopService })
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',

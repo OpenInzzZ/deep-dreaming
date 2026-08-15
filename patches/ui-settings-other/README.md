@@ -1,6 +1,6 @@
-# 设置「其他」页 —— 服务管理(重载插件 / 重启 / 运行状态 / 空闲自动停止 / 桌面快捷方式)+ 静默启动
+# 设置「其他」页 —— 服务管理(重载插件 / 重启 / 中断 / 运行状态 / 空闲自动停止 / 桌面快捷方式)+ 静默启动
 
-在 dsh Web 设置中新增一个 **其他(Other)** 页面,提供五块能力:
+在 dsh Web 设置中新增一个 **其他(Other)** 页面,提供六块能力:
 
 1. **重载用户插件**:触发 dsh 对 `cordis.patch.yml` 的热重载
    (`watchUserPatches` 事务性重应用),全部用户级插件(host 与浏览器两半)
@@ -12,10 +12,14 @@
    进程,当前进程退出)。**会中断所有运行中的会话**,仅用于升级 dsh、
    修改核心插件或状态异常等必须整进程重启的场景(日常用户插件更新请用
    「重载用户插件」)。
-4. **运行状态**:实时展示服务进程快照 —— 进程 ID、监听端口、运行时长、
+4. **中断服务**:点击后 dsh 服务进程优雅退出,**不会自动重启**;需要时用
+   桌面快捷方式或 `start-dsh.ps1` 重新拉起。同样**会中断所有运行中的
+   会话**,用于停机维护 / 切换启动方式等场景。命令行等价物:
+   `stop-dsh.ps1`。
+5. **运行状态**:实时展示服务进程快照 —— 进程 ID、监听端口、运行时长、
    内存占用、Node 版本、dsh 版本、运行中会话数、空闲自动停止倒计时
    (每 10 秒自动轮询,也可手动刷新)。
-5. **空闲自动停止**:持续没有**运行中的会话**超过 `idleMinutes`(默认 120,
+6. **空闲自动停止**:持续没有**运行中的会话**超过 `idleMinutes`(默认 120,
    即 2 小时)后,服务自动优雅退出;配合桌面快捷方式可随时静默重新拉起。
 
 ## 品牌图标(鲸鱼娘)
@@ -36,8 +40,8 @@
 
 - 设置导航新增「其他」页(排在 Agent 预设之后,`order: 30`)。
 - 「服务」卡片顶部是**运行状态**块(见上),中部是**重载用户插件**与
-  **创建桌面快捷方式**按钮(普通操作,绿色提示),底部是**重启服务**按钮
-  (危险区,附说明文案)。
+  **创建桌面快捷方式**按钮(普通操作,绿色提示),底部是**重启服务**与
+  **中断服务**按钮(危险区,附说明文案)。
 - **重载用户插件**:点击即经 `/app` 通道的 `reloadPlugins` 端点在
   `cordis.patch.yml` 上维护一行时间戳标记并写回,触发官方热重载;
   成功后显示「已请求重载,数秒内生效」。host 端不等待重载完成即返回,
@@ -50,13 +54,19 @@
 - **重启服务**(危险):**二次确认**后才真正执行(第一次点击进入确认态,
   再点「确认重启」);请求发出后按钮进入「正在重启…」禁用态;成功后显示
   「已请求重启,服务即将断开,请稍后刷新页面」;失败显示错误并提供重试。
+- **中断服务**(危险):与重启同一行,独立**二次确认**(「确定中断服务?
+  服务将停止,需用桌面快捷方式或 start-dsh.ps1 重新启动。」);确认后经
+  `/app` 通道的 `stop` 端点,host 延迟 500ms 调用 launcher 的
+  `ctx.appExit(0)` 优雅退出(该通道不可用时回退 `process.exit(0)`)——
+  延迟保证 RPC 响应先送达浏览器。
 - **防重复**:host 侧有锁(spawn 失败 / 脚本非零退出 / 90 秒看门狗都会
   释放),重复请求直接返回"已排定"。
-- **会话保护**:有会话正在运行时,`restart` 拒绝执行并返回 `sessions-running`
-  (含数量);页面提供两个选项:
-  - **等待空闲后重启**:每 2s 轮询 `/app/status`,归零后自动发起重启;
-  - **强制重启**:先对所有运行中会话执行
-    `agent.cancel({ kind: 'user' }, { keepInbox: true })`,再重启。
+- **会话保护**:有会话正在运行时,`restart` / `stop` 拒绝执行并返回
+  `sessions-running`(含数量);页面提供两个选项:
+  - **等待空闲后重启**(仅重启支持):每 2s 轮询 `/app/status`,归零后
+    自动发起重启;
+  - **强制重启 / 强制中断**:先对所有运行中会话执行
+    `agent.cancel({ kind: 'user' }, { keepInbox: true })`,再执行。
 
 ### 空闲自动停止(设置 → 插件 → 插件配置)
 
@@ -98,9 +108,9 @@
 
 ## 工作原理
 
-补丁分 host / client 两半,挂载在同一个 loader 条目上,**重启逻辑收敛在
-独立脚本** `restart-dsh.ps1`(由 `scripts/deploy.ps1` 同步到
-`~/.dsh/scripts/`),可脱离插件单独运行与测试:
+补丁分 host / client 两半,挂载在同一个 loader 条目上,**重启与中断逻辑收敛
+在独立脚本** `restart-dsh.ps1` / `stop-dsh.ps1`(由 `scripts/deploy.ps1`
+同步到 `~/.dsh/scripts/`),可脱离插件单独运行与测试:
 
 - **Host 半(`lib/index.js`)**:
   - 通过 `ctx.connection.rpc.handle('/app', …)` 注册独立 RPC 通道
@@ -113,13 +123,22 @@
     (enabled / idleMinutes / lastBusyAt)。
   - `restart` 端点只做一件事:detached 调起 `restart-dsh.ps1`(路径取自
     补丁 config 的 `script`,默认 `~/.dsh/scripts/restart-dsh.ps1`)。
+  - `stop` 端点:会话保护同 `restart`(非强制且有运行会话时返回
+    `sessions-running`;强制时先 `agent.cancel(…, { keepInbox: true })`
+    取消所有运行中会话),随后延迟 500ms 调用 `ctx.appExit(0)`(回退
+    `process.exit(0)`)——延迟让 RPC 响应先送达浏览器再退出。
   - 空闲监控:settings namespace `ui-settings-other` 经
     `installSettingsSection` 注册(`applies: live`,变更即时重建监控);
     settings 服务缺失时回退补丁 entry 配置。
 - **脚本(`restart-dsh.ps1`)**:完整生命周期 —— 通过端口找到当前 dsh
   进程并恢复其原始命令行(引号感知 tokenizer)→ `SettleSeconds` 让 RPC
-  响应先送达 → 停止旧进程 → 以相同命令行启动新进程(日志重定向)→
-  轮询端口直至就绪。支持 `-DryRun`、`-Port`、`-SettleSeconds`。
+  响应先送达 → 停止旧进程 → 等待端口释放 → 以相同命令行启动新进程
+  (日志重定向)→ 轮询端口直至就绪。支持 `-DryRun`、`-Port`、
+  `-SettleSeconds`。
+- **脚本(`stop-dsh.ps1`)**:通过端口找到监听进程并打印其命令行 →
+  `Stop-Process -Force` → 等待端口释放(供后续 `start-dsh.ps1` 安全
+  重拉)。支持 `-DryRun`、`-Port`;没有任何会话检查,请在运行前确认
+  没有进行中的会话。
 - **Client 半(`lib/client.js`)**:注册 `settings.section` slot
   (`id: 'other'`, `order: 30`)与 `settings.plugin.item` 配置卡片
   (`id: '@local/dsh-client-ui-settings-other'`, `order: 30`);按钮与状态块
@@ -129,7 +148,8 @@
 
 与 ui-settings-plugin-manager 相同的机制:实现来源在本仓库,部署侧建立
 junction 链接 + patch 条目;`deploy.ps1` 会把 `restart-dsh.ps1` /
-`start-dsh.ps1` / `install-desktop-shortcut.ps1` 同步到 `~/.dsh/scripts/`。
+`stop-dsh.ps1` / `start-dsh.ps1` / `install-desktop-shortcut.ps1` 同步到
+`~/.dsh/scripts/`。
 
 1. 建立指向本目录的目录联接(junction):
 
@@ -168,7 +188,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
    - 更新了任何用户级插件(本仓库补丁或其他 `cordis.patch.yml` 条目)后,
      点击 **重载用户插件** → 数秒内生效,不中断会话;
    - 仅当升级 dsh / 修改核心插件时,才使用 **重启服务** → 确认 →
-     等待约 10~20 秒后刷新页面(会中断所有运行中会话)。
+     等待约 10~20 秒后刷新页面(会中断所有运行中会话);
+   - 需要停机维护时使用 **中断服务** → 确认 → 服务优雅退出(会中断
+     所有运行中会话);之后用桌面快捷方式或 `start-dsh.ps1` 重新拉起。
+     命令行等价物:
+     `powershell -ExecutionPolicy Bypass -File .\scripts\stop-dsh.ps1`。
 2. 设置 → **插件** → **插件配置** → 展开「服务(空闲自动停止)」:
    调整开关与空闲分钟数,点「保存」即时生效。
 3. 桌面双击 **dsh-web** 快捷方式静默启动服务(已运行时无操作);
@@ -183,18 +207,18 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
    空闲监控随 fiber 卸载停止);
 2. 删除 `~/.dsh/profiles/node_modules/@local/dsh-client-ui-settings-other`
    链接;
-3. 可选:删除桌面 `dsh-web.lnk` 与 `~/.dsh/scripts/` 下本补丁的三个脚本。
+3. 可选:删除桌面 `dsh-web.lnk` 与 `~/.dsh/scripts/` 下本补丁的四个脚本。
 
 ## 注意事项
 
-- **重启服务会中断所有运行中会话**(整进程重启);日常用户插件更新请用
-  「重载用户插件」。
+- **重启 / 中断服务会中断所有运行中会话**(整进程停止);日常用户插件更新
+  请用「重载用户插件」。
 - 重启后新进程**脱离原终端独立运行**(detached);再次重启需在 Web 中
   操作、运行脚本或结束进程后重新启动。
 - 空闲自动停止会**结束整个 dsh web 进程**(包括正在浏览页面的人),请在
   无人使用或接受中断时开启;需要保活可把空闲分钟数调大或关闭开关。
-- 手动运行 `restart-dsh.ps1` 没有会话检查(脚本无法访问会话状态),请在
-  运行前确认没有进行中的会话。
+- 手动运行 `restart-dsh.ps1` / `stop-dsh.ps1` 没有会话检查(脚本无法访问
+  会话状态),请在运行前确认没有进行中的会话。
 - 重载用户插件后,若某个补丁加载失败,`cordis.patch.yml` 热重载保持上次
   成功状态并在 dsh 日志记录告警;修复补丁后再次「重载用户插件」即可。
 
@@ -205,11 +229,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 node verify-settings-other.mjs          # 在本补丁目录下运行
 ```
 
-覆盖:host 半 `/app` 通道注册与端点校验(不真正重启)、`reloadPlugins`
-端点(写临时 patch 文件,不碰真实 profile 层)、apply 不返回 thenable 的
-P0 回归守卫、运行状态快照(serviceInfo / listeningPorts / dshVersion)、
-空闲判定与监控器(假时钟:busy 重置 / 阈值等待 / 恰好一次停止)、settings
-namespace 注册与 watch 重建、client 半契约(bundle handoff、section 与
-卡片 id/order、zh/en 字典一致、reloadPlugins 注入面)。DOM 交互段
-(状态块渲染、重载/重启/等待/强制流程、配置卡片经 `/app` RPC 保存与
-重置)需要 jsdom;未安装时自动跳过并提示。
+覆盖:host 半 `/app` 通道注册与端点校验(不真正重启)、`stop` 端点(非强制
+拒绝 / 强制取消会话并调用 appExit(0))、`reloadPlugins` 端点(写临时
+patch 文件,不碰真实 profile 层)、apply 不返回 thenable 的 P0 回归守卫、
+运行状态快照(serviceInfo / listeningPorts / dshVersion)、空闲判定与监控器
+(假时钟:busy 重置 / 阈值等待 / 恰好一次停止)、settings namespace 注册与
+watch 重建、client 半契约(bundle handoff、section 与卡片 id/order、
+zh/en 字典一致、reloadPlugins / stopService 注入面)。DOM 交互段
+(状态块渲染、重载/重启/中断/等待/强制流程、配置卡片经 `/app` RPC 保存
+与重置)需要 jsdom;未安装时自动跳过并提示。
