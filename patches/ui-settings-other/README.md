@@ -57,7 +57,7 @@
   - **强制重启**:先对所有运行中会话执行
     `agent.cancel({ kind: 'user' }, { keepInbox: true })`,再重启。
 
-### 空闲自动停止(设置 → 插件 → 插件配置 / 插件管理)
+### 空闲自动停止(设置 → 插件 → 插件配置)
 
 - 配置卡片「服务(空闲自动停止)」,两个字段:
   - **启用空闲自动停止**(开关,默认开);
@@ -65,11 +65,9 @@
 - 保存即时生效(host 按新配置重建监控);也可直接编辑
   `~/.dsh/settings.yaml` 的 `ui-settings-other:` 段(文件被监听)。
 - 配置卡片经插件自身的 `/app` RPC 通道读写(getSettings / setSettings /
-  resetSettings),不依赖 dsh 设置的暴露白名单(apiproxy),因此在
-  「插件配置」与「插件管理」两个页面均可编辑;点 **恢复默认** 整体
-  回退到组合层配置。「插件管理」页中的配置卡片由
-  `ui-settings-plugin-manager` 补丁声明的 `settings.plugin.manager.item`
-  槽位承载,**需同时启用该补丁**才显示。
+  resetSettings),不依赖 dsh 设置的暴露白名单(apiproxy),在
+  **设置 → 插件 → 插件配置** 页编辑(插件管理页仅负责插件启停,不承载
+  配置卡片);点 **恢复默认** 整体回退到组合层配置。
 - 判定规则:host 每分钟检查一次 `agents` 服务,只要有会话处于
   `running` 状态就重置空闲时钟;超过阈值仍无运行会话则调用
   launcher 提供的 `ctx.appExit(0)` 优雅关闭(该通道不可用时回退
@@ -116,9 +114,9 @@
   响应先送达 → 停止旧进程 → 以相同命令行启动新进程(日志重定向)→
   轮询端口直至就绪。支持 `-DryRun`、`-Port`、`-SettleSeconds`。
 - **Client 半(`lib/client.js`)**:注册 `settings.section` slot
-  (`id: 'other'`, `order: 30`)与 `settings.plugin.item` / 
-  `settings.plugin.manager.item` 配置卡片(`id: '@local/dsh-client-ui-settings-other'`,
-  `order: 30`);按钮与状态块调用 `ctx.connection.rpc.call('/app', …)`。
+  (`id: 'other'`, `order: 30`)与 `settings.plugin.item` 配置卡片
+  (`id: '@local/dsh-client-ui-settings-other'`, `order: 30`);按钮与状态块
+  调用 `ctx.connection.rpc.call('/app', …)`。
 
 ## 部署(加载到 dsh)
 

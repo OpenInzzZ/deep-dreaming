@@ -210,7 +210,7 @@ function matches(entry, normalizedQuery) {
 }
 
 /** Render the filterable, categorized current Loader inventory. */
-function PluginManagerSettingsTab({ list, toggleEnabled, t, renderSlot }) {
+function PluginManagerSettingsTab({ list, toggleEnabled, t }) {
   const catalogId = useId();
   const [request, setRequest] = useState(0);
   const [query, setQuery] = useState('');
@@ -414,14 +414,6 @@ function PluginManagerSettingsTab({ list, toggleEnabled, t, renderSlot }) {
                   jsx('dd', { children: status }, 'dd-cordis'),
                 ] }, 'cordis-row') : null,
               ] }, 'details'),
-              // Config cards contributed by the plugin itself — the shipped
-              // settings whitelist would refuse custom namespaces, so plugins
-              // expose their config over their own RPC channel and register
-              // here. `only` filters by the CHILD ENTRY'S REGISTRATION ID, so
-              // a contributor must register with id == this entry's module
-              // name (e.g. '@local/dsh-plugin-session-cleanup') to be shown
-              // on this plugin's card.
-              renderSlot('settings.plugin.manager.item', {}, { only: entry.moduleName }),
             ] }, 'details-body') : null,
           ],
         }, entry.entryId)
@@ -458,10 +450,6 @@ function apply(ctx) {
     label: () => t('tab'),
     locale: NS,
     inject: injected,
-    children: { 'settings.plugin.manager.item': {
-      kind: 'list',
-      scope: 'root',
-    } },
   }, PluginManagerSettingsTab))
 }
 

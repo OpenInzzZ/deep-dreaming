@@ -49,9 +49,12 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 ```
 
 `cordis.patch.yml` 由运行中的 dsh 热加载(watch-only HMR):保存后数秒内自动
-挂载,host 与 client 半均热生效,**无需重启服务器**;其它用户补丁(配置卡片
-等)的变更可在设置 →「其他」页点 **重载用户插件** 手动触发同样的热重载。
+挂载,host 与 client 半均热生效,**无需重启服务器**;其它用户补丁的变更
+可在设置 →「其他」页点 **重载用户插件** 手动触发同样的热重载。
 修改本补丁源码后需重启 dsh web 才生效。
+
+**职责边界**:本页**仅负责插件启停管理**(清单 + 启停按钮);插件的配置
+卡片统一在「插件配置」页(`settings.plugin.item`)编辑,不在此页重复展示。
 
 ## 如何使用
 

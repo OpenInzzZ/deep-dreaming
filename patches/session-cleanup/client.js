@@ -319,19 +319,10 @@ function apply(ctx) {
   }
   const cardApi = () => ({ getConfig, setConfig, resetConfig })
 
-  // The shipped 插件配置 page (settings.plugin.item).
+  // The shipped 插件配置 page (settings.plugin.item). Config cards live only
+  // here; the plugin-manager page is enable/disable management only.
   ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
     name: 'settings.plugin.item',
-    id: '@local/dsh-plugin-session-cleanup',
-    order: 30,
-    locale: NS,
-    inject: cardApi,
-  }, SessionCleanupCard))
-
-  // The plugin-manager page, keyed by the plugin's module name (the manager
-  // renders this slot with `only: entry.moduleName`).
-  ctx.slots.inject('settings.plugin.manager.item', () => ctx.slots.register({
-    name: 'settings.plugin.manager.item',
     id: '@local/dsh-plugin-session-cleanup',
     order: 30,
     locale: NS,

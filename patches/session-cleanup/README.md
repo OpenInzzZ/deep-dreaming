@@ -79,10 +79,9 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
    清理);点 **恢复默认** 可整体回退到组合层配置。
 
 > 配置卡片经插件自身的 `/session-cleanup` RPC 通道读写(getConfig /
-> setConfig / resetConfig),不依赖 dsh 设置的暴露白名单(apiproxy),
-> 因此在「插件配置」与「插件管理」两个页面均可编辑。「插件管理」页中的
-> 卡片由 `ui-settings-plugin-manager` 补丁声明的
-> `settings.plugin.manager.item` 槽位承载,**需同时启用该补丁**才显示。
+> setConfig / resetConfig),不依赖 dsh 设置的暴露白名单(apiproxy),在
+> **设置 → 插件 → 插件配置** 页编辑(插件管理页仅负责插件启停,不承载
+> 配置卡片)。
 
 > 手动编辑 `~/.dsh/settings.yaml` 同样生效(文件被监听,改动即重载):
 >
