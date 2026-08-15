@@ -3,43 +3,40 @@
  *
  * Registers `tool.call.toolview` for the three project-memory tools
  * (project_memory_save / search / list), so every memory action in a session
- * renders as one collapsible card — header shows the memory badge + title +
- * a one-line summary, expanding reveals the full result text. This mirrors
- * the collapsible rows the shipped UI uses for terminal runs and tool calls,
- * giving the session-end memory review a compact, distinguishable "memory
- * phase" look.
+ * renders as one collapsible card. The card reuses the shipped `DisclosureRow`
+ * primitive — the same component the official "Think" reasoning row is built
+ * on — so the memory phase looks and behaves exactly like the Think rows:
+ * leading icon + title + one-line summary, expanding reveals the full result.
  *
  * Hand-written bundle in the client-module contract: only platform seed
- * words (react, react/jsx-runtime) plus the slots service on the ctx.
+ * words (react, react/jsx-runtime, @deepseek-ai/dsh-client-ui-primitives)
+ * plus the slots service on the ctx.
  */
 window.__ModuleLoader__.load({ id: 'dsh-project-memory', factory: (require) => {
 var module = { exports: {} }; var exports = module.exports;
 
 const React = require('react');
 const { useEffect, useState } = React;
-const { jsx, jsxs } = require('react/jsx-runtime');
+const { jsx, jsxs, Fragment } = require('react/jsx-runtime');
+const { DisclosureRow, IconListPenOutline16, IconSearchOutline16, IconChecklistOutline14 } = require('@deepseek-ai/dsh-client-ui-primitives');
 
 const PLUGIN_ID = 'dsh-project-memory';
 
-/* Collapsible memory-card styles; theme variables only. */
+/* Memory-card styles: DisclosureRow supplies the row chrome; these mirror the
+   official Think row's summary/body look (tertiary text, 22px body indent). */
 const CSS = [
-  '.pmem-card{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-3);overflow:hidden}',
+  '.pmem-card{display:flex;flex-direction:column}',
   '.pmem-card+.pmem-card{margin-top:6px}',
-  '.pmem-head{display:flex;align-items:center;gap:10px;width:100%;min-height:40px;padding:6px 12px;background:0 0;border:0;color:var(--dsw-alias-label-primary);font:inherit;text-align:left;cursor:pointer}',
-  '.pmem-head:hover{background:var(--dsw-alias-interactive-bg-hover)}',
-  '.pmem-head:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px}',
-  '.pmem-badge{flex:none;display:inline-flex;align-items:center;min-height:18px;padding:0 7px;border-radius:5px;background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 12%,transparent);color:var(--dsw-alias-state-business-primary);font-size:11px;line-height:18px;font-weight:600}',
-  '.pmem-title{flex:none;font-size:13px;font-weight:600;line-height:20px}',
-  '.pmem-dot{flex:none;width:8px;height:8px;border-radius:999px;background:var(--dsw-alias-label-tertiary)}',
+  '.pmem-title{font-weight:400}',
+  '.pmem-dot{flex:none;width:8px;height:8px;border-radius:999px;background:var(--dsw-alias-label-caption);margin:0 8px}',
   '.pmem-dot[data-state="running"]{background:var(--dsw-alias-state-business-primary)}',
   '.pmem-dot[data-state="ok"]{background:var(--dsw-alias-state-success-primary)}',
   '.pmem-dot[data-state="error"]{background:var(--dsw-alias-state-error-primary)}',
-  '.pmem-summary{min-width:0;flex:auto;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
-  '.pmem-chevron{flex:none;color:var(--dsw-alias-label-tertiary);transition:transform 140ms var(--ds-ease-in-out);font-size:10px}',
-  '.pmem-head[data-open="true"] .pmem-chevron{transform:rotate(180deg)}',
-  '.pmem-body{border-top:1px solid var(--dsw-alias-border-l2);padding:10px 14px 12px;background:var(--dsw-alias-bg-layer-1)}',
+  '.pmem-summary{min-width:0;overflow:hidden;flex:1 1 auto;color:var(--dsw-alias-label-tertiary);font-size:14px;line-height:24px;text-overflow:ellipsis;white-space:nowrap}',
+  '.pmem-keywords{flex:none;max-width:45%;margin-left:8px;color:var(--dsw-alias-label-caption);font-size:12px;line-height:24px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+  '.pmem-body{padding:4px 0 4px 22px;color:var(--dsw-alias-label-tertiary);font-size:14px;line-height:24px}',
   '.pmem-args{font-family:var(--ds-font-family-code);font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;word-break:break-word;margin:0 0 8px}',
-  '.pmem-text{font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary);white-space:pre-wrap;word-break:break-word;margin:0}',
+  '.pmem-text{color:var(--dsw-alias-label-primary);white-space:pre-wrap;word-break:break-word;margin:0}',
   '.pmem-text[data-tone="error"]{color:var(--dsw-alias-state-error-primary)}',
 ].join('\n');
 (function () {
@@ -53,11 +50,16 @@ const CSS = [
   document.head.appendChild(tag)
 })();
 
-/** Display titles per wire tool name (the "memory phase" label). */
+/** Display titles and leading icons per wire tool name. */
 const TITLES = {
   project_memory_save: '记忆 · 保存/更新',
   project_memory_search: '记忆 · 检索',
   project_memory_list: '记忆 · 浏览',
+};
+const ICONS = {
+  project_memory_save: IconListPenOutline16,
+  project_memory_search: IconSearchOutline16,
+  project_memory_list: IconChecklistOutline14,
 };
 
 /** Concatenate the result text blocks of a settled tool node. */
@@ -76,7 +78,11 @@ function summarize(name, running, text, isError) {
   const first = text.split('\n')[0].trim()
   if (name === 'project_memory_save') {
     const m = /(?:saved|updated):\s*(.+?)\s*\[/.exec(first)
-    return m !== null ? '已' + (first.startsWith('saved') ? '保存' : '更新') + ':' + m[1].trim() : (first || '完成')
+    if (m !== null) {
+      const action = /\bsaved:/.test(first) ? '保存' : '更新'
+      return '已' + action + ':' + m[1].trim()
+    }
+    return first || '完成'
   }
   if (name === 'project_memory_search') {
     if (first === 'No project memories found.') return '无结果'
@@ -105,45 +111,75 @@ function argsOf(block, running) {
   }
 }
 
+/** Memory keywords shown on the collapsed row (up to 3): the save call's
+ * `keywords` argument, or the first hit's keywords line in a search/list
+ * result. */
+function keywordsOf(block, name, running, text) {
+  const raw = running ? block.argsRaw : (block.call?.argsRaw ?? '')
+  if (name === 'project_memory_save') {
+    try {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed.keywords)) {
+        const keywords = parsed.keywords.map(String).filter((k) => k.length > 0).slice(0, 3)
+        if (keywords.length > 0) return keywords
+      }
+    } catch { /* fall through to the text parse below */ }
+  }
+  const m = /keywords:\s*(.+)$/m.exec(text)
+  if (m !== null) {
+    return m[1].split(/[、,，]/).map((k) => k.trim()).filter((k) => k.length > 0).slice(0, 3)
+  }
+  return []
+}
+
 /**
- * Collapsible card for one project-memory tool call.
+ * Collapsible card for one project-memory tool call, styled like the shipped
+ * "Think" reasoning row (DisclosureRow primitive).
  * @param props.block - frozen RunningToolCall or settled ToolResultNode.
  */
 function MemoryToolCard({ block, callId }) {
   const running = !('kind' in block) || block.kind !== 'tool-result';
   const name = running ? block.name : (block.call?.name ?? 'project_memory_save');
   const title = TITLES[name] ?? '记忆';
+  const Icon = ICONS[name] ?? IconListPenOutline16;
   const text = running ? '' : resultText(block);
   const isError = !running && block.isError === true;
   const [open, setOpen] = useState(false);
   useEffect(() => { if (running) setOpen(true) }, [running]);
 
+  const state = running ? 'running' : (isError ? 'error' : 'ok');
   const summary = summarize(name, running, text, isError);
   const args = argsOf(block, running);
+  const keywords = keywordsOf(block, name, running, text);
 
-  return jsxs('div', { className: 'pmem-card', 'data-memory-card': '', children: [
-    jsxs('button', {
-      type: 'button',
-      className: 'pmem-head',
-      'data-open': open ? 'true' : undefined,
-      'aria-expanded': open,
-      'aria-label': title + ':' + summary,
-      onClick: () => { setOpen(!open) },
-      children: [
-        jsx('span', { className: 'pmem-badge', children: '记忆' }, 'badge'),
-        jsx('span', { className: 'pmem-title', children: title }, 'title'),
-        jsx('span', { className: 'pmem-dot', 'data-state': running ? 'running' : (isError ? 'error' : 'ok'), 'aria-hidden': true }, 'dot'),
+  return jsx('div', {
+    className: 'pmem-card',
+    'data-memory-card': '',
+    'data-state': state,
+    children: jsx(DisclosureRow, {
+      icon: jsx(Icon, { size: 14 }),
+      title,
+      open,
+      expandable: true,
+      expandOnRowClick: true,
+      onToggle: () => { setOpen(!open) },
+      rowClassName: 'pmem-row',
+      titleClassName: 'pmem-title',
+      collapsedContent: jsxs(Fragment, { children: [
+        jsx('span', { className: 'pmem-dot', 'data-state': state, 'aria-hidden': true }, 'dot'),
         jsx('span', { className: 'pmem-summary', children: summary }, 'summary'),
-        jsx('span', { className: 'pmem-chevron', 'aria-hidden': true, children: '▾' }, 'chevron'),
-      ],
-    }, 'head'),
-    open ? jsxs('div', { className: 'pmem-body', children: [
-      args.length > 0 ? jsx('pre', { className: 'pmem-args', children: args }, 'args') : null,
-      running
-        ? jsx('p', { className: 'pmem-text', children: '执行中…' }, 'running')
-        : jsx('p', { className: 'pmem-text', 'data-tone': isError ? 'error' : undefined, children: text || '无输出' }, 'text'),
-    ] }, 'body') : null,
-  ] }, callId);
+        keywords.length > 0
+          ? jsx('span', { className: 'pmem-keywords', children: keywords.join('、') }, 'keywords')
+          : null,
+      ] }),
+      children: jsxs('div', { className: 'pmem-body', children: [
+        args.length > 0 ? jsx('pre', { className: 'pmem-args', children: args }, 'args') : null,
+        running
+          ? jsx('p', { className: 'pmem-text', children: '执行中…' }, 'running')
+          : jsx('p', { className: 'pmem-text', 'data-tone': isError ? 'error' : undefined, children: text || '无输出' }, 'text'),
+      ] }, 'body'),
+    }),
+  }, callId);
 }
 
 /** Contribute the collapsible memory cards for the three memory tools. */

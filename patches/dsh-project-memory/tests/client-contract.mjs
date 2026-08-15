@@ -54,9 +54,35 @@ if (handoff === null) throw new Error('bundle never called __ModuleLoader__.load
 if (handoff.id !== PLUGIN_ID) throw new Error(`handoff id mismatch: ${handoff.id}`)
 
 // --- module-table words must stay within the platform seed set ---------------
+// The real ui-primitives node half pulls katex CSS into Node, so the
+// DisclosureRow + icons are stubbed here (same approach as the other patches'
+// verifies); the stub mirrors the DisclosureRow behavior the bundle relies on
+// (title + collapsedContent while closed, children while open, row click
+// toggles via expandOnRowClick).
+const icon = (props) => React.createElement('svg', { ...props, 'data-icon': true })
 const requireTable = (spec) => {
   if (spec === 'react') return uiRequire('react')
   if (spec === 'react/jsx-runtime') return uiRequire('react/jsx-runtime')
+  if (spec === '@deepseek-ai/dsh-client-ui-primitives') {
+    const DisclosureRow = (props) => React.createElement(
+      'div',
+      {
+        'data-disclosure-row': '',
+        'data-open': props.open || undefined,
+        onClick: props.expandable && props.expandOnRowClick ? props.onToggle : undefined,
+      },
+      props.icon,
+      React.createElement('span', { className: 'pmem-title' }, props.title),
+      (!props.open || props.keepContentWhenOpen) ? props.collapsedContent : null,
+      props.open ? props.children : null,
+    )
+    return {
+      DisclosureRow,
+      IconListPenOutline16: icon,
+      IconSearchOutline16: icon,
+      IconChecklistOutline14: icon,
+    }
+  }
   throw new Error(`unexpected module-table word: ${spec}`)
 }
 const exports_ = handoff.factory(requireTable)
@@ -104,7 +130,7 @@ const settled = {
   seq: 1,
   time: Date.now(),
   callId: 'call-1',
-  call: { name: 'project_memory_save', argsRaw: '{"title":"测试笔记","content":"x"}' },
+  call: { name: 'project_memory_save', argsRaw: '{"title":"测试笔记","content":"x","keywords":["测试","笔记"]}' },
   callTime: null,
   content: [{ type: 'text', text: 'Project memory saved: 测试笔记 [general] (new, used 1) -> C:\\w\\x.md' }],
   isError: false,
@@ -119,17 +145,20 @@ await act(async () => {
 })
 const card = host.querySelector('[data-memory-card]')
 if (card === null) throw new Error('memory card did not render')
-const head = host.querySelector('.pmem-head')
-if (head === null) throw new Error('card head missing')
+const head = host.querySelector('[data-disclosure-row]')
+if (head === null) throw new Error('card head missing (DisclosureRow)')
 if (!head.textContent.includes('记忆') || !head.textContent.includes('已保存')) {
   throw new Error(`head summary missing: ${head.textContent}`)
+}
+if (!head.textContent.includes('测试') || !head.textContent.includes('笔记')) {
+  throw new Error(`collapsed row must show the memory keywords: ${head.textContent}`)
 }
 // collapsed by default for settled cards; expanding reveals the full text
 if (host.querySelector('.pmem-text') !== null) throw new Error('settled card must start collapsed')
 await act(async () => { head.dispatchEvent(new window.MouseEvent('click', { bubbles: true })) })
 const text = host.querySelector('.pmem-text')
 if (text === null || !text.textContent.includes('Project memory saved')) throw new Error('expanded text missing')
-console.log('render OK: settled save card collapses to 已保存:<title>, expands to full text')
+console.log('render OK: settled save card (DisclosureRow) collapses to 已保存:<title> + keywords, expands to full text')
 
 // running card auto-expands with "执行中…"
 const runningComponent = views.find((v) => v.key === 'project_memory_search').component

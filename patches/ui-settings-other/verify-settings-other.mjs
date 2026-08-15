@@ -36,9 +36,9 @@ const React = uiRequire('react')
 // client DOM sections are skipped then, host + contract checks still run.
 let JSDOM = null
 try {
-  JSDOM = uiRequire('jsdom')
+  JSDOM = uiRequire('jsdom').JSDOM
 } catch {
-  try { JSDOM = createRequire('D:/GitHub/deepseek-harness/package.json')('jsdom') } catch { /* skip */ }
+  try { JSDOM = createRequire('D:/GitHub/deepseek-harness/package.json')('jsdom').JSDOM } catch { /* skip */ }
 }
 const DOM_AVAILABLE = JSDOM !== null
 
@@ -462,7 +462,12 @@ await act(async () => {
 
 const doc = dom.window.document
 const buttons = () => [...doc.querySelectorAll('.so-btn')]
-const flowLine = () => doc.querySelector('.so-flow-status')
+// The current flow's status line is the LAST .so-flow-status in DOM order
+// (reload/shortcut success lines from earlier flows stay mounted).
+const flowLine = () => {
+  const lines = [...doc.querySelectorAll('.so-flow-status')]
+  return lines.length > 0 ? lines[lines.length - 1] : null
+}
 
 // runtime snapshot block renders from the first /app/status poll
 const infoRows = () => [...doc.querySelectorAll('.so-info-row')]
@@ -504,7 +509,8 @@ await act(async () => { fireClick(shortcutButton) })
 const shortcutCall = rpcLog.find((c) => c.endpoint === 'installShortcut')
 if (shortcutCall === undefined || shortcutCall.channel !== '/app') throw new Error(`shortcut rpc target: ${JSON.stringify(shortcutCall)}`)
 await act(async () => {})
-if (flowLine() === null || !flowLine().textContent.includes(en.shortcutCreated)) throw new Error('shortcut created status missing')
+const shortcutDone = [...doc.querySelectorAll('.so-flow-status')].find((el) => el.textContent.includes(en.shortcutCreated))
+if (shortcutDone === null) throw new Error('shortcut created status missing')
 console.log('shortcut flow OK: /app installShortcut + created status')
 rpcLog = []
 
@@ -518,7 +524,7 @@ console.log('confirm state OK')
 
 // cancel returns to idle
 await act(async () => { fireClick(buttons().find((b) => b.textContent === en.cancel)) })
-if (buttons().length !== 3) throw new Error('cancel should restore reload+restart+refresh buttons')
+if (buttons().length !== 4) throw new Error('cancel should restore shortcut+reload+restart+refresh buttons')
 console.log('cancel OK')
 
 // confirm -> calling -> scheduled; host endpoint + payload shape
