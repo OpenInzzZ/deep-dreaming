@@ -1,0 +1,40 @@
+{
+  "name": "@local/dsh-plugin-session-cleanup",
+  "version": "0.1.0",
+  "private": true,
+  "description": "User-level plugin: periodically clean archived dsh session logs by age / total size, skipping live sessions; settings editable in Plugins settings",
+  "type": "module",
+  "main": "session-cleanup.mjs",
+  "exports": {
+    ".": "./session-cleanup.mjs",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale"
+      ],
+      "platform": "web"
+    }
+  },
+  "files": [
+    "session-cleanup.mjs",
+    "client.js",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "jsdom": "^24.1.3",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "license": "MIT"
+}

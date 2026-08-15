@@ -1,0 +1,24 @@
+{
+  "name": "@local/dsh-client-ui-settings-other",
+  "version": "0.1.0",
+  "private": true,
+  "description": "User-level plugin: an Other settings section with a restart-service button that respawns the dsh process",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale"
+      ],
+      "platform": "web"
+    }
+  }
+}

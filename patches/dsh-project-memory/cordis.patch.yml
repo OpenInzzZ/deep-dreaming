@@ -1,0 +1,34 @@
+# dsh-project-memory bundle patch: project memory tools, guidance, and the
+# session-start recall / session-end review phases. Applied as one profile
+# layer after the base and web-app bundles (the profile's own
+# cordis.patch.yml and any --patch overlays still come later).
+#
+# The row lives on the HOST plane: the tools register into the host `tools`
+# registry (visible to every session), the prompt section lands in the global
+# systemPrompt layer (per-agent presets can still shadow it), and the
+# agent/status + session/event listeners are process-global by nature.
+- insert:
+    - id: project-memory
+      name: 'dsh-project-memory'
+      config:
+        # Session-start memory recall (memory search phase): before the first
+        # real user turn, queue one recall followup so the agent loads
+        # relevant memories first (renders as the 记忆 · 检索 card).
+        autoRecall: true
+        # After every completed user turn, send the agent a short memory-review
+        # followup (memory save/update phase): the agent decides whether
+        # durable project knowledge was produced and saves it via
+        # project_memory_save when it was.
+        autoReview: true
+        # Directory name of the memory store under each project root.
+        memoryDirName: '.dsh-memory'
+        # Memory hygiene: after every save, scan for duplicate/similar notes
+        # (same title, highly similar content, or one body contained in
+        # another) and merge them, keeping the most used / original note.
+        autoDedupe: true
+        # Content-similarity threshold (0.1..0.95) for the auto-merge scan.
+        mergeContentThreshold: 0.55
+        # Maturity tracking: every search hit (and every save/update)
+        # increments the note's usage_count, which drives its maturity level
+        # (new -> developing -> mature -> authoritative).
+        trackUsage: true

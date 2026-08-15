@@ -4,6 +4,12 @@
  * 按保留天数 / 总大小上限定期清理 $DSH_HOME/sessions 下的归档会话，
  * 跳过当前活跃会话。通过 cordis.patch.yml 的 insert 装载。
  *
+ * 配置来源(优先级从低到高):schema 默认值 < 组合层 entry 配置
+ * (cordis.patch.yml 的 config)< 设置文档的用户层。配置经 dsh-settings
+ * 服务注册(namespace `session-cleanup`),可在 设置 → 插件 → 插件配置
+ * 中可视化编辑;`applies: live`,保存后即时生效(定时器按新间隔重建)。
+ * settings 服务不存在时回退到组合层配置,行为与旧版一致。
+ *
  * 配置项:
  *   enabled: boolean        插件开关 (默认 true)
  *   maxAgeDays: number      超过该天数的会话可删 (默认 30, 0 = 不按天数清理)
@@ -16,8 +22,30 @@
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { readdir, rm, stat } from 'node:fs/promises'
+import z from '@deepseek-ai/schemastery'
 
 export const name = 'session-cleanup'
+
+export const SETTINGS_NAMESPACE = 'session-cleanup'
+
+/**
+ * Settings schema: defaults here are the floor; the entry config and the
+ * user document layer resolve above them.
+ *
+ * The export name must be exactly `Config`: the Cordis loader reads
+ * `plugin.Config` (vendor/cordis registry.ts) to validate the entry config;
+ * any other export name silently skips validation.
+ */
+export const Config = z.object({
+  enabled: z.boolean().default(true),
+  maxAgeDays: z.number().default(30),
+  maxTotalMB: z.number().default(1024),
+  keepSessions: z.number().default(5),
+  // 0 would make setInterval spin at ~1ms; 1 minute is the sane floor.
+  intervalMinutes: z.number().min(1).default(360),
+  dryRun: z.boolean().default(false),
+  sessionsRoot: z.string().default(''),
+})
 
 export const DEFAULTS = {
   enabled: true,
@@ -147,6 +175,8 @@ export async function runCleanup(sessionsRoot, options = {}, liveSessionIds = ne
   // 6. 清理已空的项目目录 (非演练模式)
   if (!cfg.dryRun) {
     for (const projectDir of emptyProjects) {
+      // readdir/rm failures here are best-effort: the next interval tick
+      // re-scans and retries, and a vanished dir is a success by definition.
       const rest = await readdir(projectDir).catch(() => [])
       if (rest.length === 0) await rm(projectDir, { recursive: true, force: true }).catch(() => {})
     }
@@ -170,32 +200,142 @@ export function summarize(result) {
 }
 
 /**
+ * Register the settings namespace and hand the write scope to `onScope`.
+ * Same contract as dsh-settings' installSettingsSection, plus the scope:
+ * the config RPC writes through it (persisted to settings.yaml), so edits
+ * survive restarts and take effect live via the watcher.
+ *
+ * `isUnloading` mirrors the official isUnloading(ctx) guard: when the
+ * plugin's own fiber is tearing down, both the settings detach disposer and
+ * the watcher must NOT re-run `onChange` (= start), which would rebuild the
+ * timer against resources being released. The `disposed` flag is set by the
+ * plugin's teardown effect before the settings child fiber disposes (the
+ * parent fiber disposes its own effects first), so the guard sees it set.
+ */
+function registerConfigSection(ctx, ns, schema, entry, hooks, onScope, isUnloading = () => false) {
+  ctx.inject(['settings'], (sctx) => {
+    const scope = sctx.settings.register(ns, schema, { base: entry })
+    hooks.setSource(() => scope.get())
+    sctx.effect(() => () => {
+      // Runs both when the settings provider detaches (the consumer keeps
+      // running and must fall back to its composition entry) and when the
+      // plugin itself unloads (disposed is already set; onChange would
+      // rebuild the timer against a fiber whose resources are being let go).
+      if (isUnloading()) return
+      hooks.setSource(() => entry)
+      hooks.onChange()
+    })
+    hooks.onChange()
+    scope.watch(() => {
+      // A stored change landing while the consumer unloads reaches the
+      // watcher before the registration is released; guard it the same way.
+      if (!isUnloading()) hooks.onChange()
+    })
+    onScope(scope)
+  })
+}
+
+/** RPC failure envelope for the config channel. */
+function configError(code, message) {
+  return { ok: false, error: { code, message, details: {} } }
+}
+
+/**
  * Cordis 插件入口: 注入 sessions 服务, 启动时立即清理一次, 之后按
  * intervalMinutes 周期清理。定时器注册为 effect, 插件卸载时自动释放。
+ * 配置经 dsh-settings 注册(namespace `session-cleanup`), 设置变更时
+ * (onChange) 按新配置重建定时器 —— 即时生效。
+ * 配置经 /session-cleanup RPC 通道读写(getConfig/setConfig/resetConfig),由
+ * 插件管理页的配置卡片调用 —— 不受 dsh 设置白名单(apiproxy)限制。
  */
 export function apply(ctx, config = {}) {
   const cfg = { ...DEFAULTS, ...config }
   if (!cfg.enabled) return
 
-  return ctx.inject(['sessions'], (ctx) => {
-    const sessionsRoot = resolveSessionsRoot(cfg.sessionsRoot)
+  // Note: `ctx.inject` returns a thenable Fiber; returning it from `apply`
+  // makes Cordis treat it as an Effect and fail with TypeError('Invalid
+  // effect'). The child fiber's disposer is registered on the parent fiber
+  // automatically, so a statement call is enough.
+  ctx.inject(['sessions', 'connection'], (ctx) => {
     const logger = ctx.logger
-    const tick = async (reason) => {
+    /** 当前权威配置: 设置文档 > 组合层 entry; settings 缺失时回退 entry。 */
+    let source = () => ({ ...DEFAULTS, ...config })
+    let configScope = null
+    let timer = null
+    let disposed = false
+
+    const tick = async (reason, cfg) => {
+      // A tick landing after teardown began must not scan or log; the
+      // interval callback and start() both funnel through here.
+      if (disposed) return
+      const sessionsRoot = resolveSessionsRoot(cfg.sessionsRoot)
       const liveIds = new Set(ctx.sessions.list().map((s) => s.id))
       const result = await runCleanup(sessionsRoot, cfg, liveIds)
       logger.info(`[${reason}] ${summarize(result)}`)
       if (result.errors.length > 0) logger.warn(`cleanup errors: ${result.errors.join(' | ')}`)
     }
 
-    // 启动即清理一次; 失败不阻断启动
-    void tick('startup').catch((e) => logger.warn(`startup cleanup failed: ${e.message}`))
+    const stop = () => {
+      if (timer !== null) {
+        clearInterval(timer)
+        timer = null
+      }
+    }
 
-    // 周期清理; effect 卸载时清除定时器
-    return ctx.effect(() => {
-      const timer = setInterval(() => {
-        void tick('interval').catch((e) => logger.warn(`interval cleanup failed: ${e.message}`))
-      }, cfg.intervalMinutes * 60_000)
-      return () => clearInterval(timer)
+    const start = () => {
+      stop()
+      if (disposed) return
+      const current = source()
+      if (!current.enabled) return
+      // 启动/配置变更即清理一次; 失败不阻断
+      void tick('startup', current).catch((e) => logger.warn(`startup cleanup failed: ${e.message}`))
+      timer = setInterval(() => {
+        void tick('interval', source()).catch((e) => logger.warn(`interval cleanup failed: ${e.message}`))
+      }, current.intervalMinutes * 60_000)
+    }
+
+    registerConfigSection(ctx, SETTINGS_NAMESPACE, Config, config, {
+      setSource: (current) => { source = current },
+      onChange: start,
+    }, (scope) => { configScope = scope }, () => disposed)
+
+    start()
+
+    // Registered as an effect so the channel disposer runs on unload; the
+    // config RPC otherwise outlives the plugin and keeps answering.
+    ctx.effect(() => ctx.connection.rpc.handle('/session-cleanup', async (endpoint, payload) => {
+      if (endpoint === 'getConfig') {
+        return { ok: true, value: source() }
+      }
+      if (configScope === null) {
+        return configError('settings-unavailable', 'settings service is not ready yet')
+      }
+      if (endpoint === 'setConfig') {
+        const fields = payload?.args?.fields
+        if (typeof fields !== 'object' || fields === null || Array.isArray(fields)) {
+          return configError('bad-request', 'fields must be a plain object')
+        }
+        try {
+          await configScope.update(fields)
+          return { ok: true, value: source() }
+        } catch (error) {
+          return configError('settings-rejected', String(error?.message ?? error))
+        }
+      }
+      if (endpoint === 'resetConfig') {
+        try {
+          await configScope.replace({})
+          return { ok: true, value: source() }
+        } catch (error) {
+          return configError('settings-rejected', String(error?.message ?? error))
+        }
+      }
+      return configError('bad-request', `unknown endpoint: ${endpoint}`)
+    }, { authority: 'loopback' }), 'session-cleanup: /session-cleanup rpc channel')
+
+    return ctx.effect(() => () => {
+      disposed = true
+      stop()
     })
   })
 }
