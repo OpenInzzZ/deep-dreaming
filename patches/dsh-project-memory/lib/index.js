@@ -81,9 +81,13 @@ const GUIDANCE_SECTION = `\
 const RECALL_PROMPT = `\
 [项目记忆召回 · memory search] 会话开始,请先调用 project_memory_search 检索与本任务/本项目相关的既有记忆(项目约定、关键决策、踩坑经验、接口或数据结构事实等),遵循既有约定、避免重复探索;完成检索后再开始工作。若无相关记忆,检索结果为空,直接开始即可。`;
 
-/** The auto-review followup message text (session-end memory save/update). */
+/** The auto-review followup message text (session-end memory save/update).
+ * Deliberately terse and reply-guiding: the review prompt is folded into a
+ * one-line context notice, and the agent's own reply should stay minimal —
+ * the save result already renders as its own collapsible memory card, so the
+ * reply must not restate it. */
 const REVIEW_PROMPT = `\
-[项目记忆回顾 · memory save/update] 本轮会话的工作已完成。请回顾本轮你完成的工作,判断是否产生了值得跨会话保留的项目知识(重要决策、约定/规范、踩坑经验、接口或数据结构事实等)。若有,调用 project_memory_save 保存或更新(同主题已存在时更新,否则新建);若没有值得记录的内容,请只回复"无需记录"。`;
+[项目记忆回顾 · memory save/update] 判断本轮是否产生值得跨会话保留的项目知识。若有,调用 project_memory_save 保存或更新(同主题更新,否则新建),保存后请勿复述结果;若没有,请仅回复:无需记录。`;
 
 /** The owning session's project root (its header cwd). */
 function projectRoot(exec) {
