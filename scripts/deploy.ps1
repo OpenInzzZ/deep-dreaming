@@ -72,7 +72,7 @@ if (Test-Path $homePatch) {
 #    repo-side real path, so the repo tree must expose the host node_modules.
 #    Missing/dangling/empty-dir links are (re)created; real dirs that already
 #    provide @deepseek-ai are kept as-is.
-$depPlugins = @('dsh-project-memory', 'session-cleanup', 'ui-settings-other')
+$depPlugins = @('dsh-project-memory', 'session-cleanup', 'ui-settings-other', 'dom-inspect')
 if (-not (Test-Path $modulesBase)) {
     Write-Host '  [!] ~/.dsh/profiles/node_modules not found; run `dsh plugin --profile web add` first' -ForegroundColor Yellow
 } else {

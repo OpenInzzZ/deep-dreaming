@@ -28,6 +28,7 @@ deep-dreaming/
 | [ui-settings-plugin-manager](patches/ui-settings-plugin-manager/) | Web 设置新增「插件管理」标签页:状态过滤 + 官方/自定义分类 + **启停开关(热生效)** | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-settings-plugin-manager/README.md) |
 | [ui-settings-other](patches/ui-settings-other/) | Web 设置新增「其他」页:服务运行状态(pid/端口/内存/版本)+ **重载用户插件(热,不中断会话)** + **创建桌面快捷方式(鲸鱼娘图标)** + 重启服务(危险)+ 空闲自动停止(可配,默认 2h);**覆盖 Web 标题栏 favicon 为鲸鱼娘图标**;配套静默启动脚本与品牌资产 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-settings-other/README.md) |
 | [ui-queue-tools](patches/ui-queue-tools/) | 排队消息增强:hover 预览全文 + 上移/下移排序(host 半经 Inbox.splice 重排) | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-queue-tools/README.md) |
+| [dom-inspect](patches/dom-inspect/) | **浏览器 DOM 快照工具**:`dom_inspect` 返回页面记忆卡/折叠行/关键词的 DOM 快照,agent 直接核查插件渲染效果 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/dom-inspect/README.md) |
 
 ## 快速部署
 
@@ -87,4 +88,6 @@ node patches/ui-settings-other/verify-settings-other.mjs         # settings-othe
 node patches/ui-settings-other/tests/load-smoke.mjs              # 真实 Cordis 加载冒烟
 node patches/ui-queue-tools/verify-queue-tools.mjs               # queue-tools host + client 验证
 node patches/ui-queue-tools/tests/load-smoke.mjs                 # 真实 Cordis 加载冒烟
+node patches/dom-inspect/tests/load-smoke.mjs                    # 真实 Cordis:工具+通道端到端
+node patches/dom-inspect/tests/client-contract.mjs               # client 契约 + collect/apply(需 jsdom)
 ```
