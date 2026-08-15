@@ -33,7 +33,7 @@ var module = { exports: {} }; var exports = module.exports;
 const React = require('react');
 const { useEffect, useState } = React;
 const { jsx, jsxs } = require('react/jsx-runtime');
-const { IconChevronDownOutline14 } = require('@deepseek-ai/dsh-client-ui-primitives');
+const { IconChevronDownOutline14, Modal } = require('@deepseek-ai/dsh-client-ui-primitives');
 
 const PLUGIN_ID = '@local/dsh-client-ui-settings-other';
 
@@ -344,8 +344,8 @@ function StatusBlock({ status, t }) {
 }
 
 /**
- * Phase state machine:
- *   idle -> confirm -> calling -> scheduled | error
+ * Phase state machine (confirm renders as a Modal dialog):
+ *   idle -> confirm (modal) -> calling -> scheduled | error
  *   idle -> busy (sessions running) -> waiting (poll until idle) | calling(force)
  */
 function OtherSection({ restart, status, reloadPlugins, installShortcut, stopService, t }) {
@@ -473,33 +473,21 @@ function OtherSection({ restart, status, reloadPlugins, installShortcut, stopSer
       jsx('p', { className: 'so-danger-note', children: t('shortcutHint') }, 'shortcut-hint'),
       jsx('p', { className: 'so-danger-note', children: t('dangerNote') }, 'danger-note'),
       jsx('div', { className: 'so-row', children: [
-        phase === 'confirm'
-          ? jsxs(React.Fragment, { children: [
-              jsx('span', { className: 'so-status so-flow-status', 'data-tone': 'error', children: t('confirmPrompt') }, 'prompt'),
-              jsx('button', { type: 'button', className: 'so-btn so-danger', onClick: () => { trigger(false) }, children: t('confirm') }, 'confirm'),
-              jsx('button', { type: 'button', className: 'so-btn', onClick: () => { setPhase('idle') }, children: t('cancel') }, 'cancel'),
-            ] }, 'confirm-row')
-          : jsx('button', {
-              type: 'button',
-              className: 'so-btn so-danger',
-              disabled: phase === 'calling' ? true : undefined,
-              onClick: () => { if (phase === 'idle') setPhase('confirm') },
-              children: phase === 'calling' ? t('restarting') : t('restart'),
-            }, 'restart'),
+        jsx('button', {
+          type: 'button',
+          className: 'so-btn so-danger',
+          disabled: phase === 'calling' ? true : undefined,
+          onClick: () => { if (phase === 'idle') setPhase('confirm') },
+          children: phase === 'calling' ? t('restarting') : t('restart'),
+        }, 'restart'),
         // Stop service — same row as restart; separate confirm state.
-        stopPhase === 'confirm'
-          ? jsxs(React.Fragment, { children: [
-              jsx('span', { className: 'so-status so-flow-status', 'data-tone': 'error', children: t('stopConfirmPrompt') }, 'stop-prompt'),
-              jsx('button', { type: 'button', className: 'so-btn so-danger', onClick: () => { doStop() }, children: t('confirmStop') }, 'stop-confirm'),
-              jsx('button', { type: 'button', className: 'so-btn', onClick: () => { setStopPhase('idle') }, children: t('cancel') }, 'stop-cancel'),
-            ] }, 'stop-confirm-row')
-          : jsx('button', {
-              type: 'button',
-              className: 'so-btn so-danger',
-              disabled: stopPhase === 'calling' ? true : undefined,
-              onClick: () => { if (stopPhase === 'idle') setStopPhase('confirm') },
-              children: stopPhase === 'calling' ? t('stopBusy') : t('stopService'),
-            }, 'stop'),
+        jsx('button', {
+          type: 'button',
+          className: 'so-btn so-danger',
+          disabled: stopPhase === 'calling' ? true : undefined,
+          onClick: () => { if (stopPhase === 'idle') setStopPhase('confirm') },
+          children: stopPhase === 'calling' ? t('stopBusy') : t('stopService'),
+        }, 'stop'),
         stopPhase === 'busy'
           ? jsxs(React.Fragment, { children: [
               jsx('span', { className: 'so-status so-flow-status', 'data-tone': 'error', children: t('stopBusyPrompt', { n: stopBusy?.running ?? 0 }) }, 'stop-busy-status'),
@@ -535,6 +523,30 @@ function OtherSection({ restart, status, reloadPlugins, installShortcut, stopSer
         ? jsx('button', { type: 'button', className: 'so-btn', onClick: () => { setStopPhase('idle') }, children: t('retry') }, 'stop-retry')
         : null,
     ] }, 'card'),
+    // Restart confirm dialog (modal replaces the inline confirm row).
+    jsx(Modal, {
+      open: phase === 'confirm',
+      onClose: () => { if (phase === 'confirm') setPhase('idle') },
+      title: t('restart'),
+      closeLabel: t('cancel'),
+      description: t('confirmPrompt'),
+      footer: jsxs(React.Fragment, { children: [
+        jsx('button', { type: 'button', className: 'so-btn', onClick: () => { setPhase('idle') }, children: t('cancel') }, 'cancel'),
+        jsx('button', { type: 'button', className: 'so-btn so-danger', onClick: () => { trigger(false) }, children: t('confirm') }, 'confirm'),
+      ] }),
+    }, 'restart-modal'),
+    // Stop confirm dialog — same modal pattern, separate state.
+    jsx(Modal, {
+      open: stopPhase === 'confirm',
+      onClose: () => { if (stopPhase === 'confirm') setStopPhase('idle') },
+      title: t('stopService'),
+      closeLabel: t('cancel'),
+      description: t('stopConfirmPrompt'),
+      footer: jsxs(React.Fragment, { children: [
+        jsx('button', { type: 'button', className: 'so-btn', onClick: () => { setStopPhase('idle') }, children: t('cancel') }, 'stop-cancel'),
+        jsx('button', { type: 'button', className: 'so-btn so-danger', onClick: () => { doStop() }, children: t('confirmStop') }, 'stop-confirm'),
+      ] }),
+    }, 'stop-modal'),
   ] });
 }
 

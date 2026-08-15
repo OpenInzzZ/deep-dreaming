@@ -16,9 +16,10 @@
  * (react, react/jsx-runtime, ui-primitives), asserts the registration
  * contracts (settings.section + settings.plugin.item + dictionaries), then —
  * when jsdom is available — renders the section and exercises the status
- * block, the reload-plugins flow, the confirm -> restart flow, and the
- * configuration card's staged-edit -> save / reset flows through the `/app`
- * RPC channel. Without jsdom the DOM sections are skipped with a notice.
+ * block, the reload-plugins flow, the confirm-modal -> restart flow, the
+ * stop flow, and the configuration card's staged-edit -> save / reset flows
+ * through the `/app` RPC channel. Without jsdom the DOM sections are skipped
+ * with a notice.
  */
 import { createRequire } from 'node:module'
 import { readFileSync, writeFileSync, mkdtempSync, existsSync } from 'node:fs'
@@ -340,11 +341,22 @@ if (handoff === null) throw new Error('bundle never called __ModuleLoader__.load
 if (handoff.id !== PLUGIN_ID) throw new Error(`handoff id mismatch: ${handoff.id}`)
 
 const icon = (props) => React.createElement('svg', { ...props, 'data-icon': true })
+// Minimal Modal stub matching the primitives contract used by the section:
+// open -> overlay with title/description/footer; closed -> null. The real
+// Modal portals to document.body; the stub renders in place — both forms
+// expose role="dialog" and data-modal-title for the tests to query.
+const ModalStub = (props) => {
+  if (!props.open) return null
+  return React.createElement('div', { role: 'dialog', 'data-modal-title': props.title, className: 'so-modal' },
+    React.createElement('p', null, props.description),
+    props.footer,
+  )
+}
 const requireTable = (spec) => {
   if (spec === 'react') return uiRequire('react')
   if (spec === 'react/jsx-runtime') return uiRequire('react/jsx-runtime')
   if (spec === '@deepseek-ai/dsh-client-ui-primitives') {
-    return { IconChevronDownOutline14: icon }
+    return { IconChevronDownOutline14: icon, Modal: ModalStub }
   }
   throw new Error(`unexpected module-table word: ${spec}`)
 }
@@ -535,16 +547,21 @@ if (shortcutDone === null) throw new Error('shortcut created status missing')
 console.log('shortcut flow OK: /app installShortcut + created status')
 rpcLog = []
 
-// click -> confirm state (no call yet)
+// click -> confirm modal opens (no call yet)
+const dialog = () => doc.querySelector('[role="dialog"]')
 await act(async () => { fireClick(restartButton) })
 if (rpcLog.length !== 0) throw new Error('confirm state must not call the host yet')
+const confirmDialog = dialog()
+if (confirmDialog === null) throw new Error('restart confirm modal missing')
+if (confirmDialog.getAttribute('data-modal-title') !== en.restart) throw new Error('restart modal title mismatch')
+if (!confirmDialog.textContent.includes(en.confirmPrompt)) throw new Error('confirm prompt missing in modal')
 const confirmButton = buttons().find((b) => b.textContent === en.confirm)
 if (confirmButton === undefined) throw new Error('confirm button missing')
-if (flowLine() === null || flowLine().textContent !== en.confirmPrompt) throw new Error('confirm prompt missing')
-console.log('confirm state OK')
+console.log('confirm modal OK (restart)')
 
-// cancel returns to idle
+// cancel (in modal) returns to idle
 await act(async () => { fireClick(buttons().find((b) => b.textContent === en.cancel)) })
+if (dialog() !== null) throw new Error('cancel must close the modal')
 if (buttons().length !== 5) throw new Error('cancel should restore shortcut+reload+restart+stop+refresh buttons')
 console.log('cancel OK')
 
@@ -557,14 +574,16 @@ if (JSON.stringify(restartCall.payload.args) !== '{}') throw new Error(`non-forc
 if (flowLine() === null || flowLine().textContent !== en.scheduled) throw new Error('scheduled status missing')
 console.log('restart flow OK: /app restart RPC (args {}) + scheduled status')
 
-// stop flow: confirm -> /app stop (non-force) -> stopped status
+// stop flow: confirm modal -> /app stop (non-force) -> stopped status
 rpcLog = []
 await act(async () => { fireClick(buttons().find((b) => b.textContent === en.stopService)) })
 if (rpcLog.length !== 0) throw new Error('stop confirm state must not call the host yet')
+const stopDialog = dialog()
+if (stopDialog === null) throw new Error('stop confirm modal missing')
+if (stopDialog.getAttribute('data-modal-title') !== en.stopService) throw new Error('stop modal title mismatch')
+if (!stopDialog.textContent.includes(en.stopConfirmPrompt)) throw new Error('stop confirm prompt missing in modal')
 const stopConfirmButton = buttons().find((b) => b.textContent === en.confirmStop)
 if (stopConfirmButton === undefined) throw new Error('stop-confirm button missing')
-const stopPromptLine = [...doc.querySelectorAll('.so-flow-status')].find((el) => el.textContent === en.stopConfirmPrompt)
-if (stopPromptLine === undefined) throw new Error('stop confirm prompt missing')
 await act(async () => { fireClick(stopConfirmButton) })
 const stopCall = rpcLog.find((c) => c.endpoint === 'stop')
 if (stopCall === undefined || stopCall.channel !== '/app') throw new Error(`stop rpc target: ${JSON.stringify(stopCall)}`)
