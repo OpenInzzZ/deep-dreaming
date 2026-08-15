@@ -77,8 +77,19 @@ writeFileSync(tmpPatch, PATCH_HEADER)
   if (onAgain.changed !== false) throw new Error('setEnabled(true) twice must be idempotent')
   let invalidRejected = false
   try { await host.setEnabled(tmpPatch, 'a/../evil', false) } catch { invalidRejected = true }
-  if (!invalidRejected) throw new Error('setEnabled must reject non-identifier entry ids')
-  console.log('host setEnabled OK: disable appends / enable removes / idempotent / rejects bad ids')
+  if (!invalidRejected) throw new Error('setEnabled must reject path-ish entry ids (..)')
+  for (const bad of ['a b', 'a#b', 'a"b', 'a\\b', '']) {
+    let rejected = false
+    try { await host.setEnabled(tmpPatch, bad, false) } catch { rejected = true }
+    if (!rejected) throw new Error(`setEnabled must reject ${JSON.stringify(bad)}`)
+  }
+  // Loader-builtin ids (cordis: prefix) are valid — this was the reported
+  // regression: the original identifier charset rejected them.
+  const builtinOff = await host.setEnabled(tmpPatch, 'cordis:include', false)
+  if (builtinOff.enabled !== false || builtinOff.changed !== true) throw new Error(`cordis: prefix disable: ${JSON.stringify(builtinOff)}`)
+  const builtinOn = await host.setEnabled(tmpPatch, 'cordis:include', true)
+  if (builtinOn.changed !== true) throw new Error(`cordis: prefix enable: ${JSON.stringify(builtinOn)}`)
+  console.log('host setEnabled OK: disable appends / enable removes / idempotent / rejects bad ids / accepts cordis: builtins')
 }
 
 // apply(): /plugin-toggle channel registration + endpoint validation

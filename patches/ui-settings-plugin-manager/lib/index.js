@@ -26,8 +26,16 @@ export function resolvePatchFile(config = {}) {
   return join(homedir(), '.dsh', 'profiles', 'web', 'cordis.patch.yml')
 }
 
-/** Entry ids in our patch layer are plain identifiers; reject anything else. */
-const ID_RE = /^[A-Za-z0-9._-]+$/
+/**
+ * Entry ids in the patch layer are plain identifiers, plus the Loader
+ * builtins (`cordis:include`, `cordis:group`) and package-shaped ids that
+ * appear in the inventory. The id is interpolated into a YAML line
+ * (`- id: <id>`), so whitespace, quotes, `#`, `..` and other
+ * YAML-significant / path-ish sequences are rejected to keep the write
+ * inject-safe.
+ */
+const ID_RE = /^(?!.*\.\.)[A-Za-z0-9@/:_\-.]+$/
+const ID_HINT = 'letters, digits, @ / : . _ - (no whitespace, quotes, # or ..)'
 
 /**
  * Remove one top-level `- id: <id>` + `  disabled: true` block.
@@ -105,7 +113,7 @@ export function apply(ctx, config = {}) {
         return toggleError('bad-request', 'setEnabled requires entryId (string) and enabled (boolean)')
       }
       if (!ID_RE.test(id)) {
-        return toggleError('bad-request', 'entryId must be a plain identifier (letters, digits, . _ -)')
+        return toggleError('bad-request', `entryId must be a plain identifier (${ID_HINT})`)
       }
       try {
         const result = await setEnabled(patchFile, id, enabled)
