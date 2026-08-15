@@ -26,15 +26,20 @@ if (-not (Test-Path $startScript)) {
 }
 
 $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+# Whale-girl icon asset (synced to ~/.dsh/assets by deploy.ps1 / the plugin's
+# installShortcut endpoint); fall back to the powershell icon when missing.
+$icon = Join-Path $env:USERPROFILE '.dsh\assets\DeepSeekHarness-WhaleGirl.ico'
+$iconLocation = if (Test-Path $icon) { "$icon,0" } else { "$ps,0" }
 $ws = New-Object -ComObject WScript.Shell
 $lnk = $ws.CreateShortcut($lnkPath)
 $lnk.TargetPath = $ps
 $lnk.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$startScript`""
 $lnk.WorkingDirectory = Join-Path $env:USERPROFILE '.dsh\profiles\web'
-$lnk.IconLocation = "$ps,0"
+$lnk.IconLocation = $iconLocation
 $lnk.Description = 'Silently start the dsh web service'
 $lnk.Save()
 
 Write-Host "created $lnkPath"
 Write-Host "target : $ps"
 Write-Host "args   : $($lnk.Arguments)"
+Write-Host "icon   : $iconLocation"

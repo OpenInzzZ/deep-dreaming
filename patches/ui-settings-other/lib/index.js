@@ -1,6 +1,7 @@
 /**
  * Host half of the ui-settings-other patch: a restart-service RPC endpoint,
- * a runtime-status snapshot, and an idle auto-stop monitor.
+ * a runtime-status snapshot, an idle auto-stop monitor, a desktop-shortcut
+ * installer, and the Web title-bar icon (favicon) override.
  *
  * Exposes a dedicated Connection RPC channel `/app` (the shared `/api` channel
  * is exclusively owned by the Typert gateway, so a user-level plugin registers
@@ -19,6 +20,10 @@
  *   until the service answers. Keeping the lifecycle in a script makes the
  *   restart independently testable (`-DryRun`) and keeps this host entry a
  *   thin, dependency-free trigger.
+ * - `installShortcut` → creates the desktop shortcut that silently starts
+ *   dsh web (via `install-desktop-shortcut.ps1`), first ensuring the whale-girl
+ *   icon asset exists under `~/.dsh/assets/`.
+ * - `reloadPlugins` → hot-reloads the user patch layer (see below).
  *
  * Session safety: a restart kills the service process, which interrupts every
  * RUNNING agent session. To keep restarts from silently breaking in-flight
@@ -36,13 +41,19 @@
  *
  * The script path comes from the patch config (`script`), defaulting to
  * `~/.dsh/scripts/restart-dsh.ps1`.
+ *
+ * Branding: when the `webServer` service is present, this plugin registers an
+ * exact `/favicon.svg` route that serves the whale-girl icon (SVG wrapper
+ * around the bundled PNG), overriding the shipped favicon; the same ico asset
+ * is used for the desktop shortcut.
  */
 
 import { spawn, execFileSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join, isAbsolute, dirname, resolve } from 'node:path'
-import { statSync, readFileSync } from 'node:fs'
+import { statSync, readFileSync, copyFileSync, existsSync, mkdirSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
 import z from '@deepseek-ai/schemastery'
 
 export const SETTINGS_NAMESPACE = 'ui-settings-other'
@@ -83,6 +94,62 @@ export function resolvePatchFile(config = {}) {
     return isAbsolute(configured) ? configured : join(homedir(), '.dsh', configured)
   }
   return join(homedir(), '.dsh', 'profiles', 'web', 'cordis.patch.yml')
+}
+
+/** Absolute path of one bundled brand asset inside this patch. */
+export function patchAssetPath(name) {
+  return join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', name)
+}
+
+/** The whale-girl desktop icon file under the dsh home (`~/.dsh/assets`). */
+export function assetIconPath() {
+  return join(homedir(), '.dsh', 'assets', 'DeepSeekHarness-WhaleGirl.ico')
+}
+
+/**
+ * Ensure the desktop icon asset exists under the dsh home, copying it from
+ * this patch's bundled assets when missing. The shortcut stores an absolute
+ * icon path, so a later repo move must not break an installed shortcut.
+ */
+export function ensureIconAsset() {
+  const target = assetIconPath()
+  if (existsSync(target)) return target
+  mkdirSync(dirname(target), { recursive: true })
+  copyFileSync(patchAssetPath('DeepSeekHarness-WhaleGirl.ico'), target)
+  return target
+}
+
+/**
+ * Create (or refresh) the desktop shortcut that silently starts dsh web.
+ * Runs the deployed `install-desktop-shortcut.ps1` synchronously and returns
+ * its output; the script is idempotent (existing shortcut → "already exists").
+ * @returns {{ ok: boolean, output: string, icon: string }}
+ */
+export function installShortcut() {
+  const icon = ensureIconAsset()
+  const script = join(homedir(), '.dsh', 'scripts', 'install-desktop-shortcut.ps1')
+  if (!existsSync(script)) {
+    return { ok: false, output: `install script missing: ${script} (run scripts/deploy.ps1 first)`, icon }
+  }
+  try {
+    const output = execFileSync('powershell', [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
+    ], { encoding: 'utf8', windowsHide: true, timeout: 30_000 })
+    return { ok: true, output: output.trim(), icon }
+  } catch (error) {
+    const detail = error?.stdout?.toString()?.trim() || error?.message || String(error)
+    return { ok: false, output: detail, icon }
+  }
+}
+
+/** One favicon SVG document: the bundled PNG embedded as a data URI. */
+export function faviconSvg(pngPath) {
+  const png = readFileSync(pngPath)
+  const data = `data:image/png;base64,${png.toString('base64')}`
+  return `<?xml version="1.0" encoding="UTF-8"?>\n` +
+    `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 128 128">` +
+    `<image width="128" height="128" href="${data}"/>` +
+    `</svg>\n`
 }
 
 /** Build the spawn invocation for the restart script (pure, testable). */
@@ -312,6 +379,25 @@ export function apply(ctx, config = {}) {
       onChange: rebuildMonitor,
     }, (scope) => { configScope = scope })
     rebuildMonitor()
+
+    // Branding: override the shipped favicon with the whale-girl icon. The
+    // exact route wins over the SPA dist fallback; the icon is bundled in
+    // this patch and served as an SVG wrapper around the 128px PNG.
+    const webServer = ctx.get('webServer')
+    if (webServer !== undefined) {
+      const svg = faviconSvg(patchAssetPath('favicon-128.png'))
+      ctx.effect(() => webServer.register({
+        kind: 'exact',
+        path: '/favicon.svg',
+        handler: (req, res) => {
+          res.writeHead(200, {
+            'content-type': 'image/svg+xml',
+            'cache-control': 'public, max-age=86400',
+          })
+          res.end(svg)
+        },
+      }), 'ui-settings-other: favicon route')
+    }
     return ctx.connection.rpc.handle('/app', async (endpoint, payload) => {
       if (endpoint === 'getSettings') {
         return { ok: true, value: source() }
@@ -351,6 +437,18 @@ export function apply(ctx, config = {}) {
         }
         if (idle.enabled && monitorApi !== null) idle.lastBusyAt = monitorApi.lastBusyAt()
         return { ok: true, value: { running: sessions.length, sessions, service: serviceInfo(), idle } }
+      }
+      if (endpoint === 'installShortcut') {
+        // Create the desktop shortcut (silent start, whale-girl icon). The
+        // script is idempotent; an existing shortcut is reported, not replaced.
+        const result = installShortcut()
+        if (!result.ok) {
+          return {
+            ok: false,
+            error: { code: 'internal', message: result.output, details: {} },
+          }
+        }
+        return { ok: true, value: { created: true, icon: result.icon, output: result.output } }
       }
       if (endpoint === 'reloadPlugins') {
         // Hot-reload the user patch layer: touching the profile's

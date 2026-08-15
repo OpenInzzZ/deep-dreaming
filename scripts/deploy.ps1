@@ -17,6 +17,18 @@ foreach ($name in @('restart-dsh.ps1', 'start-dsh.ps1', 'install-desktop-shortcu
     }
 }
 
+# 0.5. Sync brand assets (whale-girl icons) to ~/.dsh/assets/ — the desktop
+#      shortcut's IconLocation and the favicon route read from here.
+$assetsDir = Join-Path $dshHome 'assets'
+New-Item -ItemType Directory -Path $assetsDir -Force | Out-Null
+foreach ($name in @('DeepSeekHarness-WhaleGirl.ico', 'whale-girl-transparent.png', 'favicon-128.png')) {
+    $src = Join-Path $dev "patches\ui-settings-other\assets\$name"
+    if (Test-Path $src) {
+        Copy-Item $src (Join-Path $assetsDir $name) -Force
+        Write-Host "  [OK] asset: $name -> ~/.dsh/assets/"
+    }
+}
+
 Write-Host '== deep-dreaming deploy ==' -ForegroundColor Cyan
 
 # 1. Validate every @local/... reference in the web profile patch layer: the

@@ -21,7 +21,7 @@
  * RPC channel. Without jsdom the DOM sections are skipped with a notice.
  */
 import { createRequire } from 'node:module'
-import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdtempSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -73,6 +73,19 @@ const host = await import(pathToFileURL(hostPath).href)
   const patchFile = host.resolvePatchFile({})
   if (!patchFile.toLowerCase().endsWith('.dsh\\profiles\\web\\cordis.patch.yml')) throw new Error(`default patch file: ${patchFile}`)
   console.log('host helpers OK: resolveRestartScript + buildRestartSpawn + runningSessionIds + resolvePatchFile')
+}
+
+// Branding helpers: favicon SVG wrapper + icon asset (idempotent copy)
+{
+  const svg = host.faviconSvg(host.patchAssetPath('favicon-128.png'))
+  if (!svg.startsWith('<?xml') || !svg.includes('data:image/png;base64,')) throw new Error(`faviconSvg shape: ${svg.slice(0, 80)}`)
+  if (!svg.includes('viewBox="0 0 128 128"')) throw new Error('faviconSvg must declare the 128 viewBox')
+  const icon = host.ensureIconAsset()
+  if (!icon.toLowerCase().endsWith('.dsh\\assets\\deepseekharness-whalegirl.ico')) throw new Error(`icon path: ${icon}`)
+  if (!existsSync(icon)) throw new Error('ensureIconAsset must materialize the icon file')
+  const again = host.ensureIconAsset()
+  if (again !== icon) throw new Error('ensureIconAsset must be idempotent')
+  console.log('branding OK: faviconSvg (png data URI) + ensureIconAsset (idempotent)')
 }
 
 // Runtime snapshot helpers
@@ -362,6 +375,7 @@ const clientCtx = {
         if (endpoint === 'status') return { ok: true, value: statusValue }
         if (endpoint === 'restart') return restartResult
         if (endpoint === 'reloadPlugins') return reloadResult
+        if (endpoint === 'installShortcut') return { ok: true, value: { created: true, icon: 'C:/icon.ico', output: 'created C:\\Users\\x\\Desktop\\dsh-web.lnk' } }
         if (endpoint === 'getSettings') return { ok: true, value: cardValue }
         if (endpoint === 'setSettings') {
           cardValue = { ...cardValue, ...payload.args.fields }
@@ -389,6 +403,7 @@ if (sectionReg.id !== 'other' || sectionReg.order !== 30) {
   throw new Error(`section options mismatch: ${JSON.stringify(sectionReg)}`)
 }
 if (typeof sectionReg.inject().reloadPlugins !== 'function') throw new Error('section inject must expose reloadPlugins')
+if (typeof sectionReg.inject().installShortcut !== 'function') throw new Error('section inject must expose installShortcut')
 if (cardReg === undefined) throw new Error('settings.plugin.item never registered')
 if (cardReg.id !== CARD_ID || cardReg.order !== 30 || cardReg.locale !== 'settings.other.card') {
   throw new Error(`card options mismatch: ${JSON.stringify(cardReg)}`)
@@ -440,6 +455,7 @@ await act(async () => {
     restart: clientInjected.restart,
     status: clientInjected.status,
     reloadPlugins: clientInjected.reloadPlugins,
+    installShortcut: clientInjected.installShortcut,
     t: tWithParams,
   }))
 })
@@ -460,12 +476,14 @@ const refreshButton = buttons().find((b) => b.textContent === en.refresh)
 if (refreshButton === undefined) throw new Error('refresh button missing')
 const reloadButton = buttons().find((b) => b.textContent === en.reloadPlugins)
 if (reloadButton === undefined) throw new Error('reload-plugins button missing')
+const shortcutButton = buttons().find((b) => b.textContent === en.createShortcut)
+if (shortcutButton === undefined) throw new Error('create-shortcut button missing')
 const restartButton = buttons().find((b) => b.textContent === en.restart)
 if (restartButton === undefined) throw new Error('restart button missing')
-if (buttons().length !== 3) throw new Error(`expected 3 buttons (reload+restart+refresh), got ${buttons().length}`)
+if (buttons().length !== 4) throw new Error(`expected 4 buttons (shortcut+reload+restart+refresh), got ${buttons().length}`)
 if (doc.querySelector('.so-danger-note') === null) throw new Error('danger note missing')
 rpcLog = [] // the mount already polled status once; reset before interaction
-console.log('status block OK: 8 rows render pid/ports/versions, reload + refresh + restart present')
+console.log('status block OK: 8 rows render pid/ports/versions, shortcut + reload + refresh + restart present')
 
 // refresh button re-polls /app/status
 await act(async () => { fireClick(refreshButton) })
@@ -479,6 +497,15 @@ const reloadCall = rpcLog.find((c) => c.endpoint === 'reloadPlugins')
 if (reloadCall === undefined || reloadCall.channel !== '/app') throw new Error(`reload rpc target: ${JSON.stringify(reloadCall)}`)
 if (flowLine() === null || flowLine().textContent !== en.reloadRequested) throw new Error('reload requested status missing')
 console.log('reload flow OK: /app reloadPlugins + requested status')
+rpcLog = []
+
+// create-shortcut flow: calls /app/installShortcut and shows the result line
+await act(async () => { fireClick(shortcutButton) })
+const shortcutCall = rpcLog.find((c) => c.endpoint === 'installShortcut')
+if (shortcutCall === undefined || shortcutCall.channel !== '/app') throw new Error(`shortcut rpc target: ${JSON.stringify(shortcutCall)}`)
+await act(async () => {})
+if (flowLine() === null || !flowLine().textContent.includes(en.shortcutCreated)) throw new Error('shortcut created status missing')
+console.log('shortcut flow OK: /app installShortcut + created status')
 rpcLog = []
 
 // click -> confirm state (no call yet)
@@ -514,6 +541,7 @@ await act(async () => {
     restart: clientInjected.restart,
     status: clientInjected.status,
     reloadPlugins: clientInjected.reloadPlugins,
+    installShortcut: clientInjected.installShortcut,
     t: tWithParams,
   }))
 })
@@ -546,6 +574,7 @@ await act(async () => {
     restart: clientInjected.restart,
     status: clientInjected.status,
     reloadPlugins: clientInjected.reloadPlugins,
+    installShortcut: clientInjected.installShortcut,
     t: tWithParams,
   }))
 })
@@ -576,6 +605,7 @@ await act(async () => {
     restart: async () => { throw new Error('private detail') },
     status: clientInjected.status,
     reloadPlugins: clientInjected.reloadPlugins,
+    installShortcut: clientInjected.installShortcut,
     t: tWithParams,
   }))
 })

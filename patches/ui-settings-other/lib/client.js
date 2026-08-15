@@ -148,6 +148,12 @@ const zh = {
   reloadRequested: '已请求重载,数秒内生效,无需刷新页面。',
   reloadFailed: '重载请求失败,请重试。',
   dangerNote: '以下操作会终止 dsh 进程并中断所有运行中的会话,仅在升级 dsh 或修改核心插件时使用;日常更新用户插件请用上方的「重载用户插件」。',
+  createShortcut: '创建桌面快捷方式',
+  shortcutBusy: '创建中…',
+  shortcutCreated: '快捷方式已创建:',
+  shortcutExists: '快捷方式已存在:',
+  shortcutFailed: '快捷方式创建失败:',
+  shortcutHint: '在桌面创建 dsh-web 快捷方式(鲸鱼娘图标),双击即可静默启动服务。',
 };
 
 /** English dictionary checked against the Chinese key set. */
@@ -190,6 +196,12 @@ const en = {
   reloadRequested: 'Reload requested; takes effect within seconds, no page refresh needed.',
   reloadFailed: 'The reload request failed. Try again.',
   dangerNote: 'The action below terminates the dsh process and interrupts every running session. Use it only to upgrade dsh or change core plugins; for user-plugin updates use "Reload user plugins" above.',
+  createShortcut: 'Create desktop shortcut',
+  shortcutBusy: 'Creating…',
+  shortcutCreated: 'Shortcut created:',
+  shortcutExists: 'Shortcut already exists:',
+  shortcutFailed: 'Shortcut creation failed:',
+  shortcutHint: 'Creates a dsh-web desktop shortcut (whale-girl icon) that silently starts the service on double-click.',
 };
 
 /** Simplified Chinese dictionary for the 插件配置 card. */
@@ -322,7 +334,7 @@ function StatusBlock({ status, t }) {
  *   idle -> confirm -> calling -> scheduled | error
  *   idle -> busy (sessions running) -> waiting (poll until idle) | calling(force)
  */
-function OtherSection({ restart, status, reloadPlugins, t }) {
+function OtherSection({ restart, status, reloadPlugins, installShortcut, t }) {
   const [phase, setPhase] = useState('idle');
   const [busyInfo, setBusyInfo] = useState(null);
   const [waitTimer, setWaitTimer] = useState(null);
@@ -377,6 +389,16 @@ function OtherSection({ restart, status, reloadPlugins, t }) {
     )
   };
 
+  const [shortcutState, setShortcutState] = useState(null); // null | 'busy' | 'done' | 'failed'
+  const [shortcutOutput, setShortcutOutput] = useState('');
+  const doShortcut = () => {
+    setShortcutState('busy')
+    void Promise.resolve().then(() => installShortcut()).then(
+      (value) => { setShortcutState('done'); setShortcutOutput(value.output) },
+      () => { setShortcutState('failed'); setShortcutOutput('') },
+    )
+  };
+
   const tone = phase === 'error' ? 'error' : phase === 'scheduled' ? 'ok' : undefined;
 
   return jsx('div', { className: 'so-section', children: [
@@ -399,6 +421,25 @@ function OtherSection({ restart, status, reloadPlugins, t }) {
           ? jsx('span', { className: 'so-status so-flow-status', 'data-tone': 'error', children: t('reloadFailed') }, 'reload-fail')
           : null,
       ] }, 'reload-row'),
+      jsx('div', { className: 'so-row', children: [
+        jsx('button', {
+          type: 'button',
+          className: 'so-btn',
+          disabled: shortcutState === 'busy' ? true : undefined,
+          onClick: doShortcut,
+          children: shortcutState === 'busy' ? t('shortcutBusy') : t('createShortcut'),
+        }, 'create-shortcut'),
+        shortcutState === 'done'
+          ? jsxs('span', { className: 'so-status so-flow-status', 'data-tone': 'ok', children: [
+              t('shortcutCreated') + ' ',
+              jsx('code', { children: shortcutOutput }, 'shortcut-output'),
+            ] }, 'shortcut-done')
+          : null,
+        shortcutState === 'failed'
+          ? jsx('span', { className: 'so-status so-flow-status', 'data-tone': 'error', children: t('shortcutFailed') + ' ' + shortcutOutput }, 'shortcut-fail')
+          : null,
+      ] }, 'shortcut-row'),
+      jsx('p', { className: 'so-danger-note', children: t('shortcutHint') }, 'shortcut-hint'),
       jsx('p', { className: 'so-danger-note', children: t('dangerNote') }, 'danger-note'),
       jsx('div', { className: 'so-row', children: [
         phase === 'confirm'
@@ -620,7 +661,12 @@ function apply(ctx) {
     if (!result.ok) throw new Error('reloadPlugins failed: ' + result.error.code + ': ' + result.error.message)
     return result.value
   }
-  const injected = () => ({ restart, status, reloadPlugins })
+  const installShortcut = async () => {
+    const result = await ctx.connection.rpc.call('/app', 'installShortcut', { args: {} })
+    if (!result.ok) throw new Error('installShortcut failed: ' + result.error.code + ': ' + result.error.message)
+    return result.value
+  }
+  const injected = () => ({ restart, status, reloadPlugins, installShortcut })
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
