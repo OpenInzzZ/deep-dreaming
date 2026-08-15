@@ -1,10 +1,17 @@
 /**
  * Functional harness for the user-level plugin-manager bundle.
  *
- * Loads the exact deployed `lib/client.js` the browser will execute, feeds it
- * a module table stubbed with the real platform words (react, react/jsx-runtime,
- * ui-primitives), asserts the registration contract, then — when jsdom is
- * available — renders the tab and exercises the filters end to end.
+ * Host half: imports the real `lib/index.js`, exercises the patch-file
+ * editing helpers (remove/append disabled blocks) against a TEMP patch file,
+ * then applies the plugin to a mock Cordis context and asserts the
+ * `/plugin-toggle` RPC channel (loopback) with endpoint validation —
+ * including the P0 guard: `apply` must NOT return a thenable.
+ *
+ * Client half: loads the exact deployed `lib/client.js` the browser will
+ * execute, feeds it a module table stubbed with the real platform words
+ * (react, react/jsx-runtime, ui-primitives), asserts the registration
+ * contract, then — when jsdom is available — renders the tab and exercises
+ * the filters and the enable/disable toggle end to end.
  *
  * Dependency resolution is relative to this patch directory and the deployed
  * profile (`~/.dsh/profiles/...`); no machine-specific paths. jsdom is the
@@ -14,8 +21,9 @@
  * Run: node patches/ui-settings-plugin-manager/verify-plugin-manager.mjs
  */
 import { createRequire } from 'node:module'
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -28,8 +36,90 @@ try {
   JSDOM = uiRequire('jsdom').JSDOM
 } catch { /* render section skipped below */ }
 
+const hostPath = join(here, 'lib', 'index.js')
 const bundlePath = join(here, 'lib', 'client.js')
 const PLUGIN_ID = '@local/dsh-client-ui-settings-plugin-manager'
+
+// --- host half: patch-file editing + /plugin-toggle RPC ------------------------
+const host = await import(pathToFileURL(hostPath).href)
+
+// Pure helpers: disabled-block append/remove semantics
+{
+  const base = '# header\n- insert:\n    - id: a\n      name: pkg-a\n'
+  const removed = host.removeDisabledBlock(base + '- id: a\n  disabled: true\n- id: b\n  disabled: true\n', 'a')
+  if (removed.removed !== 1) throw new Error(`removeDisabledBlock removed ${removed.removed}`)
+  if (removed.content.includes('- id: a\n  disabled: true')) throw new Error('disabled block for a must be removed')
+  if (!removed.content.includes('- id: b\n  disabled: true')) throw new Error('disabled block for b must stay')
+  const untouched = host.removeDisabledBlock(base, 'a')
+  if (untouched.removed !== 0 || untouched.content !== base) throw new Error('remove with no match must be a no-op')
+  const appended = host.appendDisabledBlock(base, 'a')
+  if (!appended.endsWith('- id: a\n  disabled: true\n')) throw new Error(`append shape: ${appended}`)
+  console.log('host helpers OK: removeDisabledBlock + appendDisabledBlock')
+}
+
+// setEnabled against a TEMP patch file (never the real profile layer)
+const tmpDir = mkdtempSync(join(tmpdir(), 'plugin-manager-verify-'))
+const tmpPatch = join(tmpDir, 'cordis.patch.yml')
+const PATCH_HEADER = '# test layer\n- insert:\n    - id: a\n      name: pkg-a\n    - id: b\n      name: pkg-b\n'
+writeFileSync(tmpPatch, PATCH_HEADER)
+
+{
+  const off = await host.setEnabled(tmpPatch, 'a', false)
+  if (off.enabled !== false || off.changed !== true) throw new Error(`setEnabled(false) first: ${JSON.stringify(off)}`)
+  if (!readFileSync(tmpPatch, 'utf8').includes('- id: a\n  disabled: true')) throw new Error('disable must append the disabled block')
+  const offAgain = await host.setEnabled(tmpPatch, 'a', false)
+  if (offAgain.changed !== false) throw new Error(`setEnabled(false) twice must be idempotent: ${JSON.stringify(offAgain)}`)
+  const on = await host.setEnabled(tmpPatch, 'a', true)
+  if (on.enabled !== true || on.changed !== true) throw new Error(`setEnabled(true): ${JSON.stringify(on)}`)
+  const content = readFileSync(tmpPatch, 'utf8')
+  if (content.includes('disabled: true')) throw new Error(`enable must remove the disabled block:\n${content}`)
+  const onAgain = await host.setEnabled(tmpPatch, 'a', true)
+  if (onAgain.changed !== false) throw new Error('setEnabled(true) twice must be idempotent')
+  let invalidRejected = false
+  try { await host.setEnabled(tmpPatch, 'a/../evil', false) } catch { invalidRejected = true }
+  if (!invalidRejected) throw new Error('setEnabled must reject non-identifier entry ids')
+  console.log('host setEnabled OK: disable appends / enable removes / idempotent / rejects bad ids')
+}
+
+// apply(): /plugin-toggle channel registration + endpoint validation
+{
+  let handled = null
+  const hostCtx = {
+    inject: (services, callback) => {
+      if (services.join(',') === 'connection') {
+        return callback({
+          connection: {
+            rpc: {
+              handle: (channel, handler, options) => {
+                handled = { channel, handler, options }
+                return () => {}
+              },
+            },
+          },
+        })
+      }
+      return undefined
+    },
+  }
+  const ret = host.apply(hostCtx, { patchFile: tmpPatch })
+  if (ret !== undefined && typeof ret.then === 'function') {
+    throw new Error('P0 regression: apply returned a thenable (Invalid effect)')
+  }
+  if (handled === null || handled.channel !== '/plugin-toggle') throw new Error(`channel: ${JSON.stringify(handled)}`)
+  if (handled.options.authority !== 'loopback') throw new Error(`authority: ${handled.options.authority}`)
+
+  const bad = await handled.handler('setEnabled', { args: { entryId: 'a' } })
+  if (bad.ok !== false || bad.error.code !== 'bad-request') throw new Error(`missing enabled: ${JSON.stringify(bad)}`)
+  const badId = await handled.handler('setEnabled', { args: { entryId: 'a/../x', enabled: true } })
+  if (badId.ok !== false || badId.error.code !== 'bad-request') throw new Error(`bad id: ${JSON.stringify(badId)}`)
+  const unknown = await handled.handler('nope', {})
+  if (unknown.ok !== false || unknown.error.code !== 'bad-request') throw new Error(`unknown endpoint: ${JSON.stringify(unknown)}`)
+  const ok = await handled.handler('setEnabled', { args: { entryId: 'b', enabled: false } })
+  if (!ok.ok || ok.value.enabled !== false || ok.value.changed !== true) throw new Error(`setEnabled via rpc: ${JSON.stringify(ok)}`)
+  if (!readFileSync(tmpPatch, 'utf8').includes('- id: b\n  disabled: true')) throw new Error('rpc setEnabled must write the file')
+  console.log('host OK: /plugin-toggle channel (loopback) + validation + setEnabled writes the temp patch')
+}
+rmSync(tmpDir, { recursive: true, force: true })
 
 // --- load the bundle exactly like the shell kernel does ----------------------
 let dom = null
@@ -98,11 +188,20 @@ const SNAPSHOT = {
 
 let registered = null
 let dictionaries = null
+const toggleCalls = []
 const ctx = {
   effect: (fn) => fn(),
   locale: {
     register: (ns, dicts) => { dictionaries = { ns, dicts } },
     bind: () => (key) => 't:' + key,
+  },
+  connection: {
+    rpc: {
+      call: async (channel, endpoint, payload) => {
+        toggleCalls.push({ channel, endpoint, payload })
+        return { ok: true, value: { enabled: payload.args.enabled, changed: true, entryId: payload.args.entryId } }
+      },
+    },
   },
   remote: {
     pluginInventory: { list: async () => ({ ok: true, value: SNAPSHOT }) },
@@ -117,13 +216,23 @@ if (registered === null) throw new Error('slots.inject never registered')
 if (registered.id !== 'manager' || registered.order !== 20) {
   throw new Error(`tab options mismatch: ${JSON.stringify(registered)}`)
 }
+if (typeof registered.inject().toggleEnabled !== 'function') throw new Error('inject must expose toggleEnabled')
+const toggleProbe = await registered.inject().toggleEnabled('ui-queue-tools', false)
+if (toggleProbe.enabled !== false) throw new Error(`toggleEnabled rpc result: ${JSON.stringify(toggleProbe)}`)
+const toggleCall = toggleCalls.pop()
+if (toggleCall.channel !== '/plugin-toggle' || toggleCall.endpoint !== 'setEnabled') {
+  throw new Error(`toggle rpc target: ${JSON.stringify(toggleCall)}`)
+}
+if (JSON.stringify(toggleCall.payload) !== '{"args":{"entryId":"ui-queue-tools","enabled":false}}') {
+  throw new Error(`toggle rpc payload: ${JSON.stringify(toggleCall)}`)
+}
 if (dictionaries === null || dictionaries.ns !== exports_.NS) throw new Error('dictionaries not registered')
 const zhKeys = Object.keys(dictionaries.dicts.zh)
 const enKeys = Object.keys(dictionaries.dicts.en)
 if (JSON.stringify(zhKeys) !== JSON.stringify(enKeys)) {
   throw new Error(`zh/en key mismatch:\nzh: ${zhKeys}\nen: ${enKeys}`)
 }
-console.log('apply contract OK: tab id =', registered.id, 'order =', registered.order, '| dict keys =', zhKeys.length)
+console.log('apply contract OK: tab id =', registered.id, 'order =', registered.order, '| dict keys =', zhKeys.length, '| toggleEnabled → /plugin-toggle setEnabled')
 
 if (JSDOM === null) {
   console.log('\nclient DOM sections SKIPPED (jsdom not installed)')
@@ -144,11 +253,13 @@ const fireClick = (el) => { el.dispatchEvent(new dom.window.MouseEvent('click', 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 const en = dictionaries.dicts.en
+const injected = registered.inject()
 const root = createRoot(dom.window.document.getElementById('root'))
 
 await act(async () => {
   root.render(React.createElement(registered.component, {
     list: async () => SNAPSHOT,
+    toggleEnabled: injected.toggleEnabled,
     t: (key) => en[key],
   }))
 })
@@ -161,6 +272,20 @@ if (cards().length !== 7) throw new Error(`expected 7 cards, got ${cards().lengt
 if (doc.querySelectorAll('[data-category="official"]').length !== 4) throw new Error('official tag count mismatch')
 if (doc.querySelectorAll('[data-category="custom"]').length !== 3) throw new Error('custom tag count mismatch')
 console.log('initial render OK: 7 cards, official tags = 4, custom tags = 3')
+
+// every card carries an enable/disable toggle; clicking it calls
+// /plugin-toggle setEnabled with the inverse state and refreshes the list
+const toggles = () => [...doc.querySelectorAll('.pm-toggle')]
+if (toggles().length !== 7) throw new Error(`expected 7 toggle buttons, got ${toggles().length}`)
+const firstToggle = toggles()[0]
+const firstCard = firstToggle.closest('.pm-card')
+if (firstCard.getAttribute('data-plugin-entry') !== 'official-active') throw new Error('first card ordering mismatch')
+await act(async () => { fireClick(firstToggle) })
+const clickCall = toggleCalls.pop()
+if (clickCall === undefined || clickCall.endpoint !== 'setEnabled' || clickCall.payload.args.entryId !== 'official-active' || clickCall.payload.args.enabled !== false) {
+  throw new Error(`toggle click rpc: ${JSON.stringify(clickCall)}`)
+}
+console.log('toggle OK: card button calls /plugin-toggle setEnabled (inverse state)')
 
 const select = (label) => doc.querySelector(`select[aria-label="${label}"]`)
 

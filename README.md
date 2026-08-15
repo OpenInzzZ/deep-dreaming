@@ -25,7 +25,7 @@ deep-dreaming/
 | --- | --- | --- | --- |
 | [session-cleanup](patches/session-cleanup/) | 按天数/容量定期清理归档会话,跳过活跃会话 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/session-cleanup/README.md) |
 | [dsh-project-memory](patches/dsh-project-memory/) | 跨会话项目记忆:Agent 把确定性项目知识存为 Markdown 笔记,后续会话可检索 | `dsh plugin --profile web add` 安装到 profile | [README](patches/dsh-project-memory/README.md) |
-| [ui-settings-plugin-manager](patches/ui-settings-plugin-manager/) | Web 设置新增「插件管理」标签页:状态过滤 + 官方/自定义分类 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-settings-plugin-manager/README.md) |
+| [ui-settings-plugin-manager](patches/ui-settings-plugin-manager/) | Web 设置新增「插件管理」标签页:状态过滤 + 官方/自定义分类 + **启停开关(热生效)** | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-settings-plugin-manager/README.md) |
 | [ui-settings-other](patches/ui-settings-other/) | Web 设置新增「其他」页:服务运行状态(pid/端口/内存/版本)+ **重载用户插件(热,不中断会话)** + 重启服务(危险)+ 空闲自动停止(可配,默认 2h);配套桌面快捷方式静默启动脚本 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-settings-other/README.md) |
 | [ui-queue-tools](patches/ui-queue-tools/) | 排队消息增强:hover 预览全文 + 上移/下移排序(host 半经 Inbox.splice 重排) | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-queue-tools/README.md) |
 
@@ -80,7 +80,8 @@ node patches/session-cleanup/verify-session-cleanup.mjs          # settings 集�
 node patches/session-cleanup/tests/load-smoke.mjs                # 真实 Cordis 加载冒烟(Invalid effect 回归)
 node patches/dsh-project-memory/tests/store.test.mjs             # 记忆库逻辑
 node patches/dsh-project-memory/tests/plugin.smoke.mjs           # 真实 Cordis 加载冒烟(工具/回顾/配置校验)
-node patches/ui-settings-plugin-manager/verify-plugin-manager.mjs  # 部署后的 UI 插件端到端验证
+node patches/ui-settings-plugin-manager/verify-plugin-manager.mjs  # 契约验证(启停逻辑 + 清单/过滤器)
+node patches/ui-settings-plugin-manager/tests/load-smoke.mjs      # 真实 Cordis 加载冒烟
 node patches/ui-settings-other/verify-settings-other.mjs         # settings-other host + client 验证
 node patches/ui-settings-other/tests/load-smoke.mjs              # 真实 Cordis 加载冒烟
 node patches/ui-queue-tools/verify-queue-tools.mjs               # queue-tools host + client 验证

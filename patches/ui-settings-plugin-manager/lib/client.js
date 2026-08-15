@@ -65,6 +65,16 @@ const CSS = [
   '.pm-status-dot[data-phase="loading"]{background:var(--dsw-alias-state-business-primary)}',
   '.pm-config-tag{display:inline-flex;align-items:center;min-height:20px;border-radius:5px;padding:1px 6px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px;white-space:nowrap}',
   '.pm-config-tag[data-enabled="true"]{background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 10%,transparent);color:var(--dsw-alias-state-success-primary)}',
+  '.pm-card-actions{display:flex;align-items:center;gap:10px;padding:0 14px 12px}',
+  '.pm-toggle{height:28px;border:1px solid var(--dsw-alias-border-l2);border-radius:7px;padding:0 12px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;line-height:26px;cursor:pointer}',
+  '.pm-toggle:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}',
+  '.pm-toggle:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px}',
+  '.pm-toggle:disabled{cursor:default;opacity:.55}',
+  '.pm-toggle.pm-toggle-off{border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 45%,var(--dsw-alias-border-l2));color:var(--dsw-alias-state-error-primary)}',
+  '.pm-toggle-status{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}',
+  '.pm-toggle-status[data-tone="error"]{color:var(--dsw-alias-state-error-primary)}',
+  '.pm-toggle-status[data-tone="ok"]{color:var(--dsw-alias-state-success-primary)}',
+  '.pm-toggle-note{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary);margin:0;padding:0 14px 12px}',
   '.pm-chevron{flex:none;color:var(--dsw-alias-label-tertiary);transition:transform 140ms var(--ds-ease-in-out)}',
   '.pm-card[data-open="true"] .pm-chevron{transform:rotate(180deg)}',
   '.pm-card-details{border-top:1px solid var(--dsw-alias-border-l2);padding:10px 14px 12px;background:var(--dsw-alias-bg-module-platform)}',
@@ -117,6 +127,12 @@ const zh = {
   disabledTag: '已停用',
   configuration: '配置状态',
   cordis: 'Cordis 状态',
+  enable: '启用',
+  disable: '停用',
+  toggleBusy: '处理中…',
+  toggleDone: '已生效',
+  toggleFailed: '操作失败',
+  selfProtected: '本管理页不能停用(否则无法在此恢复,需手动编辑 cordis.patch.yml)',
 };
 
 /** English dictionary checked against the Chinese key set. */
@@ -149,13 +165,19 @@ const en = {
   disabledTag: 'Disabled',
   configuration: 'Configuration',
   cordis: 'Cordis status',
+  enable: 'Enable',
+  disable: 'Disable',
+  toggleBusy: 'Working…',
+  toggleDone: 'Applied',
+  toggleFailed: 'Operation failed',
+  selfProtected: 'This manager page cannot be disabled (otherwise it could not be restored here; edit cordis.patch.yml manually instead)',
 };
 
 /** Dictionary namespace owned by this plugin. */
 const NS = 'settings.pluginManager';
 
 /** Services required by the Settings registration. */
-const inject = ['slots', 'locale', 'remote', 'remote.pluginInventory'];
+const inject = ['slots', 'locale', 'connection', 'remote', 'remote.pluginInventory'];
 
 const PHASE_KEYS = { pending: 'pending', loading: 'loadingPhase', active: 'active', failed: 'failed', unloading: 'unloading' };
 
@@ -188,7 +210,7 @@ function matches(entry, normalizedQuery) {
 }
 
 /** Render the filterable, categorized current Loader inventory. */
-function PluginManagerSettingsTab({ list, t, renderSlot }) {
+function PluginManagerSettingsTab({ list, toggleEnabled, t, renderSlot }) {
   const catalogId = useId();
   const [request, setRequest] = useState(0);
   const [query, setQuery] = useState('');
@@ -197,6 +219,9 @@ function PluginManagerSettingsTab({ list, t, renderSlot }) {
   const [phase, setPhase] = useState('all');
   const [expanded, setExpanded] = useState(null);
   const [state, setState] = useState({ status: 'loading' });
+  const [toggleBusyId, setToggleBusyId] = useState(null);
+  const [toggleFailedId, setToggleFailedId] = useState(null);
+  const [toggleDoneId, setToggleDoneId] = useState(null);
 
   useEffect(() => {
     let current = true
@@ -228,6 +253,25 @@ function PluginManagerSettingsTab({ list, t, renderSlot }) {
   const retry = () => {
     setState({ status: 'loading' })
     setRequest(value => value + 1)
+  };
+
+  /** Toggle one entry's enable state; on success refresh the inventory. */
+  const doToggle = (entry) => {
+    const target = !entry.enabled
+    setToggleBusyId(entry.entryId)
+    setToggleFailedId(null)
+    setToggleDoneId(null)
+    void Promise.resolve().then(() => toggleEnabled(entry.entryId, target)).then(
+      () => {
+        setToggleBusyId(null)
+        setToggleDoneId(entry.entryId)
+        setRequest(value => value + 1)
+      },
+      () => {
+        setToggleBusyId(null)
+        setToggleFailedId(entry.entryId)
+      },
+    )
   };
 
   const phases = Object.keys(PHASE_KEYS);
@@ -338,6 +382,26 @@ function PluginManagerSettingsTab({ list, t, renderSlot }) {
                 ] }, 'trailing'),
               ],
             }, 'content'),
+            // Enable/disable row: a plain button next to the (button) card
+            // header — never nested inside it. Self-toggle is blocked so the
+            // manager page can always be restored from here.
+            entry.entryId === 'ui-settings-plugin-manager'
+              ? jsx('p', { className: 'pm-toggle-note', children: t('selfProtected') }, 'self-note')
+              : jsxs('div', { className: 'pm-card-actions', children: [
+                  jsx('button', {
+                    type: 'button',
+                    className: 'pm-toggle' + (entry.enabled ? ' pm-toggle-off' : ''),
+                    disabled: toggleBusyId === entry.entryId ? true : undefined,
+                    onClick: () => { doToggle(entry) },
+                    children: toggleBusyId === entry.entryId ? t('toggleBusy') : (entry.enabled ? t('disable') : t('enable')),
+                  }, 'toggle'),
+                  toggleFailedId === entry.entryId
+                    ? jsx('span', { className: 'pm-toggle-status', 'data-tone': 'error', children: t('toggleFailed') }, 'toggle-fail')
+                    : null,
+                  toggleDoneId === entry.entryId
+                    ? jsx('span', { className: 'pm-toggle-status', 'data-tone': 'ok', children: t('toggleDone') }, 'toggle-done')
+                    : null,
+                ] }, 'actions'),
             open ? jsx('div', { className: 'pm-card-details', id: detailId, children: [
               jsx('code', { className: 'pm-entry-value', 'data-loader-entry': entry.entryId, children: entry.entryId }, 'entry'),
               jsx('dl', { className: 'pm-details', children: [
@@ -378,7 +442,14 @@ function apply(ctx) {
     }
     return result.value
   }
-  const injected = () => ({ list })
+  const toggleEnabled = async (entryId, enabled) => {
+    const result = await ctx.connection.rpc.call('/plugin-toggle', 'setEnabled', { args: { entryId, enabled } })
+    if (!result.ok) {
+      throw new Error('setEnabled failed: ' + result.error.code + ': ' + result.error.message)
+    }
+    return result.value
+  }
+  const injected = () => ({ list, toggleEnabled })
 
   ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
     name: 'settings.plugins.tab',
