@@ -414,7 +414,10 @@ function installReview(ctx, autoReview) {
 		try {
 			agent.followup(createUserMessage({
 				content: [{ type: "text", text: REVIEW_PROMPT }],
-				source: { kind: "memory", review: true }
+				// `form: "notice"` + `summary` render this followup as the
+				// official collapsed context-notice row (one-line summary,
+				// expand to read the full prompt) instead of a plain bubble.
+				source: { kind: "memory", review: true, form: "notice", summary: "项目记忆回顾 · memory save/update" }
 			}));
 		} catch (error) {
 			ctx.logger.warn(`project-memory: could not queue the memory review for agent "${agent.id}": ${String(error)}`);
@@ -446,7 +449,10 @@ function installRecall(ctx, autoRecall) {
 		try {
 			agent.followup(createUserMessage({
 				content: [{ type: "text", text: RECALL_PROMPT }],
-				source: { kind: "memory", recall: true }
+				// `form: "notice"` + `summary` render this followup as the
+				// official collapsed context-notice row (one-line summary,
+				// expand to read the full prompt) instead of a plain bubble.
+				source: { kind: "memory", recall: true, form: "notice", summary: "项目记忆召回 · memory search" }
 			}));
 		} catch (error) {
 			ctx.logger.warn(`project-memory: could not queue the memory recall for agent "${agent.id}": ${String(error)}`);

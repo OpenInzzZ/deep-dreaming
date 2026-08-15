@@ -173,6 +173,9 @@ try {
 		ctx.emit("agent/status", { agent: fakeAgent, status: "idle" });
 		if (!fakeAgent.followed) throw new Error("review followup was not sent");
 		if (fakeAgent.followed.source?.kind !== "memory") throw new Error("review message source wrong");
+		if (fakeAgent.followed.source?.form !== "notice" || fakeAgent.followed.source?.summary !== "项目记忆回顾 · memory save/update") {
+			throw new Error(`review must render as a collapsed context notice: ${JSON.stringify(fakeAgent.followed?.source)}`);
+		}
 		if (!fakeAgent.followed.content[0].text.includes("项目记忆回顾")) throw new Error("review message text wrong");
 		// the review's own user/message event (data IS the message, whose
 		// source.kind is "memory") must not arm another review
@@ -204,6 +207,9 @@ try {
 		if (!recallAgent.followed) throw new Error("recall followup was not sent on the first user message");
 		if (recallAgent.followed.source?.kind !== "memory" || recallAgent.followed.source?.recall !== true) {
 			throw new Error(`recall message source wrong: ${JSON.stringify(recallAgent.followed?.source)}`);
+		}
+		if (recallAgent.followed.source?.form !== "notice" || recallAgent.followed.source?.summary !== "项目记忆召回 · memory search") {
+			throw new Error(`recall must render as a collapsed context notice: ${JSON.stringify(recallAgent.followed?.source)}`);
 		}
 		if (!recallAgent.followed.content[0].text.includes("项目记忆召回")) throw new Error("recall message text wrong");
 		// the recall's own user/message event must not re-arm the recall
