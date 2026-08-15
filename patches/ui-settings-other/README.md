@@ -46,6 +46,7 @@
 - **创建桌面快捷方式**:点击即经 `/app` 通道的 `installShortcut` 端点运行
   `~/.dsh/scripts/install-desktop-shortcut.ps1`(同步等待);成功显示
   「快捷方式已创建:<路径>」,已存在时同样显示(脚本幂等);失败显示原因。
+  生成的快捷方式**双击会静默启动服务并用默认浏览器打开 dsh Web**。
 - **重启服务**(危险):**二次确认**后才真正执行(第一次点击进入确认态,
   再点「确认重启」);请求发出后按钮进入「正在重启…」禁用态;成功后显示
   「已请求重启,服务即将断开,请稍后刷新页面」;失败显示错误并提供重试。
@@ -82,10 +83,14 @@
   node.exe 与 npx 缓存中最新的 dsh CLI 入口,以 **隐藏窗口** 启动
   `node <bin> web`(日志重定向到 `~/.dsh/logs/dsh-web.<时间戳>.*.log`),
   并轮询端口直到就绪。支持 `-Port` / `-Force` / `-NodeArgs`
-  (透传额外参数,如 `-Port 3099 -NodeArgs '--port','3099'`)。
+  (透传额外参数,如 `-Port 3099 -NodeArgs '--port','3099'`),以及
+  **`-OpenBrowser`**:无论服务是已运行还是刚启动,都会用系统默认浏览器
+  打开 `http://127.0.0.1:<Port>`。
 - **`install-desktop-shortcut.ps1`**:在桌面创建 `dsh-web.lnk`,
-  目标为 `powershell.exe -WindowStyle Hidden -File …start-dsh.ps1`,
-  双击即静默启动(已运行时为无操作)。
+  目标为 `powershell.exe -WindowStyle Hidden -File …start-dsh.ps1
+  -OpenBrowser` —— **双击即静默启动(已运行时为无操作)并自动打开默认
+  浏览器**进入 dsh Web。已存在的旧版快捷方式(不含 `-OpenBrowser`)会被
+  自动升级;仅含 `-OpenBrowser` 的快捷方式才幂等跳过。
 - 手动执行:
   `powershell -NoProfile -ExecutionPolicy Bypass -File .\patches\ui-settings-other\start-dsh.ps1`
 

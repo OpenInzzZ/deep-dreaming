@@ -3,14 +3,18 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File .\scripts\start-dsh.ps1
 #   powershell -ExecutionPolicy Bypass -File .\scripts\start-dsh.ps1 -Port 3080
 #   powershell -ExecutionPolicy Bypass -File .\scripts\start-dsh.ps1 -Force   # start even if the port is busy
+#   powershell -ExecutionPolicy Bypass -File .\scripts\start-dsh.ps1 -OpenBrowser  # also open the default browser
 #
 # Flow: if something already listens on $Port, exit silently (idempotent) ->
 # locate node.exe and the dsh CLI entry (newest npx-cache copy) -> start
 # `node <bin> web` with a HIDDEN window and logs redirected to $LogDir ->
-# poll the port until the service answers.
+# poll the port until the service answers. With -OpenBrowser the default
+# browser opens the UI whether the service was already running or just
+# started (each invocation opens once).
 param(
     [int]$Port = 3080,
     [switch]$Force,
+    [switch]$OpenBrowser,
     [string]$LogDir = (Join-Path $env:USERPROFILE '.dsh\logs'),
     [string[]]$NodeArgs = @()
 )
@@ -18,13 +22,20 @@ $ErrorActionPreference = 'Stop'
 
 function Log($m) { Write-Host $m }
 
+function Open-Browser {
+    if (-not $OpenBrowser) { return }
+    Log "opening default browser: http://127.0.0.1:$Port"
+    Start-Process "http://127.0.0.1:$Port"
+}
+
 Log '== dsh web start =='
-Log "port: $Port  force: $([bool]$Force)"
+Log "port: $Port  force: $([bool]$Force)  openBrowser: $([bool]$OpenBrowser)"
 
 # --- 1. already running? ------------------------------------------------------
 $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($conn -and -not $Force) {
     Log "dsh web is already running (PID $($conn.OwningProcess) on port $Port); nothing to do."
+    Open-Browser
     exit 0
 }
 
@@ -69,6 +80,7 @@ for ($i = 0; $i -lt 60; $i++) {
         $probe = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/" -Method Get -TimeoutSec 3 -UseBasicParsing
         if ($probe.StatusCode -eq 200) {
             Log "service ready after ~$([int](($i + 1) * 2))s"
+            Open-Browser
             exit 0
         }
     } catch { }
