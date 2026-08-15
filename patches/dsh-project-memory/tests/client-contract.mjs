@@ -160,7 +160,8 @@ const text = host.querySelector('.pmem-text')
 if (text === null || !text.textContent.includes('Project memory saved')) throw new Error('expanded text missing')
 console.log('render OK: settled save card (DisclosureRow) collapses to 已保存:<title> + keywords, expands to full text')
 
-// running card auto-expands with "执行中…"
+// running card stays collapsed too (memory cards never auto-expand); the
+// summary row still shows "运行中…", and expanding reveals the running text
 const runningComponent = views.find((v) => v.key === 'project_memory_search').component
 const runningBlock = { callId: 'call-2', name: 'project_memory_search', argsRaw: '{"query":"约定"}', turn: 1, step: 1, time: Date.now(), callView: null, subCalls: [] }
 const host2 = document.createElement('div')
@@ -168,9 +169,11 @@ const root2 = createRoot(host2)
 await act(async () => {
   root2.render(React.createElement(runningComponent, { block: runningBlock, callId: 'call-2', toolName: 'project_memory_search' }))
 })
-if (host2.querySelector('.pmem-text') === null) throw new Error('running card must auto-expand')
+if (host2.querySelector('.pmem-text') !== null) throw new Error('running card must start collapsed')
+if (!host2.querySelector('.pmem-summary').textContent.includes('运行中')) throw new Error('running summary missing')
+await act(async () => { host2.querySelector('[data-disclosure-row]').dispatchEvent(new window.MouseEvent('click', { bubbles: true })) })
 if (!host2.querySelector('.pmem-text').textContent.includes('执行中')) throw new Error('running text missing')
-console.log('render OK: running search card auto-expands with 执行中')
+console.log('render OK: running search card stays collapsed (运行中 summary), expands on click')
 
 console.log('\nALL CLIENT CONTRACT CHECKS PASSED')
 process.exit(0)

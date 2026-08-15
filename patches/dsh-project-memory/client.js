@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({ id: 'dsh-project-memory', factory: (require) => {
 var module = { exports: {} }; var exports = module.exports;
 
 const React = require('react');
-const { useEffect, useState } = React;
+const { useState } = React;
 const { jsx, jsxs, Fragment } = require('react/jsx-runtime');
 const { DisclosureRow, IconListPenOutline16, IconSearchOutline16, IconChecklistOutline14 } = require('@deepseek-ai/dsh-client-ui-primitives');
 
@@ -144,8 +144,9 @@ function MemoryToolCard({ block, callId }) {
   const Icon = ICONS[name] ?? IconListPenOutline16;
   const text = running ? '' : resultText(block);
   const isError = !running && block.isError === true;
+  // Always collapsed by default — including running calls — so memory
+  // activity stays a quiet summary row unless the user expands it.
   const [open, setOpen] = useState(false);
-  useEffect(() => { if (running) setOpen(true) }, [running]);
 
   const state = running ? 'running' : (isError ? 'error' : 'ok');
   const summary = summarize(name, running, text, isError);
