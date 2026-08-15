@@ -8,9 +8,11 @@
 # Flow: if something already listens on $Port, exit silently (idempotent) ->
 # locate node.exe and the dsh CLI entry (newest npx-cache copy) -> start
 # `node <bin> web` with a HIDDEN window and logs redirected to $LogDir ->
-# poll the port until the service answers. With -OpenBrowser the default
-# browser opens the UI whether the service was already running or just
-# started (each invocation opens once).
+# poll the port until the service answers. With -OpenBrowser the UI opens
+# whether the service was already running or just started: if a browser
+# window already shows a dsh tab (window title contains the page title), that
+# window is focused instead of opening a duplicate tab; otherwise a new tab
+# opens in the default browser.
 param(
     [int]$Port = 3080,
     [switch]$Force,
@@ -22,8 +24,39 @@ $ErrorActionPreference = 'Stop'
 
 function Log($m) { Write-Host $m }
 
+function Focus-DshWindow {
+    # Browser tab windows carry the active tab's page title; focus a window
+    # that already shows the dsh UI instead of opening a duplicate tab.
+    # Best effort: SetForegroundWindow can be blocked by the OS focus policy,
+    # and the title match only works while the page title is "DeepSeek Harness".
+    try {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class DshWinFocus {
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+}
+'@ -ErrorAction Stop
+    } catch {
+        return $false
+    }
+    $found = $false
+    foreach ($proc in Get-Process -ErrorAction SilentlyContinue) {
+        if ($proc.MainWindowTitle -like '*DeepSeek Harness*') {
+            [DshWinFocus]::ShowWindow($proc.MainWindowHandle, 9) | Out-Null   # SW_RESTORE
+            [DshWinFocus]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
+            Log "focused existing browser window (PID $($proc.Id)): $($proc.MainWindowTitle)"
+            $found = $true
+            break
+        }
+    }
+    return $found
+}
+
 function Open-Browser {
     if (-not $OpenBrowser) { return }
+    if (Focus-DshWindow) { return }
     Log "opening default browser: http://127.0.0.1:$Port"
     Start-Process "http://127.0.0.1:$Port"
 }

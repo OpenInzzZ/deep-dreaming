@@ -84,8 +84,10 @@
   `node <bin> web`(日志重定向到 `~/.dsh/logs/dsh-web.<时间戳>.*.log`),
   并轮询端口直到就绪。支持 `-Port` / `-Force` / `-NodeArgs`
   (透传额外参数,如 `-Port 3099 -NodeArgs '--port','3099'`),以及
-  **`-OpenBrowser`**:无论服务是已运行还是刚启动,都会用系统默认浏览器
-  打开 `http://127.0.0.1:<Port>`。
+  **`-OpenBrowser`**:无论服务是已运行还是刚启动,都会打开 dsh Web——
+  **若浏览器已有显示 dsh 页面的窗口(窗口标题含页面标题
+  「DeepSeek Harness」)则直接聚焦该窗口,否则用默认浏览器新建标签页**
+  (聚焦为尽力而为:受系统焦点策略限制,失败时同样回退新建标签页)。
 - **`install-desktop-shortcut.ps1`**:在桌面创建 `dsh-web.lnk`,
   目标为 `powershell.exe -WindowStyle Hidden -File …start-dsh.ps1
   -OpenBrowser` —— **双击即静默启动(已运行时为无操作)并自动打开默认
