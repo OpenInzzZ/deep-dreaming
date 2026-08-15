@@ -1,7 +1,7 @@
 # dsh-project-memory bundle patch: project memory tools, guidance, and the
-# session-end memory review. Applied as one profile layer after the base and
-# web-app bundles (the profile's own cordis.patch.yml and any --patch
-# overlays still come later).
+# session-start recall / session-end review phases. Applied as one profile
+# layer after the base and web-app bundles (the profile's own
+# cordis.patch.yml and any --patch overlays still come later).
 #
 # The row lives on the HOST plane: the tools register into the host `tools`
 # registry (visible to every session), the prompt section lands in the global
@@ -11,9 +11,14 @@
     - id: project-memory
       name: 'dsh-project-memory'
       config:
+        # Session-start memory recall (memory search phase): before the first
+        # real user turn, queue one recall followup so the agent loads
+        # relevant memories first (renders as the 记忆 · 检索 card).
+        autoRecall: true
         # After every completed user turn, send the agent a short memory-review
-        # followup: the agent decides whether durable project knowledge was
-        # produced and saves it via project_memory_save when it was.
+        # followup (memory save/update phase): the agent decides whether
+        # durable project knowledge was produced and saves it via
+        # project_memory_save when it was.
         autoReview: true
         # Directory name of the memory store under each project root.
         memoryDirName: '.dsh-memory'

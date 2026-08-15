@@ -50,6 +50,10 @@ const DEFAULT_MEMORY_DIR_NAME = ".dsh-memory";
  * validated config and never re-derives defaults itself.
  */
 export const Config = z.object({
+	/** Session-start memory recall: before the first real user turn, queue a
+	 * recall followup so the agent loads relevant memories first (renders as
+	 * the collapsible "记忆 · 检索" card). */
+	autoRecall: z.boolean().default(true),
 	/** Send a short memory-review followup after every completed user turn. */
 	autoReview: z.boolean().default(true),
 	/** Directory name of the memory store under each project root. */
@@ -67,15 +71,19 @@ const GUIDANCE_SECTION = `\
 <project_memory>
 本项目维护一份跨会话的项目记忆库:工作区根目录下的 .dsh-memory/ 目录,以 Markdown 笔记(带 keywords / usage_scenario 元数据)保存过往会话沉淀的知识。
 
-- 开始实质性工作之前:先调用 project_memory_search 检索与本任务相关的既有记忆(项目约定、关键决策、踩坑经验、接口与数据结构事实等),遵循既有约定,避免重复探索。
-- 完成一项产生确定性知识的工作后:若其中有未来会话值得复用或知晓的内容,调用 project_memory_save 记录;同一主题已有笔记时更新而非重复新建;不确定时倾向记录,保持短小、准确、可脱离上下文独立理解。
+- 会话开始阶段(memory search):会收到一条「项目记忆召回」提示,先调用 project_memory_search 检索与本任务相关的既有记忆(项目约定、关键决策、踩坑经验、接口与数据结构事实等),遵循既有约定,避免重复探索。
+- 会话结束阶段(memory save/update):完成产生确定性知识的工作后,调用 project_memory_save 保存或更新;同一主题已有笔记时更新而非重复新建;不确定时倾向记录,保持短小、准确、可脱离上下文独立理解。
 - 只记录事实与结论,不记录过程性对话。
 - 每条记忆带有成熟度(usage_count 决定:new → developing → mature → authoritative):被保存/更新确认、被检索使用的次数越多,成熟度越高,内容越值得采信;但任何记忆都可能过时,采信前仍应结合当前代码与事实核对。检索结果中成熟度高的记忆优先参考。
 </project_memory>`;
 
-/** The auto-review followup message text. */
+/** The session-start memory recall followup: load relevant memories first. */
+const RECALL_PROMPT = `\
+[项目记忆召回 · memory search] 会话开始,请先调用 project_memory_search 检索与本任务/本项目相关的既有记忆(项目约定、关键决策、踩坑经验、接口或数据结构事实等),遵循既有约定、避免重复探索;完成检索后再开始工作。若无相关记忆,检索结果为空,直接开始即可。`;
+
+/** The auto-review followup message text (session-end memory save/update). */
 const REVIEW_PROMPT = `\
-[项目记忆回顾] 本轮会话的工作已完成。请回顾本轮你完成的工作,判断是否产生了值得跨会话保留的项目知识(重要决策、约定/规范、踩坑经验、接口或数据结构事实等)。若有,调用 project_memory_save 保存;同一主题已存在时更新而不是重复新建。若没有值得记录的内容,请只回复"无需记录"。`;
+[项目记忆回顾 · memory save/update] 本轮会话的工作已完成。请回顾本轮你完成的工作,判断是否产生了值得跨会话保留的项目知识(重要决策、约定/规范、踩坑经验、接口或数据结构事实等)。若有,调用 project_memory_save 保存或更新(同主题已存在时更新,否则新建);若没有值得记录的内容,请只回复"无需记录"。`;
 
 /** The owning session's project root (its header cwd). */
 function projectRoot(exec) {
@@ -415,6 +423,37 @@ function installReview(ctx, autoReview) {
 	});
 }
 
+/** Install the session-start memory recall: on the first real user message of
+ * a reviewable session, queue one recall followup so the agent loads relevant
+ * memories before substantial work (the search call renders as the
+ * collapsible "记忆 · 检索" memory card). Fires at most once per session. */
+function installRecall(ctx, autoRecall) {
+	if (!autoRecall) return;
+	const recalled = new Set();
+	ctx.on("agent/disposed", ({ agent }) => {
+		recalled.delete(agent);
+	});
+	ctx.on("session/event", (session, event) => {
+		const agent = ctx.agents.get(session.id);
+		if (agent === void 0 || agent.session !== session) return;
+		if (recalled.has(agent)) return;
+		if (event.type !== "user/message") return;
+		// Our own followups (recall/review) are user/message with kind "memory";
+		// they must not arm the recall. The event data IS the message object.
+		if (event.data.source?.kind === "memory") return;
+		if (!reviewable(agent)) return;
+		recalled.add(agent);
+		try {
+			agent.followup(createUserMessage({
+				content: [{ type: "text", text: RECALL_PROMPT }],
+				source: { kind: "memory", recall: true }
+			}));
+		} catch (error) {
+			ctx.logger.warn(`project-memory: could not queue the memory recall for agent "${agent.id}": ${String(error)}`);
+		}
+	});
+}
+
 /** Register the memory guidance prompt section visible in every session. */
 function installGuidance(ctx) {
 	ctx.systemPrompt.section({
@@ -430,6 +469,7 @@ function apply(ctx, config) {
 	// be undefined when apply is called directly (bypassing the loader), in
 	// which case treat it as an empty object — no manual defaults, no clamping.
 	const {
+		autoRecall,
 		autoReview,
 		autoDedupe,
 		trackUsage,
@@ -438,6 +478,7 @@ function apply(ctx, config) {
 	} = config ?? {};
 	registerTools(ctx, memoryDirName, { autoDedupe, trackUsage, mergeContentThreshold });
 	installGuidance(ctx);
+	installRecall(ctx, autoRecall);
 	installReview(ctx, autoReview);
 }
 

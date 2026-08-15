@@ -5,19 +5,20 @@
 ## 工作方式
 
 1. **常驻指令**(注入每个会话的 system prompt):
-   - 开始实质性工作前 → 先调用 `project_memory_search` 检索既有记忆,遵循既有约定;
-   - 完成产生确定性知识的工作后 → 调用 `project_memory_save` 记录(同主题更新而非重复新建)。
+   - 会话开始阶段(memory search)→ 先调用 `project_memory_search` 检索既有记忆,遵循既有约定;
+   - 会话结束阶段(memory save/update)→ 完成产生确定性知识的工作后调用 `project_memory_save` 记录(同主题更新而非重复新建)。
 2. **三个工具**(每个会话可见):
    - `project_memory_save` — 保存/更新一条记忆笔记
    - `project_memory_search` — 按关键词/标题/使用场景/正文检索记忆(中文分词友好:ASCII 词 + CJK 单字/二元组)
    - `project_memory_list` — 浏览全部记忆(可按分类过滤)
-3. **会话完成自动回顾**(配置 `autoReview`,默认开):每轮用户消息被完整回答后,插件向 Agent 发送一条简短回顾消息,由 Agent 自行判断本轮是否产生值得记录的知识;无价值时回复"无需记录"。子代理会话与未完成(中断/出错)的轮次不会触发。
-4. **自动更新**:保存同主题笔记即更新(自动沿用已有分类,不产生重复);每次保存/更新都会"再次确认"该记忆(usage_count +1)。
-5. **重复清理与相似合并**(配置 `autoDedupe`,默认开):每次保存后自动扫描全库,命中以下任一规则即合并为一篇(保留使用次数最多、其次最早的原笔记;被合并笔记的关键词、使用场景、正文并集后删除):
+3. **会话开始自动召回**(配置 `autoRecall`,默认开):根会话(有工作区)收到**第一条**真实用户消息时,插件立即向 Agent 发送一条「项目记忆召回 · memory search」提示,由 Agent 先调用 `project_memory_search` 加载相关记忆再开始工作(每次会话仅一次;子代理不触发)。
+4. **会话完成自动回顾**(配置 `autoReview`,默认开):每轮用户消息被完整回答后,插件向 Agent 发送一条「项目记忆回顾 · memory save/update」消息,由 Agent 自行判断本轮是否产生值得记录的知识;有价值则调用 `project_memory_save` 保存或更新,无价值时回复"无需记录"。子代理会话与未完成(中断/出错)的轮次不会触发。
+5. **自动更新**:保存同主题笔记即更新(自动沿用已有分类,不产生重复);每次保存/更新都会"再次确认"该记忆(usage_count +1)。
+6. **重复清理与相似合并**(配置 `autoDedupe`,默认开):每次保存后自动扫描全库,命中以下任一规则即合并为一篇(保留使用次数最多、其次最早的原笔记;被合并笔记的关键词、使用场景、正文并集后删除):
    - 标题相似度 ≥ 0.8;
    - 内容相似度 ≥ `mergeContentThreshold`(默认 0.55);
    - 内容包含度 ≥ 0.9(一篇正文几乎是另一篇的副本)。
-6. **成熟度**(配置 `trackUsage`,默认开):每条记忆带 `usage_count`(保存/更新确认 +1,检索命中 +1),映射为成熟度等级 `new(0-1)` → `developing(2-4)` → `mature(5-9)` → `authoritative(10+)`。检索/列表结果标注成熟度与使用次数,常驻指令提示 Agent:成熟度越高越值得采信,但任何记忆都可能过时,采信前仍应结合当前代码核对。
+7. **成熟度**(配置 `trackUsage`,默认开):每条记忆带 `usage_count`(保存/更新确认 +1,检索命中 +1),映射为成熟度等级 `new(0-1)` → `developing(2-4)` → `mature(5-9)` → `authoritative(10+)`。检索/列表结果标注成熟度与使用次数,常驻指令提示 Agent:成熟度越高越值得采信,但任何记忆都可能过时,采信前仍应结合当前代码核对。
 
 ## 记忆阶段折叠卡(浏览器半)
 
@@ -136,11 +137,12 @@ New-Item -ItemType Junction -Path "D:\GitHub\deep-dreaming\patches\dsh-project-m
 ```yaml
 - id: project-memory
   config:
-    autoReview: false            # 关闭会话完成自动回顾(仍可用工具手动记录/检索)
-    memoryDirName: '.dsh-memory' # 记忆目录名
-    autoDedupe: true             # 保存后自动清理重复/合并相似记忆
-    mergeContentThreshold: 0.55  # 内容相似度合并阈值 (0.1..0.95)
-    trackUsage: true             # 检索命中/保存确认计入使用次数(成熟度)
+    autoRecall: false             # 关闭会话开始自动召回(仍可手动检索)
+    autoReview: false             # 关闭会话完成自动回顾(仍可用工具手动记录/检索)
+    memoryDirName: '.dsh-memory'  # 记忆目录名
+    autoDedupe: true              # 保存后自动清理重复/合并相似记忆
+    mergeContentThreshold: 0.55   # 内容相似度合并阈值 (0.1..0.95)
+    trackUsage: true              # 检索命中/保存确认计入使用次数(成熟度)
 ```
 
 ## 测试
@@ -153,4 +155,11 @@ node tests/store.test.mjs
 # (先运行 scripts/deploy.ps1 自动建立链接,或手工建 junction:
 #  node_modules -> ~/.dsh/profiles/node_modules)
 node tests/plugin.smoke.mjs
+
+# 浏览器半契约:记忆折叠卡注册与折叠渲染(渲染段需 jsdom,缺失时自动跳过)
+node tests/client-contract.mjs
 ```
+
+冒烟覆盖:加载/Config 校验、三个工具端到端、exec.signal 中止、front matter
+容错、category 逃逸拒绝、会话开始自动召回(首次用户消息触发、仅一次、
+子代理排除)、会话完成自动回顾(completed 轮次触发、自身消息不重复武装)。

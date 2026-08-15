@@ -190,6 +190,33 @@ try {
 		ctx.emit("agent/status", { agent: sub, status: "idle" });
 		if (sub.followed !== void 0) throw new Error("subagent got a review followup");
 
+		// ── session-start memory recall (memory search phase) ─────────────
+		// A fresh session's FIRST real user message queues the recall followup
+		// immediately (no idle wait), once per session.
+		const recallAgent = {
+			id: "session-recall",
+			session: { id: "session-recall", header: { cwd, origin: void 0 } },
+			followed: void 0,
+			followup(message) { this.followed = message; }
+		};
+		agentStore.set("session-recall", recallAgent);
+		ctx.emit("session/event", recallAgent.session, { type: "user/message", data: { source: { kind: "user" } } });
+		if (!recallAgent.followed) throw new Error("recall followup was not sent on the first user message");
+		if (recallAgent.followed.source?.kind !== "memory" || recallAgent.followed.source?.recall !== true) {
+			throw new Error(`recall message source wrong: ${JSON.stringify(recallAgent.followed?.source)}`);
+		}
+		if (!recallAgent.followed.content[0].text.includes("项目记忆召回")) throw new Error("recall message text wrong");
+		// the recall's own user/message event must not re-arm the recall
+		ctx.emit("session/event", recallAgent.session, { type: "user/message", data: recallAgent.followed });
+		recallAgent.followed = void 0;
+		ctx.emit("session/event", recallAgent.session, { type: "user/message", data: { source: { kind: "user" } } });
+		if (recallAgent.followed !== void 0) throw new Error("recall re-armed by a second user message");
+		// subagents must never receive the recall either
+		const recallSub = { id: "session-recall-sub", session: { id: "session-recall-sub", header: { cwd, origin: "subagent" } }, followed: void 0, followup(m) { this.followed = m; } };
+		agentStore.set("session-recall-sub", recallSub);
+		ctx.emit("session/event", recallSub.session, { type: "user/message", data: { source: { kind: "user" } } });
+		if (recallSub.followed !== void 0) throw new Error("subagent got a recall followup");
+
 		console.log("smoke test OK");
 	} finally {
 		await rm(dir, { recursive: true, force: true });

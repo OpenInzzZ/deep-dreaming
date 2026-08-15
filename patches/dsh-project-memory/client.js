@@ -55,7 +55,7 @@ const CSS = [
 
 /** Display titles per wire tool name (the "memory phase" label). */
 const TITLES = {
-  project_memory_save: '记忆 · 保存',
+  project_memory_save: '记忆 · 保存/更新',
   project_memory_search: '记忆 · 检索',
   project_memory_list: '记忆 · 浏览',
 };
