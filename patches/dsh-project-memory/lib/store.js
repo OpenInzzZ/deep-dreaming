@@ -183,8 +183,27 @@ export async function collectNotes(cwd, dirName) {
 			} else if (entry.isFile() && entry.name.endsWith(".md")) {
 				const parsed = await readNoteFile(full);
 				if (parsed === null) continue;
-				const noteCategory = parsed.category ?? (category === "" ? DEFAULT_CATEGORY : category);
-				const title = parsed.title ?? entry.name.replace(/\.md$/, "");
+				// Safe defaults for notes missing (parts of) their front matter,
+				// so search/list outputs always satisfy the tool output schemas:
+				// title falls back to the file name, category to the folder (or
+				// `general`), updated_at to the file mtime.
+				const noteCategory = typeof parsed.category === "string" && parsed.category.trim().length > 0
+					? parsed.category
+					: (category === "" ? DEFAULT_CATEGORY : category);
+				const title = typeof parsed.title === "string" && parsed.title.trim().length > 0
+					? parsed.title
+					: entry.name.replace(/\.md$/, "");
+				let updatedAt = typeof parsed.updatedAt === "string" && parsed.updatedAt.length > 0
+					? parsed.updatedAt
+					: "";
+				if (updatedAt === "") {
+					try {
+						updatedAt = new Date((await stat(full)).mtimeMs).toISOString();
+					} catch {
+						/* stat failed (file vanished between readdir and stat);
+						 * keep the empty-string default so the field stays a string */
+					}
+				}
 				notes.push({
 					path: full,
 					relPath: join(category, entry.name),
@@ -193,7 +212,7 @@ export async function collectNotes(cwd, dirName) {
 					keywords: parsed.keywords,
 					usageScenario: parsed.usageScenario,
 					usageCount: parsed.usageCount,
-					updatedAt: parsed.updatedAt,
+					updatedAt,
 					content: parsed.content
 				});
 			}
@@ -246,6 +265,47 @@ function snippetOf(content) {
 	return flat.length > 240 ? `${flat.slice(0, 239)}…` : flat;
 }
 
+/** Render one note record in the exact shape the tool output schemas require,
+ * filling any missing field with a safe default so notes without (complete)
+ * front matter never break output.schema validation.
+ * @param note - a collected note record.
+ * @param extra - search/list-specific fields (score/snippet/path).
+ */
+function normalizeItem(note, extra) {
+	const usageCount = Number.isFinite(note.usageCount) ? Math.max(0, Math.trunc(note.usageCount)) : 0;
+	return {
+		title: typeof note.title === "string" && note.title.trim().length > 0 ? note.title : "(untitled)",
+		category: typeof note.category === "string" && note.category.trim().length > 0 ? note.category : DEFAULT_CATEGORY,
+		keywords: Array.isArray(note.keywords) ? note.keywords : [],
+		usage_scenario: Array.isArray(note.usageScenario) ? note.usageScenario : [],
+		usage_count: usageCount,
+		maturity: maturityOf(usageCount),
+		updated_at: typeof note.updatedAt === "string" && note.updatedAt.length > 0 ? note.updatedAt : "",
+		...extra
+	};
+}
+
+/**
+ * Validate and normalize one category segment before it is used in a path or
+ * a filter. Categories are single folder names under the memory root; a value
+ * containing a path separator (`/` or `\`) or a parent-segment marker (`..`)
+ * could escape the memory directory, so such values are rejected loudly.
+ * Null/empty values mean "no category" (default `general` / unfiltered).
+ * @returns the trimmed category, or undefined for null/empty input.
+ * @throws when the value contains "/", "\\" or "..".
+ */
+export function normalizeCategory(category) {
+	if (category === void 0 || category === null) return void 0;
+	const value = String(category).trim();
+	if (value.length === 0) return void 0;
+	if (value.includes("/") || value.includes("\\") || value.includes("..")) {
+		throw new Error(
+			`project memory: invalid category ${JSON.stringify(value)} — categories are single folder names and must not contain "/", "\\" or ".."`
+		);
+	}
+	return value;
+}
+
 /** Validate and normalize one save request. */
 export function normalizeSaveInput(input) {
 	const title = String(input.title ?? "").trim();
@@ -260,7 +320,7 @@ export function normalizeSaveInput(input) {
 	const usageScenario = Array.isArray(input.usage_scenario)
 		? input.usage_scenario.map((item) => String(item).trim()).filter((item) => item.length > 0).slice(0, MAX_SCENARIOS)
 		: [];
-	const category = input.category === void 0 || String(input.category).trim() === "" ? DEFAULT_CATEGORY : String(input.category).trim();
+	const category = normalizeCategory(input.category) ?? DEFAULT_CATEGORY;
 	return { title, category, content, keywords, usageScenario };
 }
 
@@ -483,9 +543,8 @@ export async function searchNotes(cwd, dirName, { query, category, limit } = {})
 	// made solely of single characters falls back to any-character matching.
 	const primaryTokens = tokens.filter((token) => token.length >= 2);
 	const max = Math.max(1, Math.min(limit ?? 10, 50));
-	const filtered = category === void 0 || String(category).trim() === ""
-		? notes
-		: notes.filter((note) => note.category === String(category).trim());
+	const cat = normalizeCategory(category);
+	const filtered = cat === void 0 ? notes : notes.filter((note) => note.category === cat);
 	const scored = filtered
 		.map((note) => ({
 			...note,
@@ -497,14 +556,7 @@ export async function searchNotes(cwd, dirName, { query, category, limit } = {})
 		if (tokens.length > 0 && right.score !== left.score) return right.score - left.score;
 		return String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? ""));
 	});
-	const items = scored.slice(0, max).map((note) => ({
-		title: note.title,
-		category: note.category,
-		keywords: note.keywords,
-		usage_scenario: note.usageScenario,
-		usage_count: note.usageCount,
-		maturity: maturityOf(note.usageCount),
-		updated_at: note.updatedAt,
+	const items = scored.slice(0, max).map((note) => normalizeItem(note, {
 		score: note.score,
 		snippet: snippetOf(note.content),
 		path: note.relPath
@@ -515,22 +567,12 @@ export async function searchNotes(cwd, dirName, { query, category, limit } = {})
 /** List every note (no content), newest first, optionally filtered by category. */
 export async function listNotes(cwd, dirName, { category } = {}) {
 	const notes = await collectNotes(cwd, dirName);
-	const filtered = category === void 0 || String(category).trim() === ""
-		? notes
-		: notes.filter((note) => note.category === String(category).trim());
+	const cat = normalizeCategory(category);
+	const filtered = cat === void 0 ? notes : notes.filter((note) => note.category === cat);
 	filtered.sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
 	return {
 		total: filtered.length,
-		items: filtered.map((note) => ({
-			title: note.title,
-			category: note.category,
-			keywords: note.keywords,
-			usage_scenario: note.usageScenario,
-			usage_count: note.usageCount,
-			maturity: maturityOf(note.usageCount),
-			updated_at: note.updatedAt,
-			path: note.relPath
-		}))
+		items: filtered.map((note) => normalizeItem(note, { path: note.relPath }))
 	};
 }
 

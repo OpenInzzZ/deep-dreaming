@@ -5,32 +5,47 @@
  * context, and asserts the `/app` RPC channel registration plus endpoint
  * validation (never invokes `restart` — that respawns the process). Covers
  * the runtime-status snapshot (serviceInfo / listeningPorts / dshVersion),
- * the idle auto-stop decision + monitor mechanics, and the settings-namespace
- * wiring (entry base → registered namespace → watch rebuild).
+ * the idle auto-stop decision + monitor mechanics, the settings-namespace
+ * wiring (entry base → registered namespace → watch rebuild), and the
+ * `reloadPlugins` hot-reload endpoint (touches a TEMP patch file, never the
+ * real profile layer). Also guards the P0 regression: `apply` must NOT
+ * return a thenable (Cordis treats a returned Fiber as an invalid Effect).
  *
  * Client half: loads the exact deployed `lib/client.js` the browser will
  * execute, feeds it a module table stubbed with the real platform words
- * (react, react/jsx-runtime, ui-primitives — resolved from the harness repo's
- * node_modules), asserts the registration contracts (settings.section +
- * settings.plugin.item), then renders the section in jsdom and exercises the
- * status block + confirm -> restart flow end to end, and the configuration
- * card's staged-edit -> save / reset flows.
+ * (react, react/jsx-runtime, ui-primitives), asserts the registration
+ * contracts (settings.section + settings.plugin.item + dictionaries), then —
+ * when jsdom is available — renders the section and exercises the status
+ * block, the reload-plugins flow, the confirm -> restart flow, and the
+ * configuration card's staged-edit -> save / reset flows through the `/app`
+ * RPC channel. Without jsdom the DOM sections are skipped with a notice.
  */
 import { createRequire } from 'node:module'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 
-const repoRequire = createRequire('D:/GitHub/deepseek-harness/package.json')
-// The browser module table is the DEPLOYED profile's packages — anchor there.
-const uiRequire = createRequire('C:/Users/zhoukaiying/.dsh/profiles/web/package.json')
-const { JSDOM } = repoRequire('jsdom')
+const here = dirname(fileURLToPath(import.meta.url))
+const userProfile = process.env.USERPROFILE ?? process.env.HOME ?? ''
+const profileAnchor = join(userProfile, '.dsh', 'profiles', 'web', 'package.json')
+const uiRequire = createRequire(profileAnchor)
 const React = uiRequire('react')
 
-const here = dirname(fileURLToPath(import.meta.url))
+// Optional DOM deps (jsdom) may be absent without a harness checkout; the
+// client DOM sections are skipped then, host + contract checks still run.
+let JSDOM = null
+try {
+  JSDOM = uiRequire('jsdom')
+} catch {
+  try { JSDOM = createRequire('D:/GitHub/deepseek-harness/package.json')('jsdom') } catch { /* skip */ }
+}
+const DOM_AVAILABLE = JSDOM !== null
+
 const hostPath = join(here, 'lib', 'index.js')
 const clientPath = join(here, 'lib', 'client.js')
 const PLUGIN_ID = '@local/dsh-client-ui-settings-other'
+const CARD_ID = '@local/dsh-client-ui-settings-other'
 
 // --- host half: registration + endpoint validation ---------------------------
 const host = await import(pathToFileURL(hostPath).href)
@@ -55,7 +70,9 @@ const host = await import(pathToFileURL(hostPath).href)
   }
   const running = host.runningSessionIds(agents)
   if (running.join(',') !== 'sess-a') throw new Error(`runningSessionIds: ${running}`)
-  console.log('host helpers OK: resolveRestartScript + buildRestartSpawn + runningSessionIds')
+  const patchFile = host.resolvePatchFile({})
+  if (!patchFile.toLowerCase().endsWith('.dsh\\profiles\\web\\cordis.patch.yml')) throw new Error(`default patch file: ${patchFile}`)
+  console.log('host helpers OK: resolveRestartScript + buildRestartSpawn + runningSessionIds + resolvePatchFile')
 }
 
 // Runtime snapshot helpers
@@ -68,13 +85,18 @@ const host = await import(pathToFileURL(hostPath).href)
   if (typeof info.execPath !== 'string' || info.execPath.length === 0) throw new Error(`serviceInfo.execPath: ${info.execPath}`)
   if (!Array.isArray(info.ports) || info.ports.some((p) => !Number.isInteger(p))) throw new Error(`serviceInfo.ports: ${JSON.stringify(info.ports)}`)
   if (!/^\d{4}-\d{2}-\d{2}T/.test(info.startedAt)) throw new Error(`serviceInfo.startedAt: ${info.startedAt}`)
-  // dsh version resolves from the real CLI entry in the npx cache
-  const binPath = 'C:/Users/zhoukaiying/AppData/Local/npm-cache/_npx/1e7f6d9597241db0/node_modules/@deepseek-ai/dsh/lib/bin.js'
-  const pkgPath = 'C:/Users/zhoukaiying/AppData/Local/npm-cache/_npx/1e7f6d9597241db0/node_modules/@deepseek-ai/dsh/package.json'
-  const expectedVersion = JSON.parse(readFileSync(pkgPath, 'utf8')).version
-  const version = host.dshVersion(binPath)
-  if (version !== expectedVersion) throw new Error(`dshVersion: ${version} != ${expectedVersion}`)
-  console.log(`host snapshot OK: pid=${info.pid} ports=[${info.ports}] dsh=${version} node=${info.node}`)
+  // dsh version resolves from the real CLI entry in the npx cache (when present)
+  const npxRoot = join(userProfile, 'AppData', 'Local', 'npm-cache', '_npx', '1e7f6d9597241db0', 'node_modules', '@deepseek-ai', 'dsh')
+  const binPath = join(npxRoot, 'lib', 'bin.js')
+  const pkgPath = join(npxRoot, 'package.json')
+  if (readFileSync(pkgPath, 'utf8').length > 0) {
+    const expectedVersion = JSON.parse(readFileSync(pkgPath, 'utf8')).version
+    const version = host.dshVersion(binPath)
+    if (version !== expectedVersion) throw new Error(`dshVersion: ${version} != ${expectedVersion}`)
+    console.log(`host snapshot OK: pid=${info.pid} ports=[${info.ports}] dsh=${version} node=${info.node}`)
+  } else {
+    console.log(`host snapshot OK: pid=${info.pid} ports=[${info.ports}] (dsh version check skipped: ${pkgPath} missing)`)
+  }
 }
 
 // Idle decision + monitor mechanics (fake clock)
@@ -178,6 +200,10 @@ const hostCtx = {
 // config.script points at a NON-EXISTENT path so the restart endpoint fails
 // cleanly (script-missing branch) instead of spawning a real restart.
 const MISSING_SCRIPT = 'C:\\__no_such_dir__\\restart-dsh.ps1'
+// reloadPlugins touches a TEMP patch file, never the real profile layer.
+const tmpPatchDir = mkdtempSync(join(tmpdir(), 'ui-settings-other-verify-'))
+const tmpPatchFile = join(tmpPatchDir, 'cordis.patch.yml')
+writeFileSync(tmpPatchFile, '- insert: []\n')
 
 // 1) apply without a settings service -> entry fallback, status still rich
 {
@@ -186,7 +212,12 @@ const MISSING_SCRIPT = 'C:\\__no_such_dir__\\restart-dsh.ps1'
   settingsRegistered = null
   settingsAvailable = false
   handled = null
-  const dispose = host.apply(hostCtx, { script: MISSING_SCRIPT })
+  const ret = host.apply(hostCtx, { script: MISSING_SCRIPT, patchFile: tmpPatchFile })
+  // P0 regression guard: returning the ctx.inject() thenable Fiber from apply
+  // makes Cordis throw TypeError('Invalid effect') and fail the plugin.
+  if (ret !== undefined && (typeof ret === 'object' || typeof ret === 'function') && typeof ret.then === 'function') {
+    throw new Error('P0 regression: apply returned a thenable (Invalid effect)')
+  }
   if (handled === null || handled.channel !== '/app') throw new Error(`host channel mismatch: ${JSON.stringify(handled)}`)
   if (handled.options.authority !== 'loopback') throw new Error(`host authority mismatch: ${handled.options.authority}`)
   if (settingsRegistered !== null) throw new Error('no settings service must not register a namespace')
@@ -213,7 +244,19 @@ const MISSING_SCRIPT = 'C:\\__no_such_dir__\\restart-dsh.ps1'
   if (forced.ok !== false || forced.error.code !== 'internal') throw new Error(`forced must reach script check: ${JSON.stringify(forced)}`)
   if (cancelled.length !== 1 || cancelled[0].id !== 'sess-a') throw new Error(`force must cancel running sessions: ${JSON.stringify(cancelled)}`)
   if (cancelled[0].opts?.keepInbox !== true) throw new Error('force cancel must keepInbox')
-  console.log('host OK: /app channel + status(running/service/idle) + restart session protection')
+
+  // reloadPlugins: touches the temp patch file, marker line is idempotent
+  const reloaded = await handled.handler('reloadPlugins', { args: {} })
+  if (!reloaded.ok) throw new Error(`reloadPlugins: ${JSON.stringify(reloaded)}`)
+  const afterFirst = readFileSync(tmpPatchFile, 'utf8')
+  if (!/^# dsh-plugin-reload: .*$/m.test(afterFirst)) throw new Error('reloadPlugins must write the marker line')
+  await handled.handler('reloadPlugins', { args: {} })
+  const afterSecond = readFileSync(tmpPatchFile, 'utf8')
+  const markers = afterSecond.match(/^# dsh-plugin-reload: .*$/gm) ?? []
+  if (markers.length !== 1) {
+    throw new Error(`reloadPlugins marker must stay a single line: ${markers.join(' | ')}`)
+  }
+  console.log('host OK: /app channel + status(running/service/idle) + restart session protection + reloadPlugins (temp patch file)')
 }
 
 // 2) apply WITH a settings service -> namespace registered, entry as base, watch wired
@@ -222,7 +265,8 @@ const MISSING_SCRIPT = 'C:\\__no_such_dir__\\restart-dsh.ps1'
   settingsWatchCb = null
   settingsAvailable = true
   handled = null
-  const dispose = host.apply(hostCtx, { script: MISSING_SCRIPT, idleMinutes: 7 })
+  const ret = host.apply(hostCtx, { script: MISSING_SCRIPT, patchFile: tmpPatchFile, idleMinutes: 7 })
+  if (ret !== undefined && typeof ret.then === 'function') throw new Error('P0 regression: apply returned a thenable (with settings)')
   if (settingsRegistered === null || settingsRegistered.ns !== 'ui-settings-other') {
     throw new Error(`namespace not registered: ${JSON.stringify(settingsRegistered)}`)
   }
@@ -237,21 +281,33 @@ const MISSING_SCRIPT = 'C:\\__no_such_dir__\\restart-dsh.ps1'
   console.log('host OK: settings namespace ui-settings-other (base=entry) + watch rebuild')
 }
 
-// --- client half: jsdom environment (what the browser shell provides) -------
-const dom = new JSDOM('<!doctype html><html><head></head><body><div id="root"></div></body></html>', {
-  url: 'http://127.0.0.1:3080/',
-})
-globalThis.window = dom.window
-for (const key of Object.getOwnPropertyNames(dom.window)) {
-  if (!(key in globalThis)) globalThis[key] = dom.window[key]
-}
-
+// --- client half: bundle + contract checks (DOM shim when jsdom is absent) ---
+let dom = null
 let handoff = null
-dom.window.__ModuleLoader__ = { load: (h) => { handoff = h } }
-
 const bundleSource = readFileSync(clientPath, 'utf8')
-const evaluate = new Function('window', 'document', bundleSource)
-evaluate(dom.window, dom.window.document)
+if (DOM_AVAILABLE) {
+  dom = new JSDOM('<!doctype html><html><head></head><body><div id="root"></div></body></html>', {
+    url: 'http://127.0.0.1:3080/',
+  })
+  globalThis.window = dom.window
+  for (const key of Object.getOwnPropertyNames(dom.window)) {
+    if (!(key in globalThis)) globalThis[key] = dom.window[key]
+  }
+  dom.window.__ModuleLoader__ = { load: (h) => { handoff = h } }
+  const evaluate = new Function('window', 'document', bundleSource)
+  evaluate(dom.window, dom.window.document)
+} else {
+  // Minimal DOM shim: the bundle's CSS IIFE guards on `document` and the
+  // module table only needs `__ModuleLoader__.load` to register the factory.
+  const shimDocument = {
+    querySelector: () => null,
+    createElement: () => ({ dataset: {}, setAttribute: () => {}, appendChild: () => {} }),
+    head: { appendChild: () => {} },
+  }
+  const shimWindow = { __ModuleLoader__: { load: (h) => { handoff = h } } }
+  const evaluate = new Function('window', 'document', bundleSource)
+  evaluate(shimWindow, shimDocument)
+}
 if (handoff === null) throw new Error('bundle never called __ModuleLoader__.load')
 if (handoff.id !== PLUGIN_ID) throw new Error(`handoff id mismatch: ${handoff.id}`)
 
@@ -276,6 +332,8 @@ let registrations = []
 let dicts = []
 let rpcLog = []
 let restartResult = { ok: true, value: { scheduled: true, delayMs: 2600 } }
+let reloadResult = { ok: true, value: { requested: true, patchFile: 'x' } }
+let cardValue = { idleEnabled: true, idleMinutes: 45 }
 let statusValue = {
   running: 0,
   sessions: [],
@@ -291,24 +349,6 @@ let statusValue = {
   },
   idle: { enabled: true, idleMinutes: 120, lastBusyAt: Date.now() - 60_000 },
 }
-let scopeListeners = []
-const scopeWrites = []
-const scopeClears = []
-let cardSnapshot = {
-  status: 'ready',
-  value: { idleEnabled: true, idleMinutes: 45 },
-  base: { idleEnabled: true, idleMinutes: 120 },
-  user: { idleMinutes: 45 },
-  revision: 1,
-  writable: true,
-  mode: 'host',
-}
-const cardScope = {
-  getSnapshot: () => cardSnapshot,
-  subscribe: (listener) => { scopeListeners.push(listener); return () => {} },
-  set: async (field, value) => { scopeWrites.push({ field, value }) },
-  unset: async (field) => { scopeClears.push(field) },
-}
 const clientCtx = {
   effect: (fn) => fn(),
   locale: {
@@ -321,14 +361,18 @@ const clientCtx = {
         rpcLog.push({ channel, endpoint, payload })
         if (endpoint === 'status') return { ok: true, value: statusValue }
         if (endpoint === 'restart') return restartResult
+        if (endpoint === 'reloadPlugins') return reloadResult
+        if (endpoint === 'getSettings') return { ok: true, value: cardValue }
+        if (endpoint === 'setSettings') {
+          cardValue = { ...cardValue, ...payload.args.fields }
+          return { ok: true, value: cardValue }
+        }
+        if (endpoint === 'resetSettings') {
+          cardValue = { idleEnabled: true, idleMinutes: 120 }
+          return { ok: true, value: cardValue }
+        }
         return { ok: false, error: { code: 'bad-request', message: 'unexpected', details: {} } }
       },
-    },
-  },
-  settingsScope: {
-    bind: (spec) => {
-      if (spec.namespace !== 'ui-settings-other') throw new Error(`unexpected namespace: ${spec.namespace}`)
-      return cardScope
     },
   },
   slots: {
@@ -344,8 +388,9 @@ if (sectionReg === undefined) throw new Error('settings.section never registered
 if (sectionReg.id !== 'other' || sectionReg.order !== 30) {
   throw new Error(`section options mismatch: ${JSON.stringify(sectionReg)}`)
 }
+if (typeof sectionReg.inject().reloadPlugins !== 'function') throw new Error('section inject must expose reloadPlugins')
 if (cardReg === undefined) throw new Error('settings.plugin.item never registered')
-if (cardReg.id !== 'ui-settings-other' || cardReg.order !== 30 || cardReg.locale !== 'settings.other.card') {
+if (cardReg.id !== CARD_ID || cardReg.order !== 30 || cardReg.locale !== 'settings.other.card') {
   throw new Error(`card options mismatch: ${JSON.stringify(cardReg)}`)
 }
 const sectionDict = dicts.find((d) => d.ns === 'settings.other')
@@ -361,12 +406,25 @@ const enCardKeys = Object.keys(cardDict.dict.en)
 if (JSON.stringify(zhCardKeys) !== JSON.stringify(enCardKeys)) {
   throw new Error(`zh/en key mismatch (card):\nzh: ${zhCardKeys}\nen: ${enCardKeys}`)
 }
-console.log(`apply contract OK: section id=other order=30 | card id=ui-settings-other order=30 | dict keys = ${zhKeys.length} + ${zhCardKeys.length}`)
+console.log(`apply contract OK: section id=other order=30 | card id=${CARD_ID} order=30 | dict keys = ${zhKeys.length} + ${zhCardKeys.length}`)
+
+if (!DOM_AVAILABLE) {
+  console.log('\nclient DOM sections SKIPPED (jsdom not installed)')
+  console.log('ALL NON-DOM HARNESS CHECKS PASSED (install jsdom to enable the DOM sections)')
+  process.exit(0)
+}
 
 // --- render + interact (react-dom in jsdom) ------------------------------------
 const { act } = React
 const { createRoot } = uiRequire('react-dom/client')
-const { fireEvent } = repoRequire('@testing-library/react')
+
+const fireClick = (el) => { el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) }
+const fireChange = (el, value) => {
+  const proto = el.tagName === 'SELECT' ? dom.window.HTMLSelectElement.prototype : dom.window.HTMLInputElement.prototype
+  const setter = Object.getOwnPropertyDescriptor(proto, 'value').set
+  setter.call(el, value)
+  el.dispatchEvent(new dom.window.Event('change', { bubbles: true }))
+}
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 const en = sectionDict.dict.en
@@ -381,6 +439,7 @@ await act(async () => {
   root.render(React.createElement(sectionReg.component, {
     restart: clientInjected.restart,
     status: clientInjected.status,
+    reloadPlugins: clientInjected.reloadPlugins,
     t: tWithParams,
   }))
 })
@@ -399,20 +458,31 @@ if (!infoText.includes('v22.0.0')) throw new Error(`node missing: ${infoText}`)
 if (!infoText.includes('0.1.0-rc.6')) throw new Error(`dsh version missing: ${infoText}`)
 const refreshButton = buttons().find((b) => b.textContent === en.refresh)
 if (refreshButton === undefined) throw new Error('refresh button missing')
+const reloadButton = buttons().find((b) => b.textContent === en.reloadPlugins)
+if (reloadButton === undefined) throw new Error('reload-plugins button missing')
 const restartButton = buttons().find((b) => b.textContent === en.restart)
 if (restartButton === undefined) throw new Error('restart button missing')
-if (buttons().length !== 2) throw new Error(`expected 2 buttons (restart+refresh), got ${buttons().length}`)
+if (buttons().length !== 3) throw new Error(`expected 3 buttons (reload+restart+refresh), got ${buttons().length}`)
+if (doc.querySelector('.so-danger-note') === null) throw new Error('danger note missing')
 rpcLog = [] // the mount already polled status once; reset before interaction
-console.log('status block OK: 8 rows render pid/ports/versions, refresh + restart present')
+console.log('status block OK: 8 rows render pid/ports/versions, reload + refresh + restart present')
 
 // refresh button re-polls /app/status
-await act(async () => { fireEvent.click(refreshButton) })
+await act(async () => { fireClick(refreshButton) })
 if (!rpcLog.some((c) => c.endpoint === 'status')) throw new Error('refresh must re-poll /app/status')
 rpcLog = []
 console.log('status block OK: refresh re-polls /app/status')
 
+// reload-plugins flow: calls /app/reloadPlugins and shows the requested line
+await act(async () => { fireClick(reloadButton) })
+const reloadCall = rpcLog.find((c) => c.endpoint === 'reloadPlugins')
+if (reloadCall === undefined || reloadCall.channel !== '/app') throw new Error(`reload rpc target: ${JSON.stringify(reloadCall)}`)
+if (flowLine() === null || flowLine().textContent !== en.reloadRequested) throw new Error('reload requested status missing')
+console.log('reload flow OK: /app reloadPlugins + requested status')
+rpcLog = []
+
 // click -> confirm state (no call yet)
-await act(async () => { fireEvent.click(restartButton) })
+await act(async () => { fireClick(restartButton) })
 if (rpcLog.length !== 0) throw new Error('confirm state must not call the host yet')
 const confirmButton = buttons().find((b) => b.textContent === en.confirm)
 if (confirmButton === undefined) throw new Error('confirm button missing')
@@ -420,13 +490,13 @@ if (flowLine() === null || flowLine().textContent !== en.confirmPrompt) throw ne
 console.log('confirm state OK')
 
 // cancel returns to idle
-await act(async () => { fireEvent.click(buttons().find((b) => b.textContent === en.cancel)) })
-if (buttons().length !== 2) throw new Error('cancel should restore restart+refresh buttons')
+await act(async () => { fireClick(buttons().find((b) => b.textContent === en.cancel)) })
+if (buttons().length !== 3) throw new Error('cancel should restore reload+restart+refresh buttons')
 console.log('cancel OK')
 
 // confirm -> calling -> scheduled; host endpoint + payload shape
-await act(async () => { fireEvent.click(buttons().find((b) => b.textContent === en.restart)) })
-await act(async () => { fireEvent.click(buttons().find((b) => b.textContent === en.confirm)) })
+await act(async () => { fireClick(buttons().find((b) => b.textContent === en.restart)) })
+await act(async () => { fireClick(buttons().find((b) => b.textContent === en.confirm)) })
 const restartCall = rpcLog.find((c) => c.endpoint === 'restart')
 if (restartCall === undefined || restartCall.channel !== '/app') throw new Error(`rpc target: ${JSON.stringify(restartCall)}`)
 if (JSON.stringify(restartCall.payload.args) !== '{}') throw new Error(`non-force args: ${JSON.stringify(restartCall.payload)}`)
@@ -443,11 +513,12 @@ await act(async () => {
   busyRoot.render(React.createElement(sectionReg.component, {
     restart: clientInjected.restart,
     status: clientInjected.status,
+    reloadPlugins: clientInjected.reloadPlugins,
     t: tWithParams,
   }))
 })
-await act(async () => { fireEvent.click([...busyHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.restart)) })
-await act(async () => { fireEvent.click([...busyHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.confirm)) })
+await act(async () => { fireClick([...busyHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.restart)) })
+await act(async () => { fireClick([...busyHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.confirm)) })
 const busyLine = busyHost.querySelector('.so-flow-status[data-tone="error"]')
 if (busyLine === null || busyLine.textContent !== en.busy.replace('{n}', '2')) {
   throw new Error(`busy line: ${busyLine?.textContent}`)
@@ -457,7 +528,7 @@ if (forceButton === undefined) throw new Error('force button missing')
 const waitButton = [...busyHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.busyActionWait)
 if (waitButton === undefined) throw new Error('wait button missing')
 rpcLog = []
-await act(async () => { fireEvent.click(forceButton) })
+await act(async () => { fireClick(forceButton) })
 const forceCall = rpcLog.find((c) => c.endpoint === 'restart')
 if (forceCall === undefined || forceCall.payload.args.force !== true) {
   throw new Error(`force call args: ${JSON.stringify(forceCall?.payload)}`)
@@ -474,12 +545,13 @@ await act(async () => {
   waitRoot.render(React.createElement(sectionReg.component, {
     restart: clientInjected.restart,
     status: clientInjected.status,
+    reloadPlugins: clientInjected.reloadPlugins,
     t: tWithParams,
   }))
 })
-await act(async () => { fireEvent.click([...waitHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.restart)) })
-await act(async () => { fireEvent.click([...waitHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.confirm)) })
-await act(async () => { fireEvent.click([...waitHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.busyActionWait)) })
+await act(async () => { fireClick([...waitHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.restart)) })
+await act(async () => { fireClick([...waitHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.confirm)) })
+await act(async () => { fireClick([...waitHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.busyActionWait)) })
 // first status poll fires after the 2s interval
 await new Promise((resolve) => setTimeout(resolve, 2200))
 await act(async () => {})
@@ -503,16 +575,19 @@ await act(async () => {
   root2.render(React.createElement(sectionReg.component, {
     restart: async () => { throw new Error('private detail') },
     status: clientInjected.status,
+    reloadPlugins: clientInjected.reloadPlugins,
     t: tWithParams,
   }))
 })
-await act(async () => { fireEvent.click([...errorHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.restart)) })
-await act(async () => { fireEvent.click([...errorHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.confirm)) })
+await act(async () => { fireClick([...errorHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.restart)) })
+await act(async () => { fireClick([...errorHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.confirm)) })
 if (errorHost.querySelector('.so-flow-status[data-tone="error"]') === null) throw new Error('error status missing')
 if (errorHost.textContent.includes('private detail')) throw new Error('error state leaked transport detail')
 console.log('error state OK')
 
 // --- configuration card (设置 → 插件 → 插件配置) --------------------------------
+// The deployed card talks to the host through the /app RPC channel
+// (getConfig/setConfig/resetConfig), NOT through a client settings scope.
 const enCard = cardDict.dict.en
 const tCardWithParams = (key, params) => {
   const value = enCard[key]
@@ -522,56 +597,50 @@ const cardHost = dom.window.document.createElement('div')
 const cardRoot = createRoot(cardHost)
 await act(async () => {
   cardRoot.render(React.createElement(cardReg.component, {
-    scope: cardReg.inject().scope,
     t: tCardWithParams,
+    ...cardReg.inject(),
   }))
 })
 
 const header = cardHost.querySelector('.soc-header')
 if (header === null) throw new Error('card header missing')
-await act(async () => { fireEvent.click(header) })
+await act(async () => { fireClick(header) })
 const inputs = [...cardHost.querySelectorAll('.soc-input')]
 if (inputs.length !== 1) throw new Error(`expected 1 number input, got ${inputs.length}`)
 const toggles = [...cardHost.querySelectorAll('.soc-toggle')]
 if (toggles.length !== 1) throw new Error(`expected 1 toggle, got ${toggles.length}`)
 const minutesInput = cardHost.querySelector('#soc-idleMinutes')
 if (minutesInput === null || minutesInput.value !== '45') throw new Error(`override value: ${minutesInput?.value}`)
-if (!cardHost.querySelector('.soc-overridden')) throw new Error('override badge missing')
 
-// staged edit -> save writes the field through the scope
-await act(async () => { fireEvent.change(minutesInput, { target: { value: '60' } }) })
+// staged edit -> save writes the field through /app/setSettings
+rpcLog = []
+await act(async () => { fireChange(minutesInput, '60') })
 if (!cardHost.querySelector('.soc-pending')) throw new Error('unsaved badge missing')
 const saveButton = cardHost.querySelector('.soc-save')
 if (saveButton === null || saveButton.disabled) throw new Error('save must be enabled with staged edits')
-await act(async () => { fireEvent.click(saveButton) })
-if (scopeWrites.length !== 1 || scopeWrites[0].field !== 'idleMinutes' || scopeWrites[0].value !== 60) {
-  throw new Error(`save write: ${JSON.stringify(scopeWrites)}`)
+await act(async () => { fireClick(saveButton) })
+const setCall = rpcLog.find((c) => c.endpoint === 'setSettings')
+if (setCall === undefined || setCall.channel !== '/app' || setCall.payload.args.fields.idleMinutes !== 60) {
+  throw new Error(`save rpc: ${JSON.stringify(rpcLog)}`)
 }
-console.log('card OK: fields render, staged edit saves through scope.set')
+if (cardValue.idleMinutes !== 60) throw new Error(`card must adopt the host response: ${JSON.stringify(cardValue)}`)
+console.log('card OK: fields render, staged edit saves through /app setSettings')
 
 // toggle staged edit -> save writes the boolean
-await act(async () => { fireEvent.click(cardHost.querySelector('#soc-idleEnabled')) })
-await act(async () => { fireEvent.click(cardHost.querySelector('.soc-save')) })
-if (scopeWrites.length !== 2 || scopeWrites[1].field !== 'idleEnabled' || scopeWrites[1].value !== false) {
-  throw new Error(`toggle write: ${JSON.stringify(scopeWrites)}`)
+await act(async () => { fireClick(cardHost.querySelector('#soc-idleEnabled')) })
+await act(async () => { fireClick(cardHost.querySelector('.soc-save')) })
+const toggleCall = rpcLog.filter((c) => c.endpoint === 'setSettings').pop()
+if (toggleCall === undefined || toggleCall.payload.args.fields.idleEnabled !== false) {
+  throw new Error(`toggle write: ${JSON.stringify(toggleCall?.payload)}`)
 }
-console.log('card OK: toggle saves through scope.set')
+console.log('card OK: toggle saves through /app setSettings')
 
-// reset clears the override (per-field reset button inside the same field row)
-const minutesField = minutesInput.closest('.soc-field')
-if (minutesField === null) throw new Error('field row missing')
-const resetButton = minutesField.querySelector('.soc-reset')
-if (resetButton === null || resetButton.disabled) throw new Error('override reset must be enabled')
-await act(async () => { fireEvent.click(resetButton) })
-if (scopeClears.length !== 1 || scopeClears[0] !== 'idleMinutes') throw new Error(`reset clear: ${JSON.stringify(scopeClears)}`)
-console.log('card OK: reset calls scope.unset')
-
-// read-only snapshot disables the controls
-cardSnapshot = { ...cardSnapshot, writable: false, revision: 2 }
-scopeListeners.forEach((l) => l())
-await act(async () => {})
-if (cardHost.querySelector('.soc-input').disabled !== true) throw new Error('read-only must disable inputs')
-console.log('card OK: read-only disables controls')
+// reset-all restores defaults through /app/resetSettings (second .soc-discard)
+await act(async () => { fireClick(cardHost.querySelectorAll('.soc-discard')[1]) })
+const resetCall = rpcLog.find((c) => c.endpoint === 'resetSettings')
+if (resetCall === undefined || resetCall.channel !== '/app') throw new Error(`reset rpc: ${JSON.stringify(rpcLog)}`)
+if (cardValue.idleMinutes !== 120) throw new Error(`reset must adopt the host response: ${JSON.stringify(cardValue)}`)
+console.log('card OK: reset-all calls /app resetSettings')
 
 console.log('\nALL HARNESS CHECKS PASSED')
 process.exit(0)

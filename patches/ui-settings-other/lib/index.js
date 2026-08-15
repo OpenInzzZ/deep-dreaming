@@ -42,6 +42,7 @@ import { spawn, execFileSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join, isAbsolute, dirname, resolve } from 'node:path'
 import { statSync, readFileSync } from 'node:fs'
+import { readFile, writeFile } from 'node:fs/promises'
 import z from '@deepseek-ai/schemastery'
 
 export const SETTINGS_NAMESPACE = 'ui-settings-other'
@@ -52,11 +53,19 @@ export const IDLE_CHECK_MS = 60_000
 /** Floor defaults; the composition entry and the settings document layer rise above. */
 export const DEFAULTS = { idleEnabled: true, idleMinutes: 120 }
 
-/** Settings schema for the namespace (defaults are the floor). */
+/**
+ * Settings schema for the namespace (defaults are the floor). Exported as
+ * `Config` so the Loader validates the entry config at load time and strips
+ * nothing (unknown keys would be dropped by the schema's default strip).
+ */
 export const ConfigSchema = z.object({
   idleEnabled: z.boolean().default(true),
-  idleMinutes: z.number().default(120),
+  idleMinutes: z.number().default(120).min(1),
+  script: z.string().default(''),
+  patchFile: z.string().default(''),
 })
+
+export const Config = ConfigSchema
 
 /** Resolve the restart-script path: config > default under the dsh home. */
 export function resolveRestartScript(config = {}) {
@@ -65,6 +74,15 @@ export function resolveRestartScript(config = {}) {
     return isAbsolute(configured) ? configured : join(homedir(), '.dsh', configured)
   }
   return join(homedir(), '.dsh', 'scripts', 'restart-dsh.ps1')
+}
+
+/** Resolve the user patch layer to touch for a hot plugin reload. */
+export function resolvePatchFile(config = {}) {
+  const configured = config.patchFile
+  if (typeof configured === 'string' && configured.length > 0) {
+    return isAbsolute(configured) ? configured : join(homedir(), '.dsh', configured)
+  }
+  return join(homedir(), '.dsh', 'profiles', 'web', 'cordis.patch.yml')
 }
 
 /** Build the spawn invocation for the restart script (pure, testable). */
@@ -197,13 +215,12 @@ function pickSettings(config) {
   return out
 }
 
-let restarting = false
-
 /**
  * Register the settings namespace and hand the write scope to `onScope`.
- * Same contract as dsh-settings' installSettingsSection, plus the scope:
- * the config RPC writes through it (persisted to settings.yaml), so edits
- * survive restarts and take effect live via the watcher.
+ * Mirrors dsh-settings' installSettingsSection (including its `isUnloading`
+ * guard: the disposer restores the entry source but must not rebuild
+ * resources while the plugin is going down — a rebuild would leak a fresh
+ * monitor/timer on a disposed context).
  */
 function registerConfigSection(ctx, ns, schema, entry, hooks, onScope) {
   ctx.inject(['settings'], (sctx) => {
@@ -228,11 +245,15 @@ function settingsError(code, message) {
 export function apply(ctx, config = {}) {
   const settingsEntry = pickSettings(config)
 
-  return ctx.inject(['connection', 'agents'], (ctx) => {
+  // State is per-instance: module-level mutable state would leak across HMR
+  // reloads (a stale `restarting` flag would permanently block restarts).
+  ctx.inject(['connection', 'agents'], (ctx) => {
     const logger = ctx.logger
     let source = () => ({ ...DEFAULTS, ...settingsEntry })
     let configScope = null
     let monitorApi = null
+    let restarting = false
+    let disposed = false
 
     const busyFailure = (sessions) => ({
       ok: false,
@@ -261,6 +282,7 @@ export function apply(ctx, config = {}) {
 
     /** (Re)build the idle monitor from the current source (settings > entry). */
     const rebuildMonitor = () => {
+      if (disposed) return
       if (monitorApi !== null) {
         monitorApi.stop()
         monitorApi = null
@@ -273,6 +295,17 @@ export function apply(ctx, config = {}) {
         onStop: stopService,
       })
     }
+
+    // The idle monitor owns a raw interval; dispose it with the plugin. This
+    // must run before registerConfigSection's disposer (reverse order), so a
+    // stale rebuild during unload is a no-op via `disposed`.
+    ctx.effect(() => () => {
+      disposed = true
+      if (monitorApi !== null) {
+        monitorApi.stop()
+        monitorApi = null
+      }
+    }, 'ui-settings-other: idle monitor')
 
     registerConfigSection(ctx, SETTINGS_NAMESPACE, ConfigSchema, settingsEntry, {
       setSource: (current) => { source = current },
@@ -318,6 +351,31 @@ export function apply(ctx, config = {}) {
         }
         if (idle.enabled && monitorApi !== null) idle.lastBusyAt = monitorApi.lastBusyAt()
         return { ok: true, value: { running: sessions.length, sessions, service: serviceInfo(), idle } }
+      }
+      if (endpoint === 'reloadPlugins') {
+        // Hot-reload the user patch layer: touching the profile's
+        // cordis.patch.yml triggers dsh's watchUserPatches (a Cordis HMR
+        // config watch), which transactionally re-applies the whole user
+        // layer — every user-level plugin (host + client) is unloaded and
+        // remounted without restarting the service, so running sessions and
+        // the durable inbox are untouched.
+        const patchFile = resolvePatchFile(config)
+        try {
+          const marker = `# dsh-plugin-reload: ${new Date().toISOString()}`
+          let content = await readFile(patchFile, 'utf8')
+          if (/^# dsh-plugin-reload: /m.test(content)) {
+            content = content.replace(/^# dsh-plugin-reload: .*$/m, marker)
+          } else {
+            content = content.replace(/\s*$/, '\n') + marker + '\n'
+          }
+          await writeFile(patchFile, content, 'utf8')
+          return { ok: true, value: { requested: true, patchFile, marker } }
+        } catch (error) {
+          return {
+            ok: false,
+            error: { code: 'internal', message: `failed to touch patch file: ${String(error)}`, details: {} },
+          }
+        }
       }
       if (endpoint !== 'restart') {
         return {
@@ -372,7 +430,22 @@ export function apply(ctx, config = {}) {
           windowsHide: true,
         })
         child.unref()
-        child.on('error', () => {}) // spawn failure is observed by the script's absence; nothing to surface here
+        // A successful restart kills this process before the child exits; any
+        // other outcome (spawn failure or a non-zero script exit) must clear
+        // the lock so later restarts are not stuck at "already scheduled".
+        child.on('error', (error) => {
+          logger.warn(`[ui-settings-other] restart spawn failed: ${String(error)}`)
+          restarting = false
+        })
+        child.on('exit', (code) => {
+          if (code !== 0) {
+            logger.warn(`[ui-settings-other] restart script exited with code ${code}; restart may have failed`)
+            restarting = false
+          }
+        })
+        // Watchdog: if the script neither restarts the service nor exits
+        // non-zero within 90s, release the lock anyway.
+        setTimeout(() => { restarting = false }, 90_000)
       } catch (error) {
         restarting = false
         return {

@@ -24,6 +24,7 @@
 // called by a subagent write to that subagent's own project root.
 
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
+import z from "@deepseek-ai/schemastery";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import {
 	MAX_CONTENT_CHARS,
@@ -41,6 +42,25 @@ const name = "project-memory";
 const inject = ["tools", "systemPrompt", "agents"];
 
 const DEFAULT_MEMORY_DIR_NAME = ".dsh-memory";
+
+/**
+ * Entry config schema. The Cordis loader validates the raw config against it
+ * (out-of-range values fail loudly at load time instead of being silently
+ * clamped) and fills the defaults below, so `apply` receives a complete,
+ * validated config and never re-derives defaults itself.
+ */
+export const Config = z.object({
+	/** Send a short memory-review followup after every completed user turn. */
+	autoReview: z.boolean().default(true),
+	/** Directory name of the memory store under each project root. */
+	memoryDirName: z.string().default(DEFAULT_MEMORY_DIR_NAME),
+	/** Run the duplicate/similar merge scan after every save. */
+	autoDedupe: z.boolean().default(true),
+	/** Content-similarity threshold (0.1..0.95) for the auto-merge scan. */
+	mergeContentThreshold: z.number().min(0.1).max(0.95).default(0.55),
+	/** Count search hits (and save/update confirmations) as note usage. */
+	trackUsage: z.boolean().default(true)
+});
 
 /** One short line of guidance shown in the system prompt of every session. */
 const GUIDANCE_SECTION = `\
@@ -64,6 +84,15 @@ function projectRoot(exec) {
 		throw new Error("project memory requires an owning agent session with a workspace (session header cwd)");
 	}
 	return cwd;
+}
+
+/** Fail a cancelled tool call loudly before any disk work, mirroring the
+ * official fs seam's `if (signal?.aborted) throw …` convention
+ * (dsh-fs-local) and tool-bash-persistent's `exec.signal.throwIfAborted()`. */
+function throwIfAborted(signal) {
+	if (signal?.aborted) {
+		throw new DOMException("The operation was aborted", "AbortError");
+	}
 }
 
 /** Bound one integer argument with a default and a hard cap. */
@@ -161,6 +190,7 @@ function registerTools(ctx, memoryDirName, { autoDedupe, trackUsage, mergeConten
 			}
 		},
 		execute: async (args, exec) => {
+			throwIfAborted(exec.signal);
 			const root = projectRoot(exec);
 			const saved = await saveNote(root, memoryDirName, {
 				title: args.title,
@@ -169,6 +199,7 @@ function registerTools(ctx, memoryDirName, { autoDedupe, trackUsage, mergeConten
 				keywords: args.keywords,
 				usage_scenario: args.usage_scenario
 			});
+			throwIfAborted(exec.signal);
 			const merged = autoDedupe
 				? await mergeSimilarNotes(root, memoryDirName, { contentSimilarity: mergeContentThreshold })
 				: [];
@@ -247,6 +278,7 @@ function registerTools(ctx, memoryDirName, { autoDedupe, trackUsage, mergeConten
 			}
 		},
 		execute: async (args, exec) => {
+			throwIfAborted(exec.signal);
 			const root = projectRoot(exec);
 			const result = await searchNotes(root, memoryDirName, {
 				query: args.query,
@@ -308,6 +340,7 @@ function registerTools(ctx, memoryDirName, { autoDedupe, trackUsage, mergeConten
 			}
 		},
 		execute: async (args, exec) => {
+			throwIfAborted(exec.signal);
 			const root = projectRoot(exec);
 			return listNotes(root, memoryDirName, { category: args.category });
 		},
@@ -320,11 +353,15 @@ function registerTools(ctx, memoryDirName, { autoDedupe, trackUsage, mergeConten
 	}));
 }
 
-/** Whether an agent is a reviewable root session (has a project, not a subagent). */
+/** Whether an agent is a reviewable root session (has a project, not a subagent).
+ * Subagent children are marked by the session header's `origin === 'subagent'`
+ * (see @deepseek-ai/dsh-session `SessionHeader`); there is no `parentSessionId`
+ * field — `parentSession` only records fork/seed lineage and does not
+ * disqualify a session from review. */
 function reviewable(agent) {
 	const header = agent.session?.header;
 	if (header === void 0) return false;
-	if (header.origin === "subagent" || header.parentSessionId !== void 0) return false;
+	if (header.origin === "subagent") return false;
 	return typeof header.cwd === "string" && header.cwd.length > 0;
 }
 
@@ -387,16 +424,18 @@ function installGuidance(ctx) {
 	});
 }
 
-function apply(ctx, config = {}) {
-	const autoReview = config.autoReview !== false;
-	const autoDedupe = config.autoDedupe !== false;
-	const trackUsage = config.trackUsage !== false;
-	const memoryDirName = typeof config.memoryDirName === "string" && config.memoryDirName.trim() !== ""
-		? config.memoryDirName.trim()
-		: DEFAULT_MEMORY_DIR_NAME;
-	const mergeContentThreshold = Number.isFinite(Number(config.mergeContentThreshold))
-		? Math.min(Math.max(Number(config.mergeContentThreshold), 0.1), 0.95)
-		: 0.55;
+function apply(ctx, config) {
+	// The Cordis loader validates `config` against the exported `Config` schema
+	// and fills its defaults, so it is already complete here. `config` may still
+	// be undefined when apply is called directly (bypassing the loader), in
+	// which case treat it as an empty object — no manual defaults, no clamping.
+	const {
+		autoReview,
+		autoDedupe,
+		trackUsage,
+		memoryDirName,
+		mergeContentThreshold
+	} = config ?? {};
 	registerTools(ctx, memoryDirName, { autoDedupe, trackUsage, mergeContentThreshold });
 	installGuidance(ctx);
 	installReview(ctx, autoReview);

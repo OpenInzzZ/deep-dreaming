@@ -17,7 +17,7 @@ window.__ModuleLoader__.load({ id: '@local/dsh-plugin-session-cleanup', factory:
 var module = { exports: {} }; var exports = module.exports;
 
 const React = require('react');
-const { useEffect, useMemo, useRef, useState, useSyncExternalStore } = React;
+const { useEffect, useState } = React;
 const { jsx, jsxs } = require('react/jsx-runtime');
 const { IconChevronDownOutline14 } = require('@deepseek-ai/dsh-client-ui-primitives');
 
@@ -76,7 +76,6 @@ const zh = {
   unsaved: '未保存',
   collapse: '收起',
   expand: '展开',
-  readOnly: '当前设置为只读,无法保存。',
   save: '保存',
   saving: '保存中…',
   discard: '放弃',
@@ -108,7 +107,6 @@ const en = {
   unsaved: 'Unsaved',
   collapse: 'Collapse',
   expand: 'Expand',
-  readOnly: 'Settings are read-only and cannot be saved.',
   save: 'Save',
   saving: 'Saving…',
   discard: 'Discard',

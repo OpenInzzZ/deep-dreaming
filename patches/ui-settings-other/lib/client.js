@@ -21,17 +21,17 @@
  * snapshot (pid, ports, uptime, memory, versions, running sessions, idle
  * auto-stop countdown) with a manual refresh button.
  *
- * The configuration card binds the Host-registered settings namespace
- * `ui-settings-other` through `ctx.settingsScope` and edits the idle
- * auto-stop toggle + idle-minutes threshold with staged edits (the Host
- * applies changes live and rebuilds its monitor). It renders nothing while
- * the namespace is unavailable, mirroring the shipped cards.
+ * The configuration card binds the Host-registered `/app` RPC channel
+ * (getConfig/setConfig/resetConfig) and edits the idle auto-stop toggle +
+ * idle-minutes threshold with staged edits (the Host applies changes live
+ * and rebuilds its monitor). It renders nothing while the channel errors,
+ * mirroring the shipped cards.
  */
 window.__ModuleLoader__.load({ id: '@local/dsh-client-ui-settings-other', factory: (require) => {
 var module = { exports: {} }; var exports = module.exports;
 
 const React = require('react');
-const { useEffect, useState, useSyncExternalStore } = React;
+const { useEffect, useState } = React;
 const { jsx, jsxs } = require('react/jsx-runtime');
 const { IconChevronDownOutline14 } = require('@deepseek-ai/dsh-client-ui-primitives');
 
@@ -52,6 +52,7 @@ const CSS = [
   '.so-btn.so-danger{border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 45%,var(--dsw-alias-border-l2));color:var(--dsw-alias-state-error-primary)}',
   '.so-btn-sm{height:26px;padding:0 10px;font-size:12px}',
   '.so-status{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}',
+  '.so-danger-note{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary);margin:0 0 10px}',
   '.so-status[data-tone="error"]{color:var(--dsw-alias-state-error-primary)}',
   '.so-status[data-tone="ok"]{color:var(--dsw-alias-state-success-primary)}',
   '.so-status-block{border-top:1px solid var(--dsw-alias-border-l2);margin-top:2px;padding-top:12px;display:flex;flex-direction:column;gap:8px}',
@@ -142,6 +143,11 @@ const zh = {
   unitHour: '小时',
   unitMin: '分',
   unitSec: '秒',
+  reloadPlugins: '重载用户插件',
+  reloading: '重载中…',
+  reloadRequested: '已请求重载,数秒内生效,无需刷新页面。',
+  reloadFailed: '重载请求失败,请重试。',
+  dangerNote: '以下操作会终止 dsh 进程并中断所有运行中的会话,仅在升级 dsh 或修改核心插件时使用;日常更新用户插件请用上方的「重载用户插件」。',
 };
 
 /** English dictionary checked against the Chinese key set. */
@@ -179,6 +185,11 @@ const en = {
   unitHour: 'h',
   unitMin: 'm',
   unitSec: 's',
+  reloadPlugins: 'Reload user plugins',
+  reloading: 'Reloading…',
+  reloadRequested: 'Reload requested; takes effect within seconds, no page refresh needed.',
+  reloadFailed: 'The reload request failed. Try again.',
+  dangerNote: 'The action below terminates the dsh process and interrupts every running session. Use it only to upgrade dsh or change core plugins; for user-plugin updates use "Reload user plugins" above.',
 };
 
 /** Simplified Chinese dictionary for the 插件配置 card. */
@@ -188,7 +199,6 @@ const zhCard = {
   unsaved: '未保存',
   collapse: '收起',
   expand: '展开',
-  readOnly: '当前设置为只读,无法保存。',
   save: '保存',
   saving: '保存中…',
   discard: '放弃',
@@ -210,7 +220,6 @@ const enCard = {
   unsaved: 'Unsaved',
   collapse: 'Collapse',
   expand: 'Expand',
-  readOnly: 'Settings are read-only and cannot be saved.',
   save: 'Save',
   saving: 'Saving…',
   discard: 'Discard',
@@ -313,10 +322,11 @@ function StatusBlock({ status, t }) {
  *   idle -> confirm -> calling -> scheduled | error
  *   idle -> busy (sessions running) -> waiting (poll until idle) | calling(force)
  */
-function OtherSection({ restart, status, t }) {
+function OtherSection({ restart, status, reloadPlugins, t }) {
   const [phase, setPhase] = useState('idle');
   const [busyInfo, setBusyInfo] = useState(null);
   const [waitTimer, setWaitTimer] = useState(null);
+  const [reloadState, setReloadState] = useState(null); // null | 'calling' | 'requested' | 'failed'
 
   useEffect(() => () => {
     if (waitTimer !== null) clearInterval(waitTimer);
@@ -359,6 +369,14 @@ function OtherSection({ restart, status, t }) {
     setPhase('idle')
   };
 
+  const doReload = () => {
+    setReloadState('calling')
+    void Promise.resolve().then(() => reloadPlugins()).then(
+      () => setReloadState('requested'),
+      () => setReloadState('failed'),
+    )
+  };
+
   const tone = phase === 'error' ? 'error' : phase === 'scheduled' ? 'ok' : undefined;
 
   return jsx('div', { className: 'so-section', children: [
@@ -366,6 +384,22 @@ function OtherSection({ restart, status, t }) {
       jsx('h3', { children: t('serviceTitle') }, 'title'),
       jsx('p', { children: t('serviceDesc') }, 'desc'),
       jsx(StatusBlock, { status, t }, 'status-block'),
+      jsx('div', { className: 'so-row', children: [
+        jsx('button', {
+          type: 'button',
+          className: 'so-btn',
+          disabled: reloadState === 'calling' ? true : undefined,
+          onClick: doReload,
+          children: reloadState === 'calling' ? t('reloading') : t('reloadPlugins'),
+        }, 'reload-plugins'),
+        reloadState === 'requested'
+          ? jsx('span', { className: 'so-status so-flow-status', 'data-tone': 'ok', children: t('reloadRequested') }, 'reload-ok')
+          : null,
+        reloadState === 'failed'
+          ? jsx('span', { className: 'so-status so-flow-status', 'data-tone': 'error', children: t('reloadFailed') }, 'reload-fail')
+          : null,
+      ] }, 'reload-row'),
+      jsx('p', { className: 'so-danger-note', children: t('dangerNote') }, 'danger-note'),
       jsx('div', { className: 'so-row', children: [
         phase === 'confirm'
           ? jsxs(React.Fragment, { children: [
@@ -581,7 +615,12 @@ function apply(ctx) {
     if (!result.ok) throw new Error('status failed: ' + result.error.code + ': ' + result.error.message)
     return result.value
   }
-  const injected = () => ({ restart, status })
+  const reloadPlugins = async () => {
+    const result = await ctx.connection.rpc.call('/app', 'reloadPlugins', { args: {} })
+    if (!result.ok) throw new Error('reloadPlugins failed: ' + result.error.code + ': ' + result.error.message)
+    return result.value
+  }
+  const injected = () => ({ restart, status, reloadPlugins })
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',

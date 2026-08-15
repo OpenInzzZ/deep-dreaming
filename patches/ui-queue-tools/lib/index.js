@@ -99,7 +99,10 @@ async function handleEndpoint(endpoint, payload) {
 
 /** Cordis plugin entry: register the `/queue` RPC channel on the Connection. */
 export function apply(ctx) {
-  return ctx.inject(['connection', 'agents'], (ctx) => {
+  // `ctx.inject` returns a thenable Fiber; returning it from `apply` makes
+  // Cordis treat it as an Effect and fail with TypeError('Invalid effect').
+  // The child fiber's disposer is registered on the parent automatically.
+  ctx.inject(['connection', 'agents'], (ctx) => {
     const bound = handleEndpoint.bind({ agents: ctx.agents })
     return ctx.connection.rpc.handle('/queue', bound, { authority: 'loopback' })
   })

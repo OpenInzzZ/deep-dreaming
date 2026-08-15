@@ -6,7 +6,7 @@
 
 - 插件类型:目录包插件(包名 `@local/dsh-plugin-session-cleanup`),通过
   `cordis.patch.yml` 的 `insert` 装载,不修改 dsh 源码。
-- 清理对象:`<sessions根>/<项目>/session-<uuid>/` 形态的归档目录;活跃会话
+- 清理对象:`<sessions根>/<项目>/session-<n>/` 形态的归档目录;活跃会话
   由 `sessions` 服务实时列表识别并跳过。
 - 双重规则:超龄删除(带最少保留数保护)+ 总容量超限时按最旧优先删。
 
@@ -39,8 +39,12 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 > 已迁移为包名形式(插件管理页按 `@local/...` 显示)。若迁移前安装过,
 > 记得删除 home 层的旧条目,避免重复加载。
 
-3. **重启 dsh** 使插件加载。启动时立即执行一次清理,之后按
-   `intervalMinutes` 周期执行。
+3. **保存即生效,无需重启**:dsh web 对 `cordis.patch.yml` 内置热加载
+   (`watchUserPatches`),条目增删/配置修改保存后数秒内事务性生效(host 与
+   client 半都重新装载);也可在设置 →「其他」页点 **重载用户插件** 手动
+   触发。**修改本补丁源码后需重启 dsh web** 才生效。
+
+启动时立即执行一次清理,之后按 `intervalMinutes` 周期执行。
 
 ## 如何使用
 
@@ -76,7 +80,9 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 
 > 配置卡片经插件自身的 `/session-cleanup` RPC 通道读写(getConfig /
 > setConfig / resetConfig),不依赖 dsh 设置的暴露白名单(apiproxy),
-> 因此在「插件配置」与「插件管理」两个页面均可编辑。
+> 因此在「插件配置」与「插件管理」两个页面均可编辑。「插件管理」页中的
+> 卡片由 `ui-settings-plugin-manager` 补丁声明的
+> `settings.plugin.manager.item` 槽位承载,**需同时启用该补丁**才显示。
 
 > 手动编辑 `~/.dsh/settings.yaml` 同样生效(文件被监听,改动即重载):
 >
@@ -101,6 +107,11 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 | `dryRun` | `false` | 演练模式:只报告不删除 |
 | `sessionsRoot` | `$DSH_HOME/sessions` | 会话根目录,可指向其他位置 |
 
+> 会话目录名为 `session-<n>` 形态(store 生成),插件按该前缀识别归档
+> 会话并跳过活跃会话。若 JSONL 后端配置的会话根目录不是
+> `$DSH_HOME/sessions`,请把 `sessionsRoot` 配成与后端一致,否则会静默
+> `scanned=0` 清理不到任何会话。
+
 清理判定(两条规则取并集):
 
 - **规则 A(超龄)**:按最后修改时间从新到旧排序,仅对超出 `keepSessions`
@@ -112,19 +123,22 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 
 ## 卸载
 
-1. 删除 `~/.dsh/profiles/web/cordis.patch.yml` 中的 `session-cleanup` 条目;
+1. 删除 `~/.dsh/profiles/web/cordis.patch.yml` 中的 `session-cleanup` 条目
+   (**热生效**:数秒后清理任务停止、`/session-cleanup` 通道注销);
 2. 删除 `~/.dsh/profiles/node_modules/@local/dsh-plugin-session-cleanup`
-   链接;
-3. 重启 dsh。
+   链接。
 
 ## 测试
 
 ```powershell
 node patches/session-cleanup/session-cleanup.test.mjs      # 清理规则纯逻辑
 node patches/session-cleanup/verify-session-cleanup.mjs    # settings 集成 + 配置卡片
+node patches/session-cleanup/tests/load-smoke.mjs          # 真实 Cordis 加载冒烟
 ```
 
 覆盖:超龄删除、`keepSessions` 保护、容量上限、活跃会话跳过、演练模式、
 空项目目录清理;host 侧 settings 注册与配置变更重建定时器、无 settings
-时回退条目配置;client 侧配置卡片渲染、保存写 `scope.set`、重置写
-`scope.unset`、只读禁用。
+时回退条目配置、apply 不返回 thenable 的 P0 回归守卫、isUnloading 卸载
+守卫;client 侧配置卡片渲染、保存/恢复默认经 `/session-cleanup` RPC 通道
+(getConfig/setConfig/resetConfig)。DOM 交互段需要 jsdom,未安装时自动
+跳过。

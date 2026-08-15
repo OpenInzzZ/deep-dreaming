@@ -90,4 +90,6 @@ if (-not (Test-Path $modulesBase)) {
 
 Write-Host ''
 if ($failed -gt 0) { Write-Host "Deploy check FAILED ($failed broken link(s))." -ForegroundColor Red; exit 1 }
-Write-Host "Deploy check done ($checked reference(s) verified). Restart dsh if patch entries changed." -ForegroundColor Green
+Write-Host "Deploy check done ($checked reference(s) verified)." -ForegroundColor Green
+Write-Host "  - cordis.patch.yml entry changes hot-apply within seconds (no restart)." -ForegroundColor DarkGray
+Write-Host "  - Plugin SOURCE changes need a dsh web restart (restart-dsh.ps1); bundle/profile manifest changes too." -ForegroundColor DarkGray

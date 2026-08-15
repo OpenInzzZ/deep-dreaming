@@ -25,8 +25,10 @@ const { IconChevronDownOutline14, IconSearchOutline16 } = require('@deepseek-ai/
 
 const PLUGIN_ID = '@local/dsh-client-ui-settings-plugin-manager';
 
-/* Injected once per page; the module loader tracks `style[data-plugin]` tags
-   and removes them when the bundle unloads. */
+/* Injected once per page (idempotent). The module loader records
+   `style[data-plugin]` tags at materialization; the HMR path removes them on
+   reload, while a plain fiber unload keeps the tag for the page lifetime —
+   same behavior as the shipped bundles. */
 const CSS = [
   '.pm-section{display:flex;flex-direction:column;gap:14px;width:100%;max-width:760px;color:var(--dsw-alias-label-primary)}',
   '.pm-section .pm-status,.pm-failure p{margin:0}',
@@ -348,10 +350,13 @@ function PluginManagerSettingsTab({ list, t, renderSlot }) {
                   jsx('dd', { children: status }, 'dd-cordis'),
                 ] }, 'cordis-row') : null,
               ] }, 'details'),
-              // Config cards contributed by the plugin itself (keyed by its
-              // module name) — the shipped settings whitelist would refuse
-              // custom namespaces, so plugins expose their config over their
-              // own RPC channel and register here.
+              // Config cards contributed by the plugin itself — the shipped
+              // settings whitelist would refuse custom namespaces, so plugins
+              // expose their config over their own RPC channel and register
+              // here. `only` filters by the CHILD ENTRY'S REGISTRATION ID, so
+              // a contributor must register with id == this entry's module
+              // name (e.g. '@local/dsh-plugin-session-cleanup') to be shown
+              // on this plugin's card.
               renderSlot('settings.plugin.manager.item', {}, { only: entry.moduleName }),
             ] }, 'details-body') : null,
           ],

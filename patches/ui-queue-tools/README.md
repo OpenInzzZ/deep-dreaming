@@ -52,7 +52,10 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
       name: '@local/dsh-client-ui-queue-tools'
 ```
 
-3. **重启 dsh web**(当前运行方式下 patch 热加载不可靠),刷新页面后生效。
+3. **保存即生效,无需重启**:dsh web 对 `cordis.patch.yml` 内置热加载
+   (`watchUserPatches`),条目增删/配置修改保存后数秒内事务性生效(host 与
+   client 半都重新装载);也可在设置 →「其他」页点 **重载用户插件** 手动
+   触发。**修改本补丁源码后需重启 dsh web** 才生效。
 
 ## 如何使用
 
@@ -84,9 +87,12 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 
 ```powershell
 node verify-queue-tools.mjs             # 在本补丁目录下运行
+node tests/load-smoke.mjs               # 真实 Cordis 加载冒烟(需能解析到 @deepseek-ai/cordis,
+                                        # 见 tests/load-smoke.mjs 文件头注释)
 ```
 
 覆盖:host 半 `/queue` 通道与参数校验、重排语义(下移/上移/置顶/置底/
-不存在/单条/next-step)、client 半 shadow 注册(priority)、hover 全文
-Tooltip 气泡、拖拽排序的 RPC 参数、编辑态无焦点 tooltip 残留、单条消息
-隐藏拖拽能力。
+不存在/单条/next-step)、apply 不返回 thenable(回归守卫)、client 半
+shadow 注册(priority)、hover 全文 Tooltip 气泡、拖拽排序的 RPC 参数、
+编辑态无焦点 tooltip 残留、单条消息隐藏拖拽能力(jsdom 交互部分在
+`jsdom`/`@testing-library/react` 可解析时运行,否则跳过并提示)。

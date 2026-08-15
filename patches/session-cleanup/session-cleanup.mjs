@@ -28,14 +28,21 @@ export const name = 'session-cleanup'
 
 export const SETTINGS_NAMESPACE = 'session-cleanup'
 
-/** Settings schema: defaults here are the floor; the entry config and the
- * user document layer resolve above them. */
-export const ConfigSchema = z.object({
+/**
+ * Settings schema: defaults here are the floor; the entry config and the
+ * user document layer resolve above them.
+ *
+ * The export name must be exactly `Config`: the Cordis loader reads
+ * `plugin.Config` (vendor/cordis registry.ts) to validate the entry config;
+ * any other export name silently skips validation.
+ */
+export const Config = z.object({
   enabled: z.boolean().default(true),
   maxAgeDays: z.number().default(30),
   maxTotalMB: z.number().default(1024),
   keepSessions: z.number().default(5),
-  intervalMinutes: z.number().default(360),
+  // 0 would make setInterval spin at ~1ms; 1 minute is the sane floor.
+  intervalMinutes: z.number().min(1).default(360),
   dryRun: z.boolean().default(false),
   sessionsRoot: z.string().default(''),
 })
@@ -168,6 +175,8 @@ export async function runCleanup(sessionsRoot, options = {}, liveSessionIds = ne
   // 6. 清理已空的项目目录 (非演练模式)
   if (!cfg.dryRun) {
     for (const projectDir of emptyProjects) {
+      // readdir/rm failures here are best-effort: the next interval tick
+      // re-scans and retries, and a vanished dir is a success by definition.
       const rest = await readdir(projectDir).catch(() => [])
       if (rest.length === 0) await rm(projectDir, { recursive: true, force: true }).catch(() => {})
     }
@@ -195,17 +204,33 @@ export function summarize(result) {
  * Same contract as dsh-settings' installSettingsSection, plus the scope:
  * the config RPC writes through it (persisted to settings.yaml), so edits
  * survive restarts and take effect live via the watcher.
+ *
+ * `isUnloading` mirrors the official isUnloading(ctx) guard: when the
+ * plugin's own fiber is tearing down, both the settings detach disposer and
+ * the watcher must NOT re-run `onChange` (= start), which would rebuild the
+ * timer against resources being released. The `disposed` flag is set by the
+ * plugin's teardown effect before the settings child fiber disposes (the
+ * parent fiber disposes its own effects first), so the guard sees it set.
  */
-function registerConfigSection(ctx, ns, schema, entry, hooks, onScope) {
+function registerConfigSection(ctx, ns, schema, entry, hooks, onScope, isUnloading = () => false) {
   ctx.inject(['settings'], (sctx) => {
     const scope = sctx.settings.register(ns, schema, { base: entry })
     hooks.setSource(() => scope.get())
     sctx.effect(() => () => {
+      // Runs both when the settings provider detaches (the consumer keeps
+      // running and must fall back to its composition entry) and when the
+      // plugin itself unloads (disposed is already set; onChange would
+      // rebuild the timer against a fiber whose resources are being let go).
+      if (isUnloading()) return
       hooks.setSource(() => entry)
       hooks.onChange()
     })
     hooks.onChange()
-    scope.watch(() => { hooks.onChange() })
+    scope.watch(() => {
+      // A stored change landing while the consumer unloads reaches the
+      // watcher before the registration is released; guard it the same way.
+      if (!isUnloading()) hooks.onChange()
+    })
     onScope(scope)
   })
 }
@@ -227,7 +252,11 @@ export function apply(ctx, config = {}) {
   const cfg = { ...DEFAULTS, ...config }
   if (!cfg.enabled) return
 
-  return ctx.inject(['sessions', 'connection'], (ctx) => {
+  // Note: `ctx.inject` returns a thenable Fiber; returning it from `apply`
+  // makes Cordis treat it as an Effect and fail with TypeError('Invalid
+  // effect'). The child fiber's disposer is registered on the parent fiber
+  // automatically, so a statement call is enough.
+  ctx.inject(['sessions', 'connection'], (ctx) => {
     const logger = ctx.logger
     /** 当前权威配置: 设置文档 > 组合层 entry; settings 缺失时回退 entry。 */
     let source = () => ({ ...DEFAULTS, ...config })
@@ -236,6 +265,9 @@ export function apply(ctx, config = {}) {
     let disposed = false
 
     const tick = async (reason, cfg) => {
+      // A tick landing after teardown began must not scan or log; the
+      // interval callback and start() both funnel through here.
+      if (disposed) return
       const sessionsRoot = resolveSessionsRoot(cfg.sessionsRoot)
       const liveIds = new Set(ctx.sessions.list().map((s) => s.id))
       const result = await runCleanup(sessionsRoot, cfg, liveIds)
@@ -262,14 +294,16 @@ export function apply(ctx, config = {}) {
       }, current.intervalMinutes * 60_000)
     }
 
-    registerConfigSection(ctx, SETTINGS_NAMESPACE, ConfigSchema, config, {
+    registerConfigSection(ctx, SETTINGS_NAMESPACE, Config, config, {
       setSource: (current) => { source = current },
       onChange: start,
-    }, (scope) => { configScope = scope })
+    }, (scope) => { configScope = scope }, () => disposed)
 
     start()
 
-    ctx.connection.rpc.handle('/session-cleanup', async (endpoint, payload) => {
+    // Registered as an effect so the channel disposer runs on unload; the
+    // config RPC otherwise outlives the plugin and keeps answering.
+    ctx.effect(() => ctx.connection.rpc.handle('/session-cleanup', async (endpoint, payload) => {
       if (endpoint === 'getConfig') {
         return { ok: true, value: source() }
       }
@@ -297,7 +331,7 @@ export function apply(ctx, config = {}) {
         }
       }
       return configError('bad-request', `unknown endpoint: ${endpoint}`)
-    }, { authority: 'loopback' })
+    }, { authority: 'loopback' }), 'session-cleanup: /session-cleanup rpc channel')
 
     return ctx.effect(() => () => {
       disposed = true

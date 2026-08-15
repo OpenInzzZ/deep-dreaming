@@ -14,10 +14,11 @@
 
 ```
 patches/ui-settings-plugin-manager/
-├── package.json   # 声明 dsh.client 浏览器入口 + 依赖顺序
+├── package.json            # 声明 dsh.client 浏览器入口 + 依赖顺序
 ├── lib/
-│   ├── index.js   # node 端空实现(仅让 Loader 挂载该条目)
-│   └── client.js  # 浏览器端实现(手写 bundle,无构建步骤)
+│   ├── index.js            # node 端空实现(仅让 Loader 挂载该条目)
+│   └── client.js           # 浏览器端实现(手写 bundle,无构建步骤)
+├── verify-plugin-manager.mjs  # 部署后的契约验证脚本
 └── README.md
 ```
 
@@ -45,12 +46,14 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 ```
 
 `cordis.patch.yml` 由运行中的 dsh 热加载(watch-only HMR):保存后数秒内自动
-挂载,浏览器刷新一次页面即可看到新标签页,**无需重启服务器**。
+挂载,host 与 client 半均热生效,**无需重启服务器**;其它用户补丁(配置卡片
+等)的变更可在设置 →「其他」页点 **重载用户插件** 手动触发同样的热重载。
+修改本补丁源码后需重启 dsh web 才生效。
 
 ## 如何使用
 
 1. 打开 dsh Web 界面 → **设置(Settings)** → 左侧 **插件** 分区。
-2. 切换顶部标签页到 **管理(Manager)** —— 列表即当前 profile 的全部插件条目。
+2. 切换顶部标签页到 **插件管理** —— 列表即当前 profile 的全部插件条目。
 3. 每个插件一张卡片,展示:名称、来源分类、启用/运行状态;点击卡片内容区
    可展开查看详情(加载器条目信息)。
 4. 用三个下拉筛选器 + 搜索框收窄列表,各条件之间为 **AND(与)** 关系:

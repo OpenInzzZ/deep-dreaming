@@ -1,14 +1,19 @@
-# 设置「其他」页 —— 服务管理(重启 / 运行状态 / 空闲自动停止)+ 静默启动
+# 设置「其他」页 —— 服务管理(重载插件 / 重启 / 运行状态 / 空闲自动停止)+ 静默启动
 
-在 dsh Web 设置中新增一个 **其他(Other)** 页面,提供三块能力:
+在 dsh Web 设置中新增一个 **其他(Other)** 页面,提供四块能力:
 
-1. **重启服务**:点击后 dsh 服务进程自行重启(以相同命令行重新拉起一个后台
-   进程,当前进程退出),适用于插件配置变更、状态异常等需要整进程重启的
-   场景,无需回到终端手动操作。
-2. **运行状态**:实时展示服务进程快照 —— 进程 ID、监听端口、运行时长、
+1. **重载用户插件**:触发 dsh 对 `cordis.patch.yml` 的热重载
+   (`watchUserPatches` 事务性重应用),全部用户级插件(host 与浏览器两半)
+   卸载后重新装载,**不重启服务、不中断会话**、排队消息不丢。插件条目
+   增删/配置修改、或想确认补丁变更已生效时用它;数秒内完成,无需刷新页面。
+2. **重启服务**:点击后 dsh 服务进程自行重启(以相同命令行重新拉起一个后台
+   进程,当前进程退出)。**会中断所有运行中的会话**,仅用于升级 dsh、
+   修改核心插件或状态异常等必须整进程重启的场景(日常用户插件更新请用
+   「重载用户插件」)。
+3. **运行状态**:实时展示服务进程快照 —— 进程 ID、监听端口、运行时长、
    内存占用、Node 版本、dsh 版本、运行中会话数、空闲自动停止倒计时
    (每 10 秒自动轮询,也可手动刷新)。
-3. **空闲自动停止**:持续没有**运行中的会话**超过 `idleMinutes`(默认 120,
+4. **空闲自动停止**:持续没有**运行中的会话**超过 `idleMinutes`(默认 120,
    即 2 小时)后,服务自动优雅退出;配合桌面快捷方式可随时静默重新拉起。
 
 ## 功能
@@ -16,12 +21,18 @@
 ### 服务卡片(设置 → 其他)
 
 - 设置导航新增「其他」页(排在 Agent 预设之后,`order: 30`)。
-- 「服务」卡片顶部是**运行状态**块(见上),底部是**重启服务**按钮。
-- **二次确认**:第一次点击按钮进入确认态,再点「确认重启」才真正执行;
-  可「取消」退回。
-- 请求发出后按钮进入「正在重启…」禁用态;成功后显示
+- 「服务」卡片顶部是**运行状态**块(见上),中部是**重载用户插件**按钮
+  (主操作,绿色提示),底部是**重启服务**按钮(危险区,附说明文案)。
+- **重载用户插件**:点击即经 `/app` 通道的 `reloadPlugins` 端点在
+  `cordis.patch.yml` 上维护一行时间戳标记并写回,触发官方热重载;
+  成功后显示「已请求重载,数秒内生效」。host 端不等待重载完成即返回,
+  重载过程异步进行;若某插件重载失败,`watchUserPatches` 会记录日志告警
+  并保持上次成功状态。
+- **重启服务**(危险):**二次确认**后才真正执行(第一次点击进入确认态,
+  再点「确认重启」);请求发出后按钮进入「正在重启…」禁用态;成功后显示
   「已请求重启,服务即将断开,请稍后刷新页面」;失败显示错误并提供重试。
-- **防重复**:host 侧有锁,重复请求直接返回"已排定"。
+- **防重复**:host 侧有锁(spawn 失败 / 脚本非零退出 / 90 秒看门狗都会
+  释放),重复请求直接返回"已排定"。
 - **会话保护**:有会话正在运行时,`restart` 拒绝执行并返回 `sessions-running`
   (含数量);页面提供两个选项:
   - **等待空闲后重启**:每 2s 轮询 `/app/status`,归零后自动发起重启;
@@ -38,7 +49,9 @@
 - 配置卡片经插件自身的 `/app` RPC 通道读写(getSettings / setSettings /
   resetSettings),不依赖 dsh 设置的暴露白名单(apiproxy),因此在
   「插件配置」与「插件管理」两个页面均可编辑;点 **恢复默认** 整体
-  回退到组合层配置。
+  回退到组合层配置。「插件管理」页中的配置卡片由
+  `ui-settings-plugin-manager` 补丁声明的 `settings.plugin.manager.item`
+  槽位承载,**需同时启用该补丁**才显示。
 - 判定规则:host 每分钟检查一次 `agents` 服务,只要有会话处于
   `running` 状态就重置空闲时钟;超过阈值仍无运行会话则调用
   launcher 提供的 `ctx.appExit(0)` 优雅关闭(该通道不可用时回退
@@ -85,9 +98,9 @@
   响应先送达 → 停止旧进程 → 以相同命令行启动新进程(日志重定向)→
   轮询端口直至就绪。支持 `-DryRun`、`-Port`、`-SettleSeconds`。
 - **Client 半(`lib/client.js`)**:注册 `settings.section` slot
-  (`id: 'other'`, `order: 30`)与 `settings.plugin.item` 配置卡片
-  (`id: 'ui-settings-other'`, `order: 30`);按钮与状态块调用
-  `ctx.connection.rpc.call('/app', …)`。
+  (`id: 'other'`, `order: 30`)与 `settings.plugin.item` / 
+  `settings.plugin.manager.item` 配置卡片(`id: '@local/dsh-client-ui-settings-other'`,
+  `order: 30`);按钮与状态块调用 `ctx.connection.rpc.call('/app', …)`。
 
 ## 部署(加载到 dsh)
 
@@ -115,17 +128,22 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
       name: '@local/dsh-client-ui-settings-other'
       config:
         # script: 'D:\path\to\restart-dsh.ps1'   # 可选:自定义重启脚本路径
+        # patchFile: '...'                        # 可选:重载插件时 touch 的 patch 文件,默认 ~/.dsh/profiles/web/cordis.patch.yml
         # idleMinutes: 120                        # 可选:空闲停止阈值(分钟),默认 120
 ```
 
-host 代码或 client bundle 有变更时需重启 dsh web(host)并刷新页面
-(client);仅改 `cordis.patch.yml` 时热加载即可。
+条目增删 / 配置修改保存后**数秒热生效**(host + client 均热装载,无需
+重启);「其他」页的**重载用户插件**按钮可手动触发同样的热重载。
+**修改本补丁源码后需重启 dsh web**(`restart-dsh.ps1`)才生效。
 
 ## 如何使用
 
 1. 打开 dsh Web 界面 → **设置** → 左侧导航最下方 **其他**:
    - 查看服务运行状态(进程 ID / 端口 / 运行时长 / 内存 / 版本 / 会话数);
-   - 点击 **重启服务** → 确认 → 等待约 10~20 秒后刷新页面。
+   - 更新了任何用户级插件(本仓库补丁或其他 `cordis.patch.yml` 条目)后,
+     点击 **重载用户插件** → 数秒内生效,不中断会话;
+   - 仅当升级 dsh / 修改核心插件时,才使用 **重启服务** → 确认 →
+     等待约 10~20 秒后刷新页面(会中断所有运行中会话)。
 2. 设置 → **插件** → **插件配置** → 展开「服务(空闲自动停止)」:
    调整开关与空闲分钟数,点「保存」即时生效。
 3. 桌面双击 **dsh-web** 快捷方式静默启动服务(已运行时无操作);
@@ -136,20 +154,24 @@ host 代码或 client bundle 有变更时需重启 dsh web(host)并刷新页面
 ## 卸载
 
 1. 删除 `~/.dsh/profiles/web/cordis.patch.yml` 中的 `ui-settings-other`
-   条目;
+   条目(**热生效**:数秒后「其他」页与配置卡片消失,`/app` 通道注销,
+   空闲监控随 fiber 卸载停止);
 2. 删除 `~/.dsh/profiles/node_modules/@local/dsh-client-ui-settings-other`
    链接;
-3. 重启 dsh web(页面刷新后「其他」页与配置卡片消失,`/app` 通道注销);
-4. 可选:删除桌面 `dsh-web.lnk` 与 `~/.dsh/scripts/` 下本补丁的三个脚本。
+3. 可选:删除桌面 `dsh-web.lnk` 与 `~/.dsh/scripts/` 下本补丁的三个脚本。
 
 ## 注意事项
 
+- **重启服务会中断所有运行中会话**(整进程重启);日常用户插件更新请用
+  「重载用户插件」。
 - 重启后新进程**脱离原终端独立运行**(detached);再次重启需在 Web 中
   操作、运行脚本或结束进程后重新启动。
 - 空闲自动停止会**结束整个 dsh web 进程**(包括正在浏览页面的人),请在
   无人使用或接受中断时开启;需要保活可把空闲分钟数调大或关闭开关。
 - 手动运行 `restart-dsh.ps1` 没有会话检查(脚本无法访问会话状态),请在
   运行前确认没有进行中的会话。
+- 重载用户插件后,若某个补丁加载失败,`cordis.patch.yml` 热重载保持上次
+  成功状态并在 dsh 日志记录告警;修复补丁后再次「重载用户插件」即可。
 
 ## 测试
 
@@ -157,9 +179,11 @@ host 代码或 client bundle 有变更时需重启 dsh web(host)并刷新页面
 node verify-settings-other.mjs          # 在本补丁目录下运行
 ```
 
-覆盖:host 半 `/app` 通道注册与端点校验(不真正重启)、运行状态快照
-(serviceInfo / listeningPorts / dshVersion)、空闲判定与监控器(假时钟:
-busy 重置 / 阈值等待 / 恰好一次停止)、settings namespace 注册与 watch
-重建、client 半契约(section 与卡片 id/order、zh/en 字典一致)、状态块
-渲染与刷新、二次确认与 busy/wait/force 流程、配置卡片的暂存保存 / 重置
-/ 只读禁用。
+覆盖:host 半 `/app` 通道注册与端点校验(不真正重启)、`reloadPlugins`
+端点(写临时 patch 文件,不碰真实 profile 层)、apply 不返回 thenable 的
+P0 回归守卫、运行状态快照(serviceInfo / listeningPorts / dshVersion)、
+空闲判定与监控器(假时钟:busy 重置 / 阈值等待 / 恰好一次停止)、settings
+namespace 注册与 watch 重建、client 半契约(bundle handoff、section 与
+卡片 id/order、zh/en 字典一致、reloadPlugins 注入面)。DOM 交互段
+(状态块渲染、重载/重启/等待/强制流程、配置卡片经 `/app` RPC 保存与
+重置)需要 jsdom;未安装时自动跳过并提示。

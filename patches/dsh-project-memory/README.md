@@ -61,21 +61,29 @@ dsh plugin --profile web add D:\GitHub\deep-dreaming\patches\dsh-project-memory
 
 ```powershell
 New-Item -ItemType Junction -Path "D:\GitHub\deep-dreaming\patches\dsh-project-memory\node_modules" -Target "$env:USERPROFILE\.dsh\profiles\node_modules"
-# 或直接运行仓库根目录的 deploy.ps1,自动为所有需要宿主依赖的插件补齐/修复该链接
+# 或直接运行仓库根目录的 scripts\deploy.ps1,自动为所有需要宿主依赖的插件补齐/修复该链接
 ```
 
-然后**在 `~/.dsh/profiles/web/cordis.patch.yml` 追加启用条目**(pnpm 安装
-不会自动把用户级插件注册进 bundle 层):
+然后**把包追加进 profile 的 `dsh.profile.bundles`**(pnpm 安装不会自动
+注册层;`dsh plugin add` 会做,直接跑 pnpm 时需手工):
 
-```yaml
-- insert:
-    - id: project-memory
-      name: 'dsh-project-memory'
+```powershell
+# ~/.dsh/profiles/web/package.json
+# "dsh": { "profile": { "bundles": [ "@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-project-memory" ] } }
 ```
 
-最后**重启 `dsh web`** 使插件加载(工具、常驻指令、自动回顾随之生效)。
+> ⚠️ **不要**再在 `~/.dsh/profiles/web/cordis.patch.yml` 里手工 insert
+> `project-memory` 条目 —— bundle 层已提供该行(自带 config 默认值),
+> 用户层再 insert 同名行会导致下次启动
+> `duplicate loader entry id: project-memory` 硬失败。
 
-卸载:删除 profile patch 条目 + `dsh plugin --profile web remove dsh-project-memory`,重启生效。
+最后**重启 `dsh web`** 使 bundle 层生效(工具、常驻指令、自动回顾随之
+加载)。此后**修改代码或 bundle patch 需重启**;修改配置请在
+设置 → 插件 → 插件配置 的「项目记忆」卡片进行(即时生效),或用用户层
+按 id 的 config patch 覆盖(整值替换语义,需重述全部键)。
+
+卸载:`dsh plugin --profile web remove dsh-project-memory`(并从 bundles
+列表移除),重启生效。
 
 ## 如何使用
 
