@@ -1,0 +1,22 @@
+{
+  "name": "@local/dsh-client-whale-background",
+  "version": "0.1.0",
+  "private": true,
+  "description": "User-level plugin: whale-girl background for the conversation area",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-runtime"
+      ],
+      "platform": "web"
+    }
+  }
+}

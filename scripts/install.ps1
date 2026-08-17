@@ -38,7 +38,8 @@ $links = @(
     @{ n = 'dsh-client-ui-settings-plugin-manager'; d = 'ui-settings-plugin-manager' },
     @{ n = 'dsh-client-ui-settings-other';          d = 'ui-settings-other' },
     @{ n = 'dsh-client-ui-queue-tools';             d = 'ui-queue-tools' },
-    @{ n = 'dsh-client-ui-temp-session';             d = 'temp-session' }
+    @{ n = 'dsh-client-ui-temp-session';             d = 'temp-session' },
+    @{ n = 'dsh-client-whale-background';            d = 'whale-background' }
 )
 foreach ($l in $links) {
     $target = Join-Path $dev "patches\$($l.d)"
@@ -63,7 +64,8 @@ $entries = @(
     @{ id = 'ui-settings-plugin-manager'; name = '@local/dsh-client-ui-settings-plugin-manager'; config = '' },
     @{ id = 'ui-settings-other';          name = '@local/dsh-client-ui-settings-other';          config = '' },
     @{ id = 'ui-queue-tools';             name = '@local/dsh-client-ui-queue-tools';             config = '' },
-    @{ id = 'temp-session';               name = '@local/dsh-client-ui-temp-session';             config = '' }
+    @{ id = 'temp-session';               name = '@local/dsh-client-ui-temp-session';             config = '' },
+    @{ id = 'whale-background';           name = '@local/dsh-client-whale-background';           config = '' }
 )
 $patchContent = Get-Content $patchFile -Raw
 foreach ($e in $entries) {

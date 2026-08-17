@@ -15,7 +15,8 @@ deep-dreaming/
 │   ├── ui-settings-plugin-manager/  # Web 设置「插件管理」标签页(UI 插件)+ verify
 │   ├── ui-settings-other/        # Web 设置「其他」页:服务状态/重启/中断/空闲自动停止 + 静默启动脚本 + verify
 │   ├── ui-queue-tools/           # 排队消息增强:hover 全文预览 + 上下移排序 + verify
-│   └── temp-session/             # 侧边栏一键发起不绑定项目的临时会话 + verify
+│   ├── temp-session/             # 侧边栏一键发起不绑定项目的临时会话 + verify
+│   └── whale-background/         # 会话区域鲸鱼娘背景图(目录包插件)
 └── scripts/
     ├── install.ps1               # 一键安装:建全部 junction + 合并 patch 条目 + 安装 bundle + 部署校验(幂等)
     └── deploy.ps1                # 部署校验:同步补丁脚本与品牌资产 + 核对 patch 层引用与 junction + 补齐 host 依赖 node_modules 链接
@@ -31,6 +32,7 @@ deep-dreaming/
 | [ui-settings-other](patches/ui-settings-other/) | Web 设置新增「其他」页:服务运行状态(pid/端口/内存/版本)+ **重载用户插件(热,不中断会话)** + **创建桌面快捷方式(鲸鱼娘图标)** + 重启/中断服务(危险)+ 空闲自动停止(可配,默认 2h);**覆盖 Web 标题栏 favicon 为鲸鱼娘图标**;配套静默启动脚本与品牌资产 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-settings-other/README.md) |
 | [ui-queue-tools](patches/ui-queue-tools/) | 排队消息增强:hover 预览全文 + 上移/下移排序(host 半经 Inbox.splice 重排) | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-queue-tools/README.md) |
 | [temp-session](patches/temp-session/) | 侧边栏底部「临时会话」按钮:一键发起绑定**用户级临时目录**的会话,不关联任何项目 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/temp-session/README.md) |
+| [whale-background](patches/whale-background/) | 会话区域背景:在对话滚动区右下角显示鲸鱼娘透明图(15% 透明度) | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/whale-background/README.md) |
 
 ## 快速部署
 
