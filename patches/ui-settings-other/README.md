@@ -135,7 +135,8 @@
   进程并恢复其原始命令行(引号感知 tokenizer)→ `SettleSeconds` 让 RPC
   响应先送达 → 停止旧进程 → 等待端口释放 → 以相同命令行启动新进程
   (日志重定向)→ 轮询端口直至就绪。支持 `-DryRun`、`-Port`、
-  `-SettleSeconds`。
+  `-SettleSeconds`。**幂等回退**:端口上没有任何进程时不再报错,而是
+  委托同目录的 `start-dsh.ps1` 直接启动(在跑则重启,未跑则启动)。
 - **脚本(`stop-dsh.ps1`)**:通过端口找到监听进程并打印其命令行 →
   `Stop-Process -Force` → 等待端口释放(供后续 `start-dsh.ps1` 安全
   重拉)。支持 `-DryRun`、`-Port`;没有任何会话检查,请在运行前确认

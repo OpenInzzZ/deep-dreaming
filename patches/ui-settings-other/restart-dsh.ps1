@@ -8,6 +8,9 @@
 # settle (let any in-flight RPC response reach the browser) -> stop the old
 # process -> start a replacement with the SAME command line, logs redirected to
 # $LogDir -> poll the port until the service answers.
+# If nothing listens on $Port, there is nothing to restart: the script falls
+# back to start-dsh.ps1 (same directory) so a "restart" is idempotent —
+# running -> restart, not running -> start.
 param(
     [int]$Port = 3080,
     [int]$SettleSeconds = 2,
@@ -23,7 +26,17 @@ Log ("port: {0}  settle: {1}s  dry-run: {2}" -f $Port, $SettleSeconds, [bool]$Dr
 
 # --- 1. find the process listening on the port --------------------------------
 $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $conn) { throw "no process is listening on port $Port" }
+if (-not $conn) {
+    Log "no process is listening on port $Port; nothing to restart - starting instead"
+    $startScript = Join-Path $PSScriptRoot 'start-dsh.ps1'
+    if (-not (Test-Path $startScript)) {
+        throw "no process is listening on port $Port and start-dsh.ps1 was not found next to this script"
+    }
+    if ($DryRun) { Log 'DRY-RUN: would delegate to start-dsh.ps1 (service not running); no changes made.'; exit 0 }
+    Log "delegating to: $startScript"
+    & $startScript -Port $Port -LogDir $LogDir
+    exit $LASTEXITCODE
+}
 $oldPid = $conn.OwningProcess
 $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$oldPid"
 if (-not $proc) { throw "process $oldPid disappeared while inspecting" }
