@@ -779,8 +779,7 @@ function apply(ctx) {
   // here; the plugin-manager page is enable/disable management only.
   ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
     name: 'settings.plugin.item',
-    id: '@local/dsh-client-ui-settings-other',
-    order: 30,
+    key: 'ui-settings-other',
     locale: CARD_NS,
     inject: cardApi,
   }, ServiceSettingsCard))

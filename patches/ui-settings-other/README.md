@@ -143,7 +143,7 @@
   没有进行中的会话。
 - **Client 半(`lib/client.js`)**:注册 `settings.section` slot
   (`id: 'other'`, `order: 30`)与 `settings.plugin.item` 配置卡片
-  (`id: '@local/dsh-client-ui-settings-other'`, `order: 30`);按钮与状态块
+  (`key: 'ui-settings-other'`);按钮与状态块
   调用 `ctx.connection.rpc.call('/app', …)`。
 
 ## 部署(加载到 dsh)

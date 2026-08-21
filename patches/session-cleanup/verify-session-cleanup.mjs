@@ -10,7 +10,7 @@
  * must not rebuild the timer while the plugin unloads (isUnloading guard).
  *
  * Client half: loads the exact deployed `client.js`, asserts the
- * `settings.plugin.item` card registration (id '@local/dsh-plugin-session-cleanup'),
+ * `settings.plugin.item` card registration (key 'session-cleanup'),
  * checks the dictionaries, drives the cardApi (getConfig / setConfig /
  * resetConfig) through a mocked `connection.rpc.call` — the card reads and
  * writes config via the /session-cleanup RPC channel — and renders the card
@@ -296,7 +296,7 @@ const clientCtx = {
 }
 exports_.apply(clientCtx)
 if (registered === null) throw new Error('slots.inject never registered')
-if (registered.id !== PLUGIN_ID || registered.order !== 30) {
+if (registered.key !== 'session-cleanup') {
   throw new Error(`card registration mismatch: ${JSON.stringify(registered)}`)
 }
 if (dictionaries === null || dictionaries.ns !== exports_.NS) throw new Error('dictionaries not registered')
@@ -305,7 +305,7 @@ const enKeys = Object.keys(dictionaries.dicts.en)
 if (JSON.stringify(zhKeys) !== JSON.stringify(enKeys)) {
   throw new Error(`zh/en key mismatch:\nzh: ${zhKeys}\nen: ${enKeys}`)
 }
-console.log(`apply contract OK: settings.plugin.item id=${PLUGIN_ID} order=30 | dict keys = ${zhKeys.length}`)
+console.log(`apply contract OK: settings.plugin.item key=session-cleanup | dict keys = ${zhKeys.length}`)
 
 // cardApi RPC flow: the card reads/writes config through /session-cleanup
 {

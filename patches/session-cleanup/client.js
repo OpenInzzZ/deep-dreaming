@@ -323,8 +323,7 @@ function apply(ctx) {
   // here; the plugin-manager page is enable/disable management only.
   ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
     name: 'settings.plugin.item',
-    id: '@local/dsh-plugin-session-cleanup',
-    order: 30,
+    key: 'session-cleanup',
     locale: NS,
     inject: cardApi,
   }, SessionCleanupCard))

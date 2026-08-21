@@ -435,7 +435,7 @@ if (typeof sectionReg.inject().reloadPlugins !== 'function') throw new Error('se
 if (typeof sectionReg.inject().installShortcut !== 'function') throw new Error('section inject must expose installShortcut')
 if (typeof sectionReg.inject().stopService !== 'function') throw new Error('section inject must expose stopService')
 if (cardReg === undefined) throw new Error('settings.plugin.item never registered')
-if (cardReg.id !== CARD_ID || cardReg.order !== 30 || cardReg.locale !== 'settings.other.card') {
+if (cardReg.key !== 'ui-settings-other' || cardReg.locale !== 'settings.other.card') {
   throw new Error(`card options mismatch: ${JSON.stringify(cardReg)}`)
 }
 const sectionDict = dicts.find((d) => d.ns === 'settings.other')
@@ -451,7 +451,7 @@ const enCardKeys = Object.keys(cardDict.dict.en)
 if (JSON.stringify(zhCardKeys) !== JSON.stringify(enCardKeys)) {
   throw new Error(`zh/en key mismatch (card):\nzh: ${zhCardKeys}\nen: ${enCardKeys}`)
 }
-console.log(`apply contract OK: section id=other order=30 | card id=${CARD_ID} order=30 | dict keys = ${zhKeys.length} + ${zhCardKeys.length}`)
+console.log(`apply contract OK: section id=other order=30 | card key=ui-settings-other | dict keys = ${zhKeys.length} + ${zhCardKeys.length}`)
 
 if (!DOM_AVAILABLE) {
   console.log('\nclient DOM sections SKIPPED (jsdom not installed)')
