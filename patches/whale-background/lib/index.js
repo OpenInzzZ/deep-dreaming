@@ -12,16 +12,15 @@ function patchAssetPath(name) {
   return join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'ui-settings-other', 'assets', name)
 }
 
+export const inject = ['webServer']
+
 /** Cordis plugin entry: register the image route. */
 export function apply(ctx) {
-  const webServer = ctx.get('webServer')
-  if (webServer === undefined) return
-
   // Serve the whale-girl image via a dedicated route
   const pngPath = patchAssetPath('whale-girl-transparent.png')
   const png = readFileSync(pngPath)
-  
-  ctx.effect(() => webServer.register({
+
+  ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: '/whale-background.png',
     handler: (req, res) => {
