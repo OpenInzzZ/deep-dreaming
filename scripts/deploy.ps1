@@ -105,3 +105,14 @@ if ($failed -gt 0) { Write-Host "Deploy check FAILED ($failed broken link(s))." 
 Write-Host "Deploy check done ($checked reference(s) verified)." -ForegroundColor Green
 Write-Host "  - cordis.patch.yml entry changes hot-apply within seconds (no restart)." -ForegroundColor DarkGray
 Write-Host "  - Plugin SOURCE changes need a dsh web restart (restart-dsh.ps1); bundle/profile manifest changes too." -ForegroundColor DarkGray
+
+# 4. Patch the dsh CLI (npx cache) to add --clean startup support.
+#    Idempotent: already-patched files are skipped.
+$patchCli = Join-Path $dev 'scripts\patch-cli.ps1'
+if (Test-Path $patchCli) {
+    Write-Host ''
+    Write-Host '== CLI patch ==' -ForegroundColor Cyan
+    powershell -NoProfile -ExecutionPolicy Bypass -File $patchCli
+    Write-Host '  dsh web --clean   skip user/custom plugins (cordis.patch.yml layers)'
+    Write-Host '  dsh web --port N  already supported natively by the web app'
+}
