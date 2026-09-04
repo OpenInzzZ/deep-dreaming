@@ -3,15 +3,15 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File .\scripts\start-dsh.ps1
 #   powershell -ExecutionPolicy Bypass -File .\scripts\start-dsh.ps1 -Port 3080
 #   powershell -ExecutionPolicy Bypass -File .\scripts\start-dsh.ps1 -Force   # start even if the port is busy
-#   powershell -ExecutionPolicy Bypass -File .\scripts\start-dsh.ps1 -OpenBrowser  # also open the default browser
+#   powershell -ExecutionPolicy Bypass -File .\scripts\start-dsh.ps1 -OpenBrowser  # focus/open browser when already running
 #   powershell -ExecutionPolicy Bypass -File .\scripts\start-dsh.ps1 -Clean   # skip user/custom plugins
 #
 # Flow:
-#   1. already running? → exit silently (unless -Force)
+#   1. already running? → focus existing browser window (or open one), then exit (unless -Force)
 #   2. locate node.exe and the newest npx-cached dsh CLI entry
 #   3. auto-patch the CLI to add --clean support (idempotent, see Patch-Cli)
 #   4. build CLI args (--port, --clean, extra NodeArgs)
-#   5. start `node <bin> web` hidden, logs → $LogDir
+#   5. start `node <bin> web` hidden, logs → $LogDir (dsh web auto-opens the browser)
 #   6. poll the port until the service answers
 param(
     [int]$Port = 3080,
@@ -49,13 +49,6 @@ public static class DshWinFocus {
         }
     }
     return $found
-}
-
-function Open-Browser {
-    if (-not $OpenBrowser) { return }
-    if (Focus-DshWindow) { return }
-    Log "opening default browser: http://127.0.0.1:$Port"
-    Start-Process "http://127.0.0.1:$Port"
 }
 
 # --------------------------------------------------------------------
@@ -183,7 +176,14 @@ Log "port: $Port  force: $([bool]$Force)  openBrowser: $([bool]$OpenBrowser)  cl
 $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($conn -and -not $Force) {
     Log "dsh web is already running (PID $($conn.OwningProcess) on port $Port); nothing to do."
-    Open-Browser
+    # dsh web is already running so it won't auto-open; focus the existing
+    # browser window, or open a new tab if the window can't be found.
+    if ($OpenBrowser) {
+        if (-not (Focus-DshWindow)) {
+            Log "opening default browser: http://127.0.0.1:$Port"
+            Start-Process "http://127.0.0.1:$Port"
+        }
+    }
     exit 0
 }
 
@@ -242,8 +242,7 @@ for ($i = 0; $i -lt 60; $i++) {
     try {
         $probe = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/" -Method Get -TimeoutSec 3 -UseBasicParsing
         if ($probe.StatusCode -eq 200) {
-            Log "service ready after ~$([int](($i + 1) * 2))s"
-            Open-Browser
+            Log "service ready after ~$([int](($i + 1) * 2))s (dsh web auto-opens the browser)"
             exit 0
         }
     } catch { }
