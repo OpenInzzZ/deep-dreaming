@@ -1,85 +1,71 @@
-// dsh-project-memory: documented cross-session project memory.
+// dsh-project-memory: lightweight auto-recall / auto-review bridge to Memorix.
 //
-// What this plugin does:
-//  1. Gives every session three tools — project_memory_save, project_memory_search,
-//     project_memory_list — that read/write Markdown notes (YAML front matter with
-//     title / category / usage_scenario / keywords) under <project>/.dsh-memory/.
-//  2. Adds a prompt section telling the agent to recall memories before starting
-//     substantial work and to record durable knowledge when a task produced it.
-//  3. Optionally (autoReview) sends a short memory-review followup after every
-//     completed user turn, so the agent itself judges whether this session's work
-//     is worth remembering — notes persist on disk and are visible to every later
-//     session of the same project, which is what makes memory cross-session.
-//  4. Memory hygiene (autoDedupe): every save is followed by a similarity scan
-//     that merges duplicate/similar notes (title or content similarity above a
-//     threshold), keeping the most used one and absorbing the rest.
-//  5. Maturity (trackUsage): each save/update re-confirms a note and each search
-//     hit increments its `usage_count`; the derived maturity level (new →
-//     developing → mature → authoritative) tells later sessions how much a
-//     memory has been exercised and therefore how much its content can be
-//     trusted.
+// This plugin NO LONGER provides its own memory tools (project_memory_save /
+// search / list). Those tools are now provided by Memorix through DSH's MCP
+// client (mcp__memorix__memorix_search, mcp__memorix__memorix_store, etc.). This plugin's
+// remaining job is:
 //
-// The project root is the owning session's header cwd (the workspace the user
-// attached the session to). Subagent sessions are never reviewed, and tools
-// called by a subagent write to that subagent's own project root.
+//  1. Inject a system-prompt section telling the agent that Memorix manages
+//     cross-session project memory and when to use its tools.
+//  2. (autoRecall) On the first real user message of a reviewable session,
+//     queue one recall followup so the agent loads relevant memories through
+//     mcp__memorix__memorix_search before starting substantial work.
+//  3. (autoReview) After every completed user turn, send a short memory-review
+//     followup so the agent itself judges whether durable knowledge was
+//     produced and, if so, saves it through mcp__memorix__memorix_store.
+//
+// The actual storage backend (SQLite + Orama search), deduplication, maturity
+// tracking, semantic search, Git Memory, and Reasoning Memory are all handled
+// by Memorix. This plugin is only the "prompt oracle" that tells the agent
+// when to use those tools.
+//
+// Subagent sessions are never reviewed; the project root is the owning
+// session's header cwd (the workspace the user attached the session to).
 
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import z from "@deepseek-ai/schemastery";
-import { defineTool } from "@deepseek-ai/dsh-tools";
-import {
-	MAX_CONTENT_CHARS,
-	MAX_KEYWORDS,
-	MAX_SCENARIOS,
-	MAX_TITLE_CHARS,
-	bumpUsage,
-	listNotes,
-	mergeSimilarNotes,
-	saveNote,
-	searchNotes
-} from "./store.js";
 
 const name = "project-memory";
-const inject = ["tools", "systemPrompt", "agents"];
-
-const DEFAULT_MEMORY_DIR_NAME = ".dsh-memory";
+const inject = ["systemPrompt", "agents"];
 
 /**
- * Entry config schema. The Cordis loader validates the raw config against it
- * (out-of-range values fail loudly at load time instead of being silently
- * clamped) and fills the defaults below, so `apply` receives a complete,
- * validated config and never re-derives defaults itself.
+ * Entry config schema. Only the two behavioural toggles remain; all
+ * storage-layer options (memoryDirName, autoDedupe, mergeContentThreshold,
+ * trackUsage) are now owned by Memorix's own config (memorix.toml /
+ * ~/.memorix/config.toml).
  */
 export const Config = z.object({
-	/** Session-start memory recall: before the first real user turn, queue a
-	 * recall followup so the agent loads relevant memories first (renders as
-	 * the collapsible "记忆 · 检索" card). */
-	autoRecall: z.boolean().default(true),
-	/** Send a short memory-review followup after every completed user turn. */
-	autoReview: z.boolean().default(true),
-	/** Directory name of the memory store under each project root. */
-	memoryDirName: z.string().default(DEFAULT_MEMORY_DIR_NAME),
-	/** Run the duplicate/similar merge scan after every save. */
-	autoDedupe: z.boolean().default(true),
-	/** Content-similarity threshold (0.1..0.95) for the auto-merge scan. */
-	mergeContentThreshold: z.number().min(0.1).max(0.95).default(0.55),
-	/** Count search hits (and save/update confirmations) as note usage. */
-	trackUsage: z.boolean().default(true)
+  /** Session-start memory recall: before the first real user turn, queue a
+   * recall followup so the agent loads relevant memories first (renders as
+   * the collapsible "记忆 · 检索" card). */
+  autoRecall: z.boolean().default(true),
+  /** Send a short memory-review followup after every completed user turn. */
+  autoReview: z.boolean().default(true),
 });
 
-/** One short line of guidance shown in the system prompt of every session. */
+/**
+ * Guidance injected into every session's system prompt. Teaches the agent
+ * that Memorix manages cross-session project memory and when to use its
+ * MCP tools (mcp__memorix__memorix_search, mcp__memorix__memorix_store, etc.).
+ *
+ * The section is deliberately compact: Memorix ships its own detailed skills
+ * and the `memorix setup --agent dsh --global` command writes additional
+ * guidance into AGENTS.md. This section keeps the agent aware of the memory
+ * phases without duplicating the full skill.
+ */
 const GUIDANCE_SECTION = `\
 <project_memory>
-本项目维护一份跨会话的项目记忆库:工作区根目录下的 .dsh-memory/ 目录,以 Markdown 笔记(带 keywords / usage_scenario 元数据)保存过往会话沉淀的知识。
+本项目通过 Memorix (MCP) 维护一份跨会话的项目记忆库。Memorix 工具以 mcp__memorix__ 前缀暴露:
 
-- 会话开始阶段(memory search):会收到一条「项目记忆召回」提示,先调用 project_memory_search 检索与本任务相关的既有记忆(项目约定、关键决策、踩坑经验、接口与数据结构事实等),遵循既有约定,避免重复探索。
-- 会话结束阶段(memory save/update):完成产生确定性知识的工作后,调用 project_memory_save 保存或更新;同一主题已有笔记时更新而非重复新建;不确定时倾向记录,保持短小、准确、可脱离上下文独立理解。
+- 会话开始阶段(memory search):会收到一条「项目记忆召回」提示,先调用 mcp__memorix__memorix_search 检索与本任务相关的既有记忆(项目约定、关键决策、踩坑经验、接口与数据结构事实等),遵循既有约定,避免重复探索。
+- 会话结束阶段(memory save/update):完成产生确定性知识的工作后,调用 mcp__memorix__memorix_store 保存;同一主题已有记录时更新而非重复新建;不确定时倾向记录,保持短小、准确、可脱离上下文独立理解。
 - 只记录事实与结论,不记录过程性对话。
-- 每条记忆带有成熟度(usage_count 决定:new → developing → mature → authoritative):被保存/更新确认、被检索使用的次数越多,成熟度越高,内容越值得采信;但任何记忆都可能过时,采信前仍应结合当前代码与事实核对。检索结果中成熟度高的记忆优先参考。
+- 需要查看记忆详情时使用 mcp__memorix__memorix_detail,需要任务上下文摘要时使用 mcp__memorix__memorix_project_context。
 </project_memory>`;
 
 /** The session-start memory recall followup: load relevant memories first. */
 const RECALL_PROMPT = `\
-[项目记忆召回 · memory search] 会话开始,请先调用 project_memory_search 检索与本任务/本项目相关的既有记忆(项目约定、关键决策、踩坑经验、接口或数据结构事实等),遵循既有约定、避免重复探索;完成检索后再开始工作。若无相关记忆,检索结果为空,直接开始即可。`;
+[项目记忆召回 · memory search] 会话开始,请先调用 mcp__memorix__memorix_search 检索与本任务/本项目相关的既有记忆(项目约定、关键决策、踩坑经验、接口或数据结构事实等),遵循既有约定、避免重复探索;完成检索后再开始工作。若无相关记忆,检索结果为空,直接开始即可。`;
 
 /** The auto-review followup message text (session-end memory save/update).
  * Deliberately terse and reply-guiding: the review prompt is folded into a
@@ -87,283 +73,7 @@ const RECALL_PROMPT = `\
  * the save result already renders as its own collapsible memory card, so the
  * reply must not restate it. */
 const REVIEW_PROMPT = `\
-[项目记忆回顾 · memory save/update] 判断本轮是否产生值得跨会话保留的项目知识。若有,调用 project_memory_save 保存或更新(同主题更新,否则新建),保存后请勿复述结果;若没有,请仅回复:无需记录。`;
-
-/** The owning session's project root (its header cwd). */
-function projectRoot(exec) {
-	const cwd = exec.agent?.session?.header?.cwd;
-	if (typeof cwd !== "string" || cwd.length === 0) {
-		throw new Error("project memory requires an owning agent session with a workspace (session header cwd)");
-	}
-	return cwd;
-}
-
-/** Fail a cancelled tool call loudly before any disk work, mirroring the
- * official fs seam's `if (signal?.aborted) throw …` convention
- * (dsh-fs-local) and tool-bash-persistent's `exec.signal.throwIfAborted()`. */
-function throwIfAborted(signal) {
-	if (signal?.aborted) {
-		throw new DOMException("The operation was aborted", "AbortError");
-	}
-}
-
-/** Bound one integer argument with a default and a hard cap. */
-function boundLimit(value, fallback, max) {
-	if (value === void 0 || value === null) return fallback;
-	const parsed = Math.trunc(Number(value));
-	if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-	return Math.min(parsed, max);
-}
-
-/** Render one search/list hit as a readable text block. */
-function hitLines(item) {
-	const lines = [
-		`- ${item.title}  [${item.category}]`
-	];
-	if (item.score !== void 0) lines[0] += `  (score ${item.score})`;
-	lines[0] += `  — ${item.maturity} (used ${item.usage_count})`;
-	if (item.keywords.length > 0) lines.push(`  keywords: ${item.keywords.join("、")}`);
-	if (typeof item.updated_at === "string" && item.updated_at.length > 0) lines.push(`  updated: ${item.updated_at}`);
-	if (typeof item.snippet === "string" && item.snippet.length > 0) lines.push(`  ${item.snippet}`);
-	return lines.join("\n");
-}
-
-function textResult(text) {
-	return [{ type: "text", text }];
-}
-
-/** Register the three project-memory tools.
- * @param options.autoDedupe - run the similarity merge after every save.
- * @param options.trackUsage - count search hits as usage (maturity).
- * @param options.mergeContentThreshold - content-similarity merge threshold.
- */
-function registerTools(ctx, memoryDirName, { autoDedupe, trackUsage, mergeContentThreshold }) {
-	ctx.tools.register(defineTool({
-		name: "project_memory_save",
-		description: `Save or update a durable project memory note (Markdown with YAML front matter) under <project>/.dsh-memory/ so future sessions can recall it. Use it when this session produced durable, reusable project knowledge — an important decision, a convention/specification, a pitfall, or a fact about the codebase/interfaces that a later session should know. Keep content concise, factual, and self-contained (readable without this session's context). If a note about the same topic already exists (check with project_memory_search), update it instead of creating a duplicate. Saving re-confirms a note (its usage count and maturity grow); after saving, duplicate/similar notes are merged automatically.`,
-		parameters: {
-			title: {
-				type: "string",
-				required: true,
-				description: `Short, specific topic name (becomes the file name; max ${MAX_TITLE_CHARS} chars), e.g. "设备导入模板表头必填标识机制".`
-			},
-			content: {
-				type: "string",
-				required: true,
-				description: `The note body: the fact/conclusion/rule itself, concise and self-contained (max ${MAX_CONTENT_CHARS} chars).`
-			},
-			category: {
-				type: "string",
-				description: `Optional category folder name, e.g. project_introduction / development_code_specification / common_pitfalls_experience / project_tech_stack. Defaults to "general".`
-			},
-			keywords: {
-				type: "array",
-				description: `Search keywords (max ${MAX_KEYWORDS}), used by project_memory_search. 3-8 short terms work best, e.g. ["全限定类名", "import", "代码风格"].`,
-				items: { type: "string", description: "One keyword." }
-			},
-			usage_scenario: {
-				type: "array",
-				description: `Usage scenarios (max ${MAX_SCENARIOS}): when this memory is relevant, e.g. "代码审查时检查是否存在冗余全限定类名".`,
-				items: { type: "string", description: "One usage scenario." }
-			}
-		},
-		output: {
-			schema: {
-				type: "object",
-				additionalProperties: false,
-				properties: {
-					created: { type: "boolean", required: true },
-					title: { type: "string", required: true },
-					category: { type: "string", required: true },
-					keywords: { type: "array", required: true, items: { type: "string" } },
-					usage_scenario: { type: "array", required: true, items: { type: "string" } },
-					usage_count: { type: "integer", required: true },
-					maturity: { type: "string", required: true },
-					path: { type: "string", required: true },
-					merged: {
-						type: "array",
-						required: true,
-						items: {
-							type: "object",
-							additionalProperties: false,
-							properties: {
-								kept: { type: "string", required: true },
-								removed: { type: "string", required: true },
-								removed_path: { type: "string", required: true }
-							}
-						}
-					}
-				}
-			},
-			render: (_args, value) => {
-				const head = `Project memory ${value.created ? "saved" : "updated"}: ${value.title} [${value.category}] (${value.maturity}, used ${value.usage_count}) -> ${value.path}`;
-				const merges = value.merged.map((item) => `  merged "${item.removed}" into "${item.kept}"`).join("\n");
-				return textResult(merges.length > 0 ? `${head}\n${merges}` : head);
-			}
-		},
-		execute: async (args, exec) => {
-			throwIfAborted(exec.signal);
-			const root = projectRoot(exec);
-			const saved = await saveNote(root, memoryDirName, {
-				title: args.title,
-				content: args.content,
-				category: args.category,
-				keywords: args.keywords,
-				usage_scenario: args.usage_scenario
-			});
-			throwIfAborted(exec.signal);
-			const merged = autoDedupe
-				? await mergeSimilarNotes(root, memoryDirName, { contentSimilarity: mergeContentThreshold })
-				: [];
-			return {
-				created: saved.created,
-				title: saved.title,
-				category: saved.category,
-				keywords: saved.keywords,
-				usage_scenario: saved.usageScenario,
-				usage_count: saved.usageCount,
-				maturity: saved.maturity,
-				path: saved.path,
-				merged: merged.map((item) => ({
-					kept: item.kept,
-					removed: item.removed,
-					removed_path: item.removedPath
-				}))
-			};
-		},
-		presentCall: (args) => ({
-			card: "generic",
-			title: "Save project memory",
-			kind: "other",
-			rawInput: args
-		})
-	}));
-
-	ctx.tools.register(defineTool({
-		name: "project_memory_search",
-		description: "Search this project's .dsh-memory/ notes written by past sessions (matches keywords, title, usage scenarios, and content). Call this BEFORE starting substantial work to recall relevant prior decisions, conventions, pitfalls, and facts. Pass a task-relevant query (Chinese or English); omit the query to browse the most recently updated notes. Returns top matches with snippets, ranked by relevance; each hit carries its maturity (new/developing/mature/authoritative) — prefer mature notes for facts, but verify against current code. Each search hit counts as a usage, growing the note's maturity.",
-		parameters: {
-			query: {
-				type: "string",
-				description: "Free-text query describing what to recall, e.g. \"设备导入模板 必填校验\"."
-			},
-			category: {
-				type: "string",
-				description: "Optional category folder to restrict the search to (e.g. development_code_specification)."
-			},
-			limit: {
-				type: "integer",
-				description: "Max results (default 10, max 50)."
-			}
-		},
-		output: {
-			schema: {
-				type: "object",
-				additionalProperties: false,
-				properties: {
-					total: { type: "integer", required: true },
-					items: {
-						type: "array",
-						required: true,
-						items: {
-							type: "object",
-							additionalProperties: false,
-							properties: {
-								title: { type: "string", required: true },
-								category: { type: "string", required: true },
-								keywords: { type: "array", required: true, items: { type: "string" } },
-								usage_scenario: { type: "array", required: true, items: { type: "string" } },
-								usage_count: { type: "integer", required: true },
-								maturity: { type: "string", required: true },
-								updated_at: { type: "string", required: true },
-								score: { type: "integer", required: true },
-								snippet: { type: "string", required: true },
-								path: { type: "string", required: true }
-							}
-						}
-					}
-				}
-			},
-			render: (_args, value) => {
-				if (value.items.length === 0) return textResult("No project memories found.");
-				return textResult(value.items.map(hitLines).join("\n"));
-			}
-		},
-		execute: async (args, exec) => {
-			throwIfAborted(exec.signal);
-			const root = projectRoot(exec);
-			const result = await searchNotes(root, memoryDirName, {
-				query: args.query,
-				category: args.category,
-				limit: boundLimit(args.limit, 10, 50)
-			});
-			if (trackUsage) {
-				// Count each hit as a usage; best-effort, never blocks the result.
-				for (const item of result.items) bumpUsage(root, memoryDirName, item.path);
-			}
-			return result;
-		},
-		presentCall: (args) => ({
-			card: "generic",
-			title: "Search project memory",
-			kind: "other",
-			rawInput: args
-		})
-	}));
-
-	ctx.tools.register(defineTool({
-		name: "project_memory_list",
-		description: "List this project's .dsh-memory/ notes (titles, categories, keywords, maturity, last-updated time) without their full content. Use it to browse what past sessions recorded, optionally filtered by category.",
-		parameters: {
-			category: {
-				type: "string",
-				description: "Optional category folder to restrict the listing to."
-			}
-		},
-		output: {
-			schema: {
-				type: "object",
-				additionalProperties: false,
-				properties: {
-					total: { type: "integer", required: true },
-					items: {
-						type: "array",
-						required: true,
-						items: {
-							type: "object",
-							additionalProperties: false,
-							properties: {
-								title: { type: "string", required: true },
-								category: { type: "string", required: true },
-								keywords: { type: "array", required: true, items: { type: "string" } },
-								usage_scenario: { type: "array", required: true, items: { type: "string" } },
-								usage_count: { type: "integer", required: true },
-								maturity: { type: "string", required: true },
-								updated_at: { type: "string", required: true },
-								path: { type: "string", required: true }
-							}
-						}
-					}
-				}
-			},
-			render: (_args, value) => {
-				if (value.items.length === 0) return textResult("No project memories recorded yet.");
-				return textResult(value.items.map(hitLines).join("\n"));
-			}
-		},
-		execute: async (args, exec) => {
-			throwIfAborted(exec.signal);
-			const root = projectRoot(exec);
-			return listNotes(root, memoryDirName, { category: args.category });
-		},
-		presentCall: (args) => ({
-			card: "generic",
-			title: "List project memory",
-			kind: "other",
-			rawInput: args
-		})
-	}));
-}
+[项目记忆回顾 · memory save/update] 判断本轮是否产生值得跨会话保留的项目知识。若有,直接调用 mcp__memorix__memorix_store 保存或更新(同主题更新,否则新建),不要先输出分析文字,保存后也不要复述结果;若没有,直接结束本轮,不输出任何内容。`;
 
 /** Whether an agent is a reviewable root session (has a project, not a subagent).
  * Subagent children are marked by the session header's `origin === 'subagent'`
@@ -371,63 +81,60 @@ function registerTools(ctx, memoryDirName, { autoDedupe, trackUsage, mergeConten
  * field — `parentSession` only records fork/seed lineage and does not
  * disqualify a session from review. */
 function reviewable(agent) {
-	const header = agent.session?.header;
-	if (header === void 0) return false;
-	if (header.origin === "subagent") return false;
-	return typeof header.cwd === "string" && header.cwd.length > 0;
+  const header = agent.session?.header;
+  if (header === void 0) return false;
+  if (header.origin === "subagent") return false;
+  return typeof header.cwd === "string" && header.cwd.length > 0;
 }
 
 /** Install the session-end memory review: after a completed user turn, the
  * agent itself judges whether the work is worth remembering. */
 function installReview(ctx, autoReview) {
-	if (!autoReview) return;
-	const states = new Map();
-	const stateFor = (agent) => {
-		let state = states.get(agent);
-		if (state === void 0) {
-			state = { pending: false, reviewing: false };
-			states.set(agent, state);
-		}
-		return state;
-	};
-	ctx.on("agent/disposed", ({ agent }) => {
-		states.delete(agent);
-	});
-	ctx.on("session/event", (session, event) => {
-		const agent = ctx.agents.get(session.id);
-		if (agent === void 0 || agent.session !== session) return;
-		const state = stateFor(agent);
-		if (event.type === "user/message") {
-			// The review followup itself is a user/message with kind "memory";
-			// it must not arm another review. The event data IS the message
-			// object (source sits on `data.source`, not `data.message.source`).
-			if (event.data.source?.kind !== "memory") state.pending = true;
-		} else if (event.type === "turn/end") {
-			state.reviewing = false;
-			// Only review work that finished cleanly; aborted/error/max-tokens
-			// turns leave the agent in an unreliable state.
-			if (event.data.reason?.kind !== "completed") state.pending = false;
-		}
-	});
-	ctx.on("agent/status", ({ agent, status }) => {
-		if (status !== "idle") return;
-		const state = stateFor(agent);
-		if (!state.pending || state.reviewing || !reviewable(agent)) return;
-		state.pending = false;
-		state.reviewing = true;
-		try {
-			agent.followup(createUserMessage({
-				content: [{ type: "text", text: REVIEW_PROMPT }],
-				// `form: "notice"` + `summary` render this followup as the
-				// official collapsed context-notice row (one-line summary,
-				// expand to read the full prompt) instead of a plain bubble.
-				source: { kind: "memory", review: true, form: "notice", summary: "项目记忆回顾 · memory save/update" }
-			}));
-		} catch (error) {
-			ctx.logger.warn(`project-memory: could not queue the memory review for agent "${agent.id}": ${String(error)}`);
-			state.reviewing = false;
-		}
-	});
+  if (!autoReview) return;
+  const states = new Map();
+  const stateFor = (agent) => {
+    let state = states.get(agent);
+    if (state === void 0) {
+      state = { pending: false, reviewing: false };
+      states.set(agent, state);
+    }
+    return state;
+  };
+  ctx.on("agent/disposed", ({ agent }) => {
+    states.delete(agent);
+  });
+  ctx.on("session/event", (session, event) => {
+    const agent = ctx.agents.get(session.id);
+    if (agent === void 0 || agent.session !== session) return;
+    const state = stateFor(agent);
+    if (event.type === "user/message") {
+      // The review followup itself is a user/message with kind "memory";
+      // it must not arm another review. The event data IS the message
+      // object (source sits on `data.source`, not `data.message.source`).
+      if (event.data.source?.kind !== "memory") state.pending = true;
+    } else if (event.type === "turn/end") {
+      state.reviewing = false;
+      // Only review work that finished cleanly; aborted/error/max-tokens
+      // turns leave the agent in an unreliable state.
+      if (event.data.reason?.kind !== "completed") state.pending = false;
+    }
+  });
+  ctx.on("agent/status", ({ agent, status }) => {
+    if (status !== "idle") return;
+    const state = stateFor(agent);
+    if (!state.pending || state.reviewing || !reviewable(agent)) return;
+    state.pending = false;
+    state.reviewing = true;
+    try {
+      agent.followup(createUserMessage({
+        content: [{ type: "text", text: REVIEW_PROMPT }],
+        source: { kind: "memory", review: true, form: "notice", summary: "项目记忆回顾 · memory save/update" }
+      }));
+    } catch (error) {
+      ctx.logger.warn(`project-memory: could not queue the memory review for agent "${agent.id}": ${String(error)}`);
+      state.reviewing = false;
+    }
+  });
 }
 
 /** Install the session-start memory recall: on the first real user message of
@@ -435,61 +142,46 @@ function installReview(ctx, autoReview) {
  * memories before substantial work (the search call renders as the
  * collapsible "记忆 · 检索" memory card). Fires at most once per session. */
 function installRecall(ctx, autoRecall) {
-	if (!autoRecall) return;
-	const recalled = new Set();
-	ctx.on("agent/disposed", ({ agent }) => {
-		recalled.delete(agent);
-	});
-	ctx.on("session/event", (session, event) => {
-		const agent = ctx.agents.get(session.id);
-		if (agent === void 0 || agent.session !== session) return;
-		if (recalled.has(agent)) return;
-		if (event.type !== "user/message") return;
-		// Our own followups (recall/review) are user/message with kind "memory";
-		// they must not arm the recall. The event data IS the message object.
-		if (event.data.source?.kind === "memory") return;
-		if (!reviewable(agent)) return;
-		recalled.add(agent);
-		try {
-			agent.followup(createUserMessage({
-				content: [{ type: "text", text: RECALL_PROMPT }],
-				// `form: "notice"` + `summary` render this followup as the
-				// official collapsed context-notice row (one-line summary,
-				// expand to read the full prompt) instead of a plain bubble.
-				source: { kind: "memory", recall: true, form: "notice", summary: "项目记忆召回 · memory search" }
-			}));
-		} catch (error) {
-			ctx.logger.warn(`project-memory: could not queue the memory recall for agent "${agent.id}": ${String(error)}`);
-		}
-	});
+  if (!autoRecall) return;
+  const recalled = new Set();
+  ctx.on("agent/disposed", ({ agent }) => {
+    recalled.delete(agent);
+  });
+  ctx.on("session/event", (session, event) => {
+    const agent = ctx.agents.get(session.id);
+    if (agent === void 0 || agent.session !== session) return;
+    if (recalled.has(agent)) return;
+    if (event.type !== "user/message") return;
+    // Our own followups (recall/review) are user/message with kind "memory";
+    // they must not arm the recall. The event data IS the message object.
+    if (event.data.source?.kind === "memory") return;
+    if (!reviewable(agent)) return;
+    recalled.add(agent);
+    try {
+      agent.followup(createUserMessage({
+        content: [{ type: "text", text: RECALL_PROMPT }],
+        source: { kind: "memory", recall: true, form: "notice", summary: "项目记忆召回 · memory search" }
+      }));
+    } catch (error) {
+      ctx.logger.warn(`project-memory: could not queue the memory recall for agent "${agent.id}": ${String(error)}`);
+    }
+  });
 }
 
 /** Register the memory guidance prompt section visible in every session. */
 function installGuidance(ctx) {
-	ctx.systemPrompt.section({
-		name: "project-memory:guidance",
-		order: 60,
-		text: GUIDANCE_SECTION
-	});
+  ctx.systemPrompt.section({
+    name: "project-memory:guidance",
+    order: 60,
+    text: GUIDANCE_SECTION
+  });
 }
 
 function apply(ctx, config) {
-	// The Cordis loader validates `config` against the exported `Config` schema
-	// and fills its defaults, so it is already complete here. `config` may still
-	// be undefined when apply is called directly (bypassing the loader), in
-	// which case treat it as an empty object — no manual defaults, no clamping.
-	const {
-		autoRecall,
-		autoReview,
-		autoDedupe,
-		trackUsage,
-		memoryDirName,
-		mergeContentThreshold
-	} = config ?? {};
-	registerTools(ctx, memoryDirName, { autoDedupe, trackUsage, mergeContentThreshold });
-	installGuidance(ctx);
-	installRecall(ctx, autoRecall);
-	installReview(ctx, autoReview);
+  const { autoRecall, autoReview } = config ?? {};
+  installGuidance(ctx);
+  installRecall(ctx, autoRecall);
+  installReview(ctx, autoReview);
 }
 
 export { apply, inject, name };

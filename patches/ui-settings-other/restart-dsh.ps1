@@ -1,27 +1,65 @@
-# restart-dsh.ps1 — restart the running dsh web service (script-driven).
+﻿# restart-dsh.ps1 — restart the running dsh web service (script-driven).
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File .\scripts\restart-dsh.ps1            # restart
 #   powershell -ExecutionPolicy Bypass -File .\scripts\restart-dsh.ps1 -DryRun    # plan only
 #   powershell -ExecutionPolicy Bypass -File .\scripts\restart-dsh.ps1 -Port 3080 -SettleSeconds 2
 #   powershell -ExecutionPolicy Bypass -File .\scripts\restart-dsh.ps1 -Clean     # restart with --clean
+#   powershell -ExecutionPolicy Bypass -File .\scripts\restart-dsh.ps1 -OpenBrowser # open browser after restart
+#
+# Port selection: when -Port is 0 (default), the script scans 3080-3100 and
+# picks the first port that passes a real bind test (TcpListener start/stop),
+# which catches TIME_WAIT ports that netstat would report as free. The old
+# process's port is given a head start — the script first tries to reuse it
+# (the default), falling back to the pool only when the old port is truly
+# unavailable.
 #
 # Flow: find the process listening on $Port -> recover its exact command line ->
 # settle (let any in-flight RPC response reach the browser) -> stop the old
-# process -> start a replacement with the SAME command line, logs redirected to
-# $LogDir -> poll the port until the service answers.
+# process -> pick a port (reuse the old one or fall back to the pool) -> start a
+# replacement with the updated command line, logs redirected to $LogDir ->
+# poll the port until the service answers -> optionally open the browser.
+#
 # If nothing listens on $Port, there is nothing to restart: the script falls
 # back to start-dsh.ps1 (same directory) so a "restart" is idempotent —
 # running -> restart, not running -> start.
 param(
-    [int]$Port = 3080,
+    [int]$Port = 0,
     [int]$SettleSeconds = 2,
     [switch]$DryRun,
     [switch]$Clean,
+    [switch]$OpenBrowser,
     [string]$LogDir = (Join-Path $env:USERPROFILE '.dsh\logs')
 )
 $ErrorActionPreference = 'Stop'
 
 function Log($m) { Write-Host $m }
+
+# --------------------------------------------------------------------
+# Port pool: real bind test (TcpListener) that catches TIME_WAIT ports
+# which netstat would report as free. Scans 3080-3100 and returns the
+# first truly available port.
+# --------------------------------------------------------------------
+$POOL_START = 3080
+$POOL_END   = 3100
+
+function Test-PortAvailable([int]$port) {
+    try {
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $port)
+        $listener.Start()
+        $listener.Stop()
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Find-AvailablePort([int]$prefer = 0) {
+    if ($prefer -ne 0 -and (Test-PortAvailable $prefer)) { return $prefer }
+    for ($p = $POOL_START; $p -le $POOL_END; $p++) {
+        if (Test-PortAvailable $p) { return $p }
+    }
+    throw "no available port in range $POOL_START-$POOL_END"
+}
 
 # --------------------------------------------------------------------
 # Auto-patch the dsh CLI to add --clean support (idempotent).
@@ -111,27 +149,41 @@ function Patch-Cli($binJs, $dshLib) {
 }
 
 Log '== dsh web restart =='
-Log ("port: {0}  settle: {1}s  dry-run: {2}" -f $Port, $SettleSeconds, [bool]$DryRun)
+Log ("settle: {0}s  dry-run: {1}  clean: {2}  openBrowser: {3}" -f $SettleSeconds, [bool]$DryRun, [bool]$Clean, [bool]$OpenBrowser)
 
-# --- 1. find the process listening on the port --------------------------------
-$conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+# --- 1. find the old process --------------------------------------------------
+# When -Port is 0, scan the pool for a listening process; when explicit, target
+# that exact port.
+$oldPort = 0
+if ($Port -ne 0) {
+    $oldPort = $Port
+    $conn = Get-NetTCPConnection -LocalPort $oldPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+} else {
+    for ($p = $POOL_START; $p -le $POOL_END; $p++) {
+        $conn = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($conn) { $oldPort = $p; break }
+    }
+}
 if (-not $conn) {
-    Log "no process is listening on port $Port; nothing to restart - starting instead"
+    $fallbackMsg = if ($Port -ne 0) { "no process is listening on port $Port" } else { "no dsh process found on ports $POOL_START-$POOL_END" }
+    Log "$fallbackMsg; nothing to restart - starting instead"
     $startScript = Join-Path $PSScriptRoot 'start-dsh.ps1'
     if (-not (Test-Path $startScript)) {
-        throw "no process is listening on port $Port and start-dsh.ps1 was not found next to this script"
+        throw "$fallbackMsg and start-dsh.ps1 was not found next to this script"
     }
     if ($DryRun) { Log 'DRY-RUN: would delegate to start-dsh.ps1 (service not running); no changes made.'; exit 0 }
     Log "delegating to: $startScript"
-    $startArgs = @('-Port', $Port, '-LogDir', $LogDir)
+    $startArgs = @('-LogDir', $LogDir)
+    if ($Port -ne 0) { $startArgs += '-Port'; $startArgs += [string]$Port }
     if ($Clean) { $startArgs += '-Clean' }
+    if ($OpenBrowser) { $startArgs += '-OpenBrowser' }
     & $startScript @startArgs
     exit $LASTEXITCODE
 }
 $oldPid = $conn.OwningProcess
 $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$oldPid"
 if (-not $proc) { throw "process $oldPid disappeared while inspecting" }
-Log "found listener: PID $oldPid"
+Log "found listener: PID $oldPid on port $oldPort"
 Log "command line: $($proc.CommandLine)"
 
 # --- 2. recover the exact command line (Windows argv tokenizer) -----------------
@@ -196,15 +248,34 @@ Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue
 try { Wait-Process -Id $oldPid -Timeout 10 -ErrorAction Stop | Out-Null } catch { }
 Log 'old process stopped'
 
-# --- 5.5 wait for the port to be released ---------------------------------------
-for ($i = 0; $i -lt 40; $i++) {
-    $still = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-    if (-not $still) { break }
-    Start-Sleep -Milliseconds 500
+# --- 5.5. pick a new port: prefer the old one, fall back to the pool ----------
+# The old port may still be in TIME_WAIT even though netstat shows it free;
+# Test-PortAvailable catches that with a real bind test.
+$newPort = Find-AvailablePort -prefer $oldPort
+if ($newPort -ne $oldPort) {
+    Log "old port $oldPort is unavailable; selected $newPort from pool"
+    # Rewrite the recovered args: drop any existing --port <N> pair, then
+    # append the new port.
+    $newRest = @()
+    $skipNext = $false
+    foreach ($arg in $rest) {
+        if ($skipNext) { $skipNext = $false; continue }
+        if ($arg -eq '--port') { $skipNext = $true; continue }
+        $newRest += $arg
+    }
+    $newRest += '--port'
+    $newRest += [string]$newPort
+    $rest = $newRest
+} else {
+    Log "old port $oldPort is still available; reusing it"
+    # If the old process didn't have --port, the default is 3080 —
+    # make it explicit so the pool is unambiguous.
+    if ($rest -notcontains '--port') {
+        $rest += '--port'
+        $rest += [string]$newPort
+    }
 }
-if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
-    throw "port $Port still in use after stopping PID $oldPid; giving up"
-}
+Log "replacement: $exe $($rest -join ' ')"
 
 # --- 6. start the replacement with logs ----------------------------------------
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
@@ -225,9 +296,13 @@ Log "logs: $outLog / $errLog"
 for ($i = 0; $i -lt 60; $i++) {
     Start-Sleep -Seconds 2
     try {
-        $probe = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/" -Method Get -TimeoutSec 3 -UseBasicParsing
+        $probe = Invoke-WebRequest -Uri "http://127.0.0.1:$newPort/" -Method Get -TimeoutSec 3 -UseBasicParsing
         if ($probe.StatusCode -eq 200) {
             Log "service ready after ~$([int](($i + 1) * 2))s"
+            if ($OpenBrowser) {
+                Log "opening browser: http://127.0.0.1:$newPort"
+                Start-Process "http://127.0.0.1:$newPort"
+            }
             exit 0
         }
     } catch { }

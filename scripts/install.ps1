@@ -9,10 +9,12 @@
 # Optional:
 #   -Profile <name>     profile to install into (default: web)
 #   -SkipMemoryBundle   skip the dsh-project-memory pnpm/bundles step
+#   -SkipMemorix        skip the Memorix global install + dsh setup step
 #   -Force              overwrite existing junctions/entries (default: keep)
 param(
     [string]$Profile = 'web',
     [switch]$SkipMemoryBundle,
+    [switch]$SkipMemorix,
     [switch]$Force
 )
 $ErrorActionPreference = 'Stop'
@@ -109,6 +111,59 @@ if (-not $SkipMemoryBundle) {
         }
     } else {
         Write-Host '  [OK] dsh-project-memory already in dsh.profile.bundles'
+    }
+}
+
+# --- 3.5. Memorix MCP memory (idempotent: skips if already installed) ---------
+if (-not $SkipMemorix) {
+    Write-Host ''
+    Write-Host '== Memorix ==' -ForegroundColor Cyan
+    $memorixInstalled = $false
+    try {
+        $memorixVersion = (& memorix --version 2>&1).Trim()
+        if ($LASTEXITCODE -eq 0 -and $memorixVersion -match '\d+\.\d+\.\d+') {
+            Write-Host "  [OK] memorix $memorixVersion already installed"
+            $memorixInstalled = $true
+        }
+    } catch { }
+    if (-not $memorixInstalled) {
+        Write-Host '  [..] installing memorix globally...'
+        try {
+            npm install -g memorix 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                $memorixVersion = (& memorix --version 2>&1).Trim()
+                Write-Host "  [OK] memorix $memorixVersion installed"
+                $memorixInstalled = $true
+            } else {
+                Write-Host '  [WARN] npm install failed; run manually: npm install -g memorix' -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host '  [WARN] npm install failed; run manually: npm install -g memorix' -ForegroundColor Yellow
+        }
+    }
+    if ($memorixInstalled) {
+        $dshPatch = Join-Path $dshHome 'cordis.patch.yml'
+        $alreadySetup = $false
+        if (Test-Path $dshPatch) {
+            $content = Get-Content $dshPatch -Raw
+            if ($content -match 'memory-memorix') {
+                Write-Host '  [OK] memorix setup --agent dsh already applied'
+                $alreadySetup = $true
+            }
+        }
+        if (-not $alreadySetup) {
+            Write-Host '  [..] running memorix setup --agent dsh --global...'
+            try {
+                & memorix setup --agent dsh --global 2>&1 | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host '  [OK] memorix setup --agent dsh --global done'
+                } else {
+                    Write-Host '  [WARN] memorix setup failed; run manually: memorix setup --agent dsh --global' -ForegroundColor Yellow
+                }
+            } catch {
+                Write-Host '  [WARN] memorix setup failed; run manually: memorix setup --agent dsh --global' -ForegroundColor Yellow
+            }
+        }
     }
 }
 

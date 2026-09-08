@@ -1,7 +1,7 @@
 {
   "name": "dsh-project-memory",
-  "version": "0.1.0",
-  "description": "Documented cross-session project memory for dsh: the agent records durable project knowledge (decisions, conventions, pitfalls, facts) into .dsh-memory/ markdown notes and recalls them in later sessions.",
+  "version": "0.2.0",
+  "description": "Lightweight auto-recall / auto-review bridge to Memorix: injects prompt guidance and session-start recall / session-end review followups that tell the agent when to use mcp__memorix__* tools. Actual storage, search, and deduplication are handled by Memorix.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -30,7 +30,6 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "license": "MIT"

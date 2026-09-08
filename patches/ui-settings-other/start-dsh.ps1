@@ -1,23 +1,36 @@
-# start-dsh.ps1 — silently start the dsh web service if it is not already running.
+﻿# start-dsh.ps1 — silently start the dsh web service if it is not already running.
 # Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File .\scripts\start-dsh.ps1
 #   powershell -ExecutionPolicy Bypass -File .\scripts\start-dsh.ps1 -Port 3080
 #   powershell -ExecutionPolicy Bypass -File .\scripts\start-dsh.ps1 -Force   # start even if the port is busy
 #   powershell -ExecutionPolicy Bypass -File .\scripts\start-dsh.ps1 -OpenBrowser  # focus/open browser when already running
 #   powershell -ExecutionPolicy Bypass -File .\scripts\start-dsh.ps1 -Clean   # skip user/custom plugins
+#   powershell -ExecutionPolicy Bypass -File .\scripts\start-dsh.ps1 -Pause   # show port and wait for key before exit
+#
+# Port selection: when -Port is 0 (default), the script scans 3080-3100 and
+# picks the first port that passes a real bind test (TcpListener start/stop),
+# which catches TIME_WAIT ports that netstat would report as free. Pass an
+# explicit -Port to pin one port and skip the pool.
+#
+# -Pause mode (desktop shortcut): the window stays open, prints the port, and
+# waits for a key press before closing. Never use -Pause from restart-dsh.ps1
+# or other scripts that need to run unattended.
 #
 # Flow:
-#   1. already running? → focus existing browser window (or open one), then exit (unless -Force)
-#   2. locate node.exe and the newest npx-cached dsh CLI entry
-#   3. auto-patch the CLI to add --clean support (idempotent, see Patch-Cli)
-#   4. build CLI args (--port, --clean, extra NodeArgs)
-#   5. start `node <bin> web` hidden, logs → $LogDir (dsh web auto-opens the browser)
-#   6. poll the port until the service answers
+#   1. pick a port (pool scan or explicit)
+#   2. already running on that port? → focus existing browser window (or open one), then exit (unless -Force)
+#   3. locate node.exe and the newest npx-cached dsh CLI entry
+#   4. auto-patch the CLI to add --clean support (idempotent, see Patch-Cli)
+#   5. build CLI args (--port, --clean, extra NodeArgs)
+#   6. start `node <bin> web` hidden, logs → $LogDir (dsh web auto-opens the browser)
+#   7. poll the port until the service answers
+#   8. -Pause: print the port and wait for a key press
 param(
-    [int]$Port = 3080,
+    [int]$Port = 0,
     [switch]$Force,
     [switch]$OpenBrowser,
     [switch]$Clean,
+    [switch]$Pause,
     [string]$LogDir = (Join-Path $env:USERPROFILE '.dsh\logs'),
     [string[]]$NodeArgs = @()
 )
@@ -49,6 +62,32 @@ public static class DshWinFocus {
         }
     }
     return $found
+}
+
+# --------------------------------------------------------------------
+# Port pool: real bind test (TcpListener) that catches TIME_WAIT ports
+# which netstat would report as free. Scans 3080-3100 and returns the
+# first truly available port.
+# --------------------------------------------------------------------
+$POOL_START = 3080
+$POOL_END   = 3100
+
+function Test-PortAvailable([int]$port) {
+    try {
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $port)
+        $listener.Start()
+        $listener.Stop()
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Find-AvailablePort {
+    for ($p = $POOL_START; $p -le $POOL_END; $p++) {
+        if (Test-PortAvailable $p) { return $p }
+    }
+    throw "no available port in range $POOL_START-$POOL_END"
 }
 
 # --------------------------------------------------------------------
@@ -169,13 +208,27 @@ function Patch-Cli($binJs, $dshLib) {
 # ====================================================================
 # Main
 # ====================================================================
+# --- 0. pick a port: pool scan when default (0), explicit otherwise ----------
+if ($Port -eq 0) {
+    $Port = Find-AvailablePort
+    Log "auto-selected port $Port from pool $POOL_START-$POOL_END"
+}
 Log '== dsh web start =='
-Log "port: $Port  force: $([bool]$Force)  openBrowser: $([bool]$OpenBrowser)  clean: $([bool]$Clean)"
+Log "port: $Port  force: $([bool]$Force)  openBrowser: $([bool]$OpenBrowser)  clean: $([bool]$Clean)  pause: $([bool]$Pause)"
 
 # --- 1. already running? --------------------------------------------------
 $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($conn -and -not $Force) {
     Log "dsh web is already running (PID $($conn.OwningProcess) on port $Port); nothing to do."
+    if ($Pause) {
+        Write-Host ''
+        Write-Host "DSH Web 已在运行" -ForegroundColor Green
+        Write-Host "端口: $Port" -ForegroundColor Cyan
+        Write-Host "地址: http://127.0.0.1:$Port" -ForegroundColor Cyan
+        Write-Host ''
+        Write-Host '按任意键关闭...' -ForegroundColor DarkGray
+        [Console]::ReadKey($true) | Out-Null
+    }
     # dsh web is already running so it won't auto-open; focus the existing
     # browser window, or open a new tab if the window can't be found.
     if ($OpenBrowser) {
@@ -243,9 +296,27 @@ for ($i = 0; $i -lt 60; $i++) {
         $probe = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/" -Method Get -TimeoutSec 3 -UseBasicParsing
         if ($probe.StatusCode -eq 200) {
             Log "service ready after ~$([int](($i + 1) * 2))s (dsh web auto-opens the browser)"
+            if ($Pause) {
+                Write-Host ''
+                Write-Host 'DSH Web 已启动' -ForegroundColor Green
+                Write-Host "端口: $Port" -ForegroundColor Cyan
+                Write-Host "地址: http://127.0.0.1:$Port" -ForegroundColor Cyan
+                Write-Host ''
+                Write-Host '按任意键关闭此窗口(服务保持运行)...' -ForegroundColor DarkGray
+                [Console]::ReadKey($true) | Out-Null
+            }
             exit 0
         }
     } catch { }
+}
+if ($Pause) {
+    Write-Host ''
+    Write-Host 'DSH Web 启动超时' -ForegroundColor Red
+    Write-Host "端口: $Port" -ForegroundColor Cyan
+    Write-Host "日志: $errLog" -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '按任意键关闭...' -ForegroundColor DarkGray
+    [Console]::ReadKey($true) | Out-Null
 }
 Log "WARN: service did not answer within 120s; check $errLog"
 exit 1

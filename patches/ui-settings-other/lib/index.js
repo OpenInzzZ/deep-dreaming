@@ -557,7 +557,7 @@ export function apply(ctx, config = {}) {
         }
       }
 
-      const invocation = buildRestartSpawn(scriptPath)
+      const invocation = buildRestartSpawn(scriptPath, ['-OpenBrowser'])
       try {
         const child = spawn(invocation.file, invocation.args, {
           detached: true,
