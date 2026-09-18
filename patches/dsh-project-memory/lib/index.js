@@ -6,18 +6,34 @@
 // remaining job is:
 //
 //  1. Inject a system-prompt section telling the agent that Memorix manages
-//     cross-session project memory and when to use its tools.
+//     cross-session project memory, that it is PROJECT-SCOPED, and when to use
+//     its tools.
 //  2. (autoRecall) On the first real user message of a reviewable session,
-//     queue one recall followup so the agent loads relevant memories through
-//     mcp__memorix__memorix_search before starting substantial work.
+//     queue one recall followup that carries the session's project root, so
+//     the agent BINDS the project and then loads relevant memories before
+//     starting substantial work.
 //  3. (autoReview) After every completed user turn, send a short memory-review
 //     followup so the agent itself judges whether durable knowledge was
 //     produced and, if so, saves it through mcp__memorix__memorix_store.
 //
+// Why the binding step exists (dsh 0.1.5 / Memorix 1.9): Memorix isolates
+// memory per git-backed project, and DSH starts ONE MCP server for the whole
+// process with the process cwd (`~/.dsh/profiles/web` when the web app is
+// launched from its profile) — dsh-mcp-client cannot send per-session
+// workspace roots. Memorix therefore refuses every project-scoped tool until
+// a session binds a root:
+//
+//   memorix_session_start({ projectRoot: "<session workspace root>" })
+//
+// The host half knows that root (the session header's `cwd`), so the recall
+// and review followups hand it to the agent explicitly. Two sessions in
+// DIFFERENT workspaces share one server and therefore one binding: the last
+// binding wins, so each session must re-bind at its own start.
+//
 // The actual storage backend (SQLite + Orama search), deduplication, maturity
 // tracking, semantic search, Git Memory, and Reasoning Memory are all handled
 // by Memorix. This plugin is only the "prompt oracle" that tells the agent
-// when to use those tools.
+// when (and against which project) to use those tools.
 //
 // Subagent sessions are never reviewed; the project root is the owning
 // session's header cwd (the workspace the user attached the session to).
@@ -55,25 +71,32 @@ export const Config = z.object({
  */
 const GUIDANCE_SECTION = `\
 <project_memory>
-本项目通过 Memorix (MCP) 维护一份跨会话的项目记忆库。Memorix 工具以 mcp__memorix__ 前缀暴露:
+本项目通过 Memorix (MCP) 维护跨会话项目记忆。Memorix 的记忆**按项目(git 仓库)隔离**,而 dsh 全进程只启动一个 MCP 实例,因此每个会话都必须先绑定自己的工作区根目录:
 
-- 会话开始阶段(memory search):会收到一条「项目记忆召回」提示,先调用 mcp__memorix__memorix_search 检索与本任务相关的既有记忆(项目约定、关键决策、踩坑经验、接口与数据结构事实等),遵循既有约定,避免重复探索。
-- 会话结束阶段(memory save/update):完成产生确定性知识的工作后,调用 mcp__memorix__memorix_store 保存;同一主题已有记录时更新而非重复新建;不确定时倾向记录,保持短小、准确、可脱离上下文独立理解。
-- 只记录事实与结论,不记录过程性对话。
-- 需要查看记忆详情时使用 mcp__memorix__memorix_detail,需要任务上下文摘要时使用 mcp__memorix__memorix_project_context。
+- 绑定(任何记忆工具之前的必要一步):mcp__memorix__memorix_session_start({ projectRoot: "<本会话工作区根目录>" })。未绑定时所有记忆工具都会拒绝服务。会话开始会收到一条「项目记忆召回」提示,其中已给出该路径。
+- 会话开始(memory search):绑定后调用 mcp__memorix__memorix_project_context(传入本次任务)获取与本任务相关的既有记忆(项目约定、关键决策、踩坑经验、接口与数据结构事实等),遵循既有约定、避免重复探索,并以该 brief 作为检索边界。
+- 会话结束(memory save/update):完成产生确定性知识的工作后调用 mcp__memorix__memorix_store 保存;同一主题用 topicKey 更新而非重复新建;不确定时倾向记录,保持短小、准确、可脱离上下文独立理解。
+- 只记录事实与结论,不记录过程性对话。需要记忆详情用 mcp__memorix__memorix_detail,需要记忆图上下文用 mcp__memorix__memorix_graph_context。
 </project_memory>`;
 
-/** The session-start memory recall followup: load relevant memories first. */
-const RECALL_PROMPT = `\
-[项目记忆召回 · memory search] 会话开始,请先调用 mcp__memorix__memorix_search 检索与本任务/本项目相关的既有记忆(项目约定、关键决策、踩坑经验、接口或数据结构事实等),遵循既有约定、避免重复探索;完成检索后再开始工作。若无相关记忆,检索结果为空,直接开始即可。`;
+/** The session-start memory recall followup: bind the project, then load
+ * relevant memories first. The project root is the session's own workspace,
+ * because one MCP server serves every workspace in the process. */
+const recallPrompt = (projectRoot) => `\
+[项目记忆召回 · memory search] 会话开始。本会话的工作区根目录是 ${projectRoot}。
+第一步必须先绑定项目(未绑定时 Memorix 的记忆工具会拒绝服务):
+  mcp__memorix__memorix_session_start({ projectRoot: ${JSON.stringify(projectRoot)} })
+绑定后调用 mcp__memorix__memorix_project_context 取与本任务相关的既有记忆(项目约定、关键决策、踩坑经验、接口或数据结构事实等),遵循既有约定、避免重复探索;完成一次完整 brief 后即以此为检索边界,不要重复检索。若无相关记忆,直接开始工作即可。`;
 
 /** The auto-review followup message text (session-end memory save/update).
  * Deliberately terse and reply-guiding: the review prompt is folded into a
  * one-line context notice, and the agent's own reply should stay minimal —
  * the save result already renders as its own collapsible memory card, so the
- * reply must not restate it. */
-const REVIEW_PROMPT = `\
-[项目记忆回顾 · memory save/update] 判断本轮是否产生值得跨会话保留的项目知识。若有,直接调用 mcp__memorix__memorix_store 保存或更新(同主题更新,否则新建),不要先输出分析文字,保存后也不要复述结果;若没有,直接结束本轮,不输出任何内容。`;
+ * reply must not restate it. The binding clause covers the case where the
+ * session never ran the recall (autoRecall off, or a session that started
+ * before the row was enabled). */
+const reviewPrompt = (projectRoot) => `\
+[项目记忆回顾 · memory save/update] 判断本轮是否产生值得跨会话保留的项目知识。若有,直接调用 mcp__memorix__memorix_store 保存或更新(同主题更新,否则新建),不要先输出分析文字,保存后也不要复述结果;若保存报错提示项目未绑定,先调用 mcp__memorix__memorix_session_start({ projectRoot: ${JSON.stringify(projectRoot)} }) 绑定本会话工作区再重试;若没有值得记录的内容,直接结束本轮,不输出任何内容。`;
 
 /** Whether an agent is a reviewable root session (has a project, not a subagent).
  * Subagent children are marked by the session header's `origin === 'subagent'`
@@ -85,6 +108,14 @@ function reviewable(agent) {
   if (header === void 0) return false;
   if (header.origin === "subagent") return false;
   return typeof header.cwd === "string" && header.cwd.length > 0;
+}
+
+/** The session's project root, i.e. the workspace the session is attached to.
+ * This is what Memorix binds against; it is the only per-session fact the MCP
+ * server cannot learn on its own (dsh starts it once, with the process cwd). */
+function projectRootOf(agent) {
+  const cwd = agent.session?.header?.cwd;
+  return typeof cwd === "string" && cwd.length > 0 ? cwd : "(unknown workspace)";
 }
 
 /** Install the session-end memory review: after a completed user turn, the
@@ -127,7 +158,7 @@ function installReview(ctx, autoReview) {
     state.reviewing = true;
     try {
       agent.followup(createUserMessage({
-        content: [{ type: "text", text: REVIEW_PROMPT }],
+        content: [{ type: "text", text: reviewPrompt(projectRootOf(agent)) }],
         source: { kind: "memory", review: true, form: "notice", summary: "项目记忆回顾 · memory save/update" }
       }));
     } catch (error) {
@@ -159,7 +190,7 @@ function installRecall(ctx, autoRecall) {
     recalled.add(agent);
     try {
       agent.followup(createUserMessage({
-        content: [{ type: "text", text: RECALL_PROMPT }],
+        content: [{ type: "text", text: recallPrompt(projectRootOf(agent)) }],
         source: { kind: "memory", recall: true, form: "notice", summary: "项目记忆召回 · memory search" }
       }));
     } catch (error) {

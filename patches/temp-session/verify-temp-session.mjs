@@ -16,27 +16,22 @@
  * (RPC ensure -> refresh -> startSession) and the error path. Without jsdom
  * the DOM sections are skipped with a notice.
  */
-import { createRequire } from 'node:module'
+import { loadDomDeps, createUiRequire } from '../../scripts/test-deps.mjs'
 import { readFileSync, mkdtempSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const userProfile = process.env.USERPROFILE ?? process.env.HOME ?? ''
-const profileAnchor = join(userProfile, '.dsh', 'profiles', 'web', 'package.json')
-const uiRequire = createRequire(profileAnchor)
-const React = uiRequire('react')
+const uiRequire = createUiRequire(import.meta.url)
 
-// Optional DOM deps (jsdom) may be absent without a harness checkout; the
-// client DOM sections are skipped then, host + contract checks still run.
-let JSDOM = null
-try {
-  JSDOM = uiRequire('jsdom').JSDOM
-} catch {
-  try { JSDOM = createRequire('D:/GitHub/deepseek-harness/package.json')('jsdom').JSDOM } catch { /* skip */ }
-}
-const DOM_AVAILABLE = JSDOM !== null
+// Optional DOM deps (react + jsdom): the client DOM sections are skipped with
+// a notice when they cannot be resolved; host + contract checks still run.
+const domDeps = loadDomDeps(import.meta.url)
+const React = domDeps.React
+const JSDOM = domDeps.JSDOM
+const DOM_AVAILABLE = domDeps.available
+if (!DOM_AVAILABLE) console.warn(`SKIP DOM checks: ${domDeps.hint} `)
 
 const hostPath = join(here, 'lib', 'index.js')
 const clientPath = join(here, 'lib', 'client.js')
@@ -173,7 +168,7 @@ console.log('exports contract OK:', JSON.stringify(exports_.inject), 'NS =', exp
 let registrations = []
 let dicts = []
 let rpcLog = []
-let refreshCount = 0
+let created = []
 let starts = []
 let ensureResult = { ok: true, value: { workspaceId: 'ws-temp', path: 'C:/Users/x/.dsh/tmp-workspaces', title: '临时会话', created: true } }
 const clientCtx = {
@@ -191,8 +186,18 @@ const clientCtx = {
       },
     },
   },
+  // dsh 0.1.5 Workspace Controller split: `workspaces` registers a path
+  // (idempotently, folding the row into the client snapshot) and `uiWorkspace`
+  // owns New Session navigation. The pre-0.1.2 `refresh()`/`startSession()`
+  // pair on `workspaces` no longer exists, so this stub mirrors the real
+  // interface and the click flow is asserted against it.
   workspaces: {
-    refresh: async () => { refreshCount += 1 },
+    create: async ({ path }) => {
+      created.push(path)
+      return { workspaceId: 'ws-temp', path, title: '临时会话', sessionIds: [] }
+    },
+  },
+  uiWorkspace: {
     startSession: (workspaceId) => { starts.push(workspaceId) },
   },
   slots: {
@@ -257,16 +262,18 @@ const wrap = rootHost.querySelector('.ts-wrap')
 if (wrap === null || wrap.classList.contains('ts-rail-wrap')) throw new Error('wide wrapper must not be rail-mode')
 console.log('render OK: wide row shows icon + label, aria-label set, wrapper claims full width')
 
-// click -> /temp-session ensure -> workspaces.refresh -> startSession
+// click -> /temp-session ensure -> workspaces.create(path) -> uiWorkspace.startSession
 await act(async () => { fireClick(btn) })
 const ensureCall = rpcLog.find((c) => c.endpoint === 'ensure')
 if (ensureCall === undefined || ensureCall.channel !== '/temp-session') {
   throw new Error(`ensure rpc target: ${JSON.stringify(ensureCall)}`)
 }
 if (JSON.stringify(ensureCall.payload.args) !== '{}') throw new Error(`ensure args: ${JSON.stringify(ensureCall.payload)}`)
-if (refreshCount !== 1) throw new Error(`refresh must run once, got ${refreshCount}`)
+if (created.length !== 1 || created[0] !== ensureResult.value.path) {
+  throw new Error(`workspaces.create must adopt the ensured path, got ${JSON.stringify(created)}`)
+}
 if (starts.length !== 1 || starts[0] !== 'ws-temp') throw new Error(`startSession target: ${JSON.stringify(starts)}`)
-console.log('click flow OK: ensure -> refresh -> startSession(ws-temp)')
+console.log('click flow OK: ensure -> workspaces.create(path) -> uiWorkspace.startSession(ws-temp)')
 
 // error path: ensure failure surfaces as the error line, button back to label
 ensureResult = { ok: false, error: { code: 'temp-workspace-failed', message: 'boom', details: {} } }

@@ -12,11 +12,25 @@
  * dsh only lets you start a session inside a Workspace (the hero input is
  * inert otherwise). For quick non-project chats this action calls the host
  * half's `/temp-session` channel `ensure` endpoint — which idempotently
- * registers the user-level temp directory (default `~/.dsh/tmp-workspaces/`)
- * as a real Workspace titled "临时会话 / Temporary" — then refreshes the
- * workspace list and starts a new session bound to it. The session appears
- * under the temp workspace group in the sidebar, and agent file operations
- * land in the user-level directory instead of any project.
+ * creates the user-level temp directory (default `~/.dsh/tmp-workspaces/`)
+ * and registers it as a real Workspace titled "临时会话 / Temporary".
+ *
+ * Wiring against the 0.1.5 Workspace Controller (the pre-0.1.2 sequence
+ * `workspaces.refresh()` + `workspaces.startSession(id)` no longer exists —
+ * `IWorkspaces` is a pure Controller face and New Session navigation moved to
+ * `uiWorkspace`):
+ *
+ *  1. `ensure` answers the temp Workspace's `path` (a host-owned fact: the
+ *     configured directory is created there).
+ *  2. `ctx.workspaces.create({ path })` registers/resolves that path and folds
+ *     the unary echo into the Client snapshot synchronously, so the new
+ *     Workspace is addressable by the next call — no list refresh to await,
+ *     because the Controller now streams its own baseline.
+ *  3. `ctx.uiWorkspace.startSession(workspaceId)` runs the New Session flow
+ *     against that Workspace and navigates to the created Session.
+ *
+ * The session appears under the temp workspace group in the sidebar, and agent
+ * file operations land in the user-level directory instead of any project.
  */
 window.__ModuleLoader__.load({ id: '@local/dsh-client-ui-temp-session', factory: (require) => {
 var module = { exports: {} }; var exports = module.exports;
@@ -64,8 +78,9 @@ const en = {
   error: 'Failed, retry',
 };
 
-/** Services required by the registrations. */
-const inject = ['slots', 'locale', 'connection', 'workspaces'];
+/** Services required by the registrations. `uiWorkspace` owns New Session
+ * navigation; `workspaces` owns Workspace registration. */
+const inject = ['slots', 'locale', 'connection', 'workspaces', 'uiWorkspace'];
 
 /**
  * Sidebar-footer action row: wide shows icon + label, rail only the icon.
@@ -112,11 +127,11 @@ function apply(ctx) {
     if (!result.ok) {
       throw new Error('ensure failed: ' + result.error.code + ': ' + result.error.message)
     }
-    // The new workspace must be in the client baseline before connectWorkspace
-    // can reuse-or-create its blank session; startSession resolves via the
-    // list store, so refresh first.
-    await ctx.workspaces.refresh()
-    ctx.workspaces.startSession(result.value.workspaceId)
+    // Register/resolve the temp directory as a Workspace. `create` is
+    // idempotent and merges the Host row into the Client snapshot before it
+    // resolves, so `startSession` can address the Workspace immediately.
+    const workspace = await ctx.workspaces.create({ path: result.value.path })
+    ctx.uiWorkspace.startSession(workspace.workspaceId)
   }
 
   ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({

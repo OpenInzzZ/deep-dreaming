@@ -21,27 +21,22 @@
  * through the `/app` RPC channel. Without jsdom the DOM sections are skipped
  * with a notice.
  */
-import { createRequire } from 'node:module'
-import { readFileSync, writeFileSync, mkdtempSync, existsSync } from 'node:fs'
+import { loadDomDeps, createUiRequire } from '../../scripts/test-deps.mjs'
+import { readFileSync, writeFileSync, mkdtempSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const userProfile = process.env.USERPROFILE ?? process.env.HOME ?? ''
-const profileAnchor = join(userProfile, '.dsh', 'profiles', 'web', 'package.json')
-const uiRequire = createRequire(profileAnchor)
-const React = uiRequire('react')
+const uiRequire = createUiRequire(import.meta.url)
 
-// Optional DOM deps (jsdom) may be absent without a harness checkout; the
-// client DOM sections are skipped then, host + contract checks still run.
-let JSDOM = null
-try {
-  JSDOM = uiRequire('jsdom').JSDOM
-} catch {
-  try { JSDOM = createRequire('D:/GitHub/deepseek-harness/package.json')('jsdom').JSDOM } catch { /* skip */ }
-}
-const DOM_AVAILABLE = JSDOM !== null
+// Optional DOM deps (react + jsdom): the client DOM sections are skipped with
+// a notice when they cannot be resolved; host + contract checks still run.
+const domDeps = loadDomDeps(import.meta.url)
+const React = domDeps.React
+const JSDOM = domDeps.JSDOM
+const DOM_AVAILABLE = domDeps.available
+if (!DOM_AVAILABLE) console.warn(`SKIP DOM checks: ${domDeps.hint}`)
 
 const hostPath = join(here, 'lib', 'index.js')
 const clientPath = join(here, 'lib', 'client.js')
@@ -99,17 +94,24 @@ const host = await import(pathToFileURL(hostPath).href)
   if (typeof info.execPath !== 'string' || info.execPath.length === 0) throw new Error(`serviceInfo.execPath: ${info.execPath}`)
   if (!Array.isArray(info.ports) || info.ports.some((p) => !Number.isInteger(p))) throw new Error(`serviceInfo.ports: ${JSON.stringify(info.ports)}`)
   if (!/^\d{4}-\d{2}-\d{2}T/.test(info.startedAt)) throw new Error(`serviceInfo.startedAt: ${info.startedAt}`)
-  // dsh version resolves from the real CLI entry in the npx cache (when present)
-  const npxRoot = join(userProfile, 'AppData', 'Local', 'npm-cache', '_npx', '1e7f6d9597241db0', 'node_modules', '@deepseek-ai', 'dsh')
-  const binPath = join(npxRoot, 'lib', 'bin.js')
-  const pkgPath = join(npxRoot, 'package.json')
-  if (readFileSync(pkgPath, 'utf8').length > 0) {
-    const expectedVersion = JSON.parse(readFileSync(pkgPath, 'utf8')).version
+  // dsh version resolves from the real CLI entry in the npx cache. The cache
+  // directory name is an npx hash and the CLI is upgraded in place, so the
+  // newest install that actually contains @deepseek-ai/dsh is discovered
+  // instead of hardcoding either the hash or a dsh version.
+  const npxCache = join(process.env.LOCALAPPDATA ?? '', 'npm-cache', '_npx')
+  const dshRoot = readdirSync(npxCache, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(npxCache, entry.name, 'node_modules', '@deepseek-ai', 'dsh'))
+    .filter((candidate) => existsSync(join(candidate, 'lib', 'bin.js')))
+    .sort((left, right) => statSync(join(right, 'lib', 'bin.js')).mtimeMs - statSync(join(left, 'lib', 'bin.js')).mtimeMs)[0]
+  if (dshRoot === undefined) {
+    console.log(`host snapshot OK: pid=${info.pid} ports=[${info.ports}] (dsh version check skipped: no npx-cached dsh)`)
+  } else {
+    const binPath = join(dshRoot, 'lib', 'bin.js')
+    const expectedVersion = JSON.parse(readFileSync(join(dshRoot, 'package.json'), 'utf8')).version
     const version = host.dshVersion(binPath)
     if (version !== expectedVersion) throw new Error(`dshVersion: ${version} != ${expectedVersion}`)
     console.log(`host snapshot OK: pid=${info.pid} ports=[${info.ports}] dsh=${version} node=${info.node}`)
-  } else {
-    console.log(`host snapshot OK: pid=${info.pid} ports=[${info.ports}] (dsh version check skipped: ${pkgPath} missing)`)
   }
 }
 

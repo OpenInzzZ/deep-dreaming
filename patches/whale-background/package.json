@@ -12,10 +12,6 @@
   },
   "dsh": {
     "client": {
-      "inject": [
-        "@deepseek-ai/dsh-client-connection",
-        "@deepseek-ai/dsh-client-runtime"
-      ],
       "platform": "web"
     }
   }

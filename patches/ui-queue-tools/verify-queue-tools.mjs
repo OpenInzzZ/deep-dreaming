@@ -21,37 +21,22 @@
  * No hardcoded machine paths: the browser packages are resolved from
  * `~/.dsh/profiles/node_modules` (derived from the current user's home).
  */
-import { createRequire } from 'node:module'
+import { createUiRequire, resolveUiModule } from '../../scripts/test-deps.mjs'
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { dirname, join, delimiter } from 'node:path'
+import { dirname, join } from 'node:path'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const hostPath = join(here, 'lib', 'index.js')
 const clientPath = join(here, 'lib', 'client.js')
 const PLUGIN_ID = '@local/dsh-client-ui-queue-tools'
 
-// Browser packages live in the DEPLOYED profile's node_modules (junction
-// tree). Anchor there by deriving from the current user's home.
+// Browser packages resolve from the repo's own node_modules (`npm install`),
+// $NODE_PATH, or the deployed profile junction tree; see scripts/test-deps.mjs.
 const profilesNm = join(homedir(), '.dsh', 'profiles', 'node_modules')
-const profilesUrl = pathToFileURL(join(profilesNm, 'package.json')).href
-const uiRequire = createRequire(profilesUrl)
-
-/** Resolve `spec` from the patch dir, the profile node_modules, or NODE_PATH. */
-function tryResolve(spec) {
-  for (const base of [import.meta.url, profilesUrl]) {
-    try {
-      return createRequire(base).resolve(spec)
-    } catch {}
-  }
-  for (const entry of (process.env.NODE_PATH ?? '').split(delimiter).filter(Boolean)) {
-    try {
-      return createRequire(pathToFileURL(join(entry, 'package.json')).href).resolve(spec)
-    } catch {}
-  }
-  return undefined
-}
+const uiRequire = createUiRequire(import.meta.url)
+const tryResolve = (spec) => resolveUiModule(spec, import.meta.url)
 
 /** CJS-compatible `import()`: prefer the default export, else the namespace. */
 async function loadCjs(resolvedPath) {

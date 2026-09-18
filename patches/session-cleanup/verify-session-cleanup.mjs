@@ -24,14 +24,14 @@
  *
  * Run: node patches/session-cleanup/verify-session-cleanup.mjs
  */
-import { createRequire } from 'node:module'
+import { loadDomDeps, createUiRequire } from '../../scripts/test-deps.mjs'
 import { readFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const require = createRequire(import.meta.url)
+const uiRequire = createUiRequire(import.meta.url)
 const hostPath = join(here, 'session-cleanup.mjs')
 const clientPath = join(here, 'client.js')
 const PLUGIN_ID = '@local/dsh-plugin-session-cleanup'
@@ -208,12 +208,10 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 150))
 rmSync(sessionsRoot, { recursive: true, force: true })
 
 // --- client half: bundle + contract checks --------------------------------------
-let JSDOM = null
-try {
-  JSDOM = require('jsdom').JSDOM
-} catch { /* render section skipped below */ }
-
-const React = require('react')
+const domDeps = loadDomDeps(import.meta.url)
+const JSDOM = domDeps.JSDOM
+const React = domDeps.React
+if (!domDeps.available) console.warn(`SKIP DOM checks: ${domDeps.hint}`)
 
 let dom = null
 let handoff = null
@@ -247,7 +245,7 @@ if (handoff.id !== PLUGIN_ID) throw new Error(`handoff id mismatch: ${handoff.id
 const icon = (props) => React.createElement('svg', { ...props, 'data-icon': true })
 const requireTable = (spec) => {
   if (spec === 'react') return React
-  if (spec === 'react/jsx-runtime') return require('react/jsx-runtime')
+  if (spec === 'react/jsx-runtime') return uiRequire('react/jsx-runtime')
   if (spec === '@deepseek-ai/dsh-client-ui-primitives') {
     return { IconChevronDownOutline14: icon }
   }
@@ -334,7 +332,7 @@ if (JSDOM === null) {
   console.log('client DOM sections SKIPPED (jsdom not installed; run `npm install` in the patch dir)')
 } else {
   const { act } = React
-  const { createRoot } = require('react-dom/client')
+  const { createRoot } = uiRequire('react-dom/client')
   globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
   const en = dictionaries.dicts.en

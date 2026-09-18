@@ -19,10 +19,20 @@ dsh 发起会话必须绑定一个工作区(没有工作区时对话输入框是
   复用;不存在则 `workspaceRegistry.create(dir, title)` 注册。并发点击
   由内部 promise 链串行化,不会重复创建。
 - **Client 半(`lib/client.js`)**:注册 `sidebar.footer.action` 槽
-  (`id: 'temp-session'`, `order: -10`,排在设置上方);点击流程:
-  `ensure` → `workspaces.refresh()`(新工作区先进入客户端基线,否则
-  `connectWorkspace` 找不到)→ `workspaces.startSession(workspaceId)`。
+  (`id: 'temp-session'`, `order: -10`,排在设置上方);点击流程三段:
+  1. `ensure` 拿到临时工作区**路径**(host 侧事实:目录已创建);
+  2. `ctx.workspaces.create({ path })` 注册/复用该路径——0.1.5 的 Workspace
+     Controller 会把 unary 回声立即并入客户端快照,所以**不需要**再刷新
+     列表(旧版的 `workspaces.refresh()` 已不存在);
+  3. `ctx.uiWorkspace.startSession(workspaceId)` 走 New Session 流程并导航
+     (旧版的 `workspaces.startSession()` 已随 Controller 拆分移到
+     `uiWorkspace`)。
   失败时按钮下方显示错误行,可重试。
+  > 适配记录(dsh 0.1.5-rc.2):`IWorkspaces` 现在只是纯 Controller 面
+  > (`list/create/rename/delete/insertBefore/archiveSession/insertSessionBefore`),
+  > 工作区列表由 Controller 自己的 follow 流维持;新建会话导航归
+  > `@deepseek-ai/dsh-client-ui-workspace` 的 `uiWorkspace` 服务。注入面因此是
+  > `['slots','locale','connection','workspaces','uiWorkspace']`。
 
 ## 部署(加载到 dsh)
 
@@ -65,5 +75,6 @@ node verify-temp-session.mjs          # 在本补丁目录下运行
 自定义 title)、`/temp-session` 通道注册与 bad-request 守卫、apply 不返回
 thenable 的 P0 回归守卫、client 半契约(bundle handoff、
 `sidebar.footer.action` 条目 id/order、zh/en 字典一致、注入面)。DOM 交互段
-(按钮渲染 wide/rail 两态、点击后 ensure → refresh → startSession、失败
-错误行)需要 jsdom;未安装时自动跳过并提示。
+(按钮渲染 wide/rail 两态、点击后 `ensure → workspaces.create(path) →
+uiWorkspace.startSession`、失败错误行)需要 react + jsdom;在仓库根执行一次
+`npm install` 即可,缺失时自动跳过并提示。

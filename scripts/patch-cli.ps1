@@ -1,4 +1,4 @@
-# patch-cli.ps1 — Patch the latest npx-cached dsh CLI to add --clean and --port
+# patch-cli.ps1 — Patch the latest npx-cached dsh CLI to add --clean startup
 # support. Idempotent: already-patched files are skipped.
 #
 # Usage:
@@ -7,8 +7,17 @@
 #
 # --clean skips user/custom plugins (cordis.patch.yml layers) so a broken
 # user patch after a dsh version update no longer blocks startup.
-# --port is already natively supported by the web app; this script fixes the
-# start-dsh.ps1 wrapper to pass its -Port through to the CLI.
+# --port is already natively supported by the web app; start-dsh.ps1 passes
+# its -Port straight through to the CLI.
+#
+# Every replacement is verified: a pattern that no longer matches the shipped
+# CLI fails LOUDLY (exit 1, nothing written) instead of silently leaving the
+# flag half-installed. That guard matters because dsh's internal file layout
+# and code formatting change between releases — the last adaptation was from
+# profile-boot glue whose shape had changed.
+#
+# Adapted to dsh 0.1.5-rc.2 (`resolveBoot` now returns fromDefaultProfile and
+# `composeProfile` gained a third parameter).
 param(
     [switch]$Restore
 )
@@ -36,7 +45,7 @@ $binJs = Join-Path $dshLib 'bin.js'
 $backupDir = Join-Path $dshLib '.patch-backups'
 
 Write-Host '== patch-cli ==' -ForegroundColor Cyan
-Write-Host "target: $binJs"
+Write-Host "target: $dshLib"
 
 # --------------------------------------------------------------------
 # 2. Backup / restore helpers
@@ -80,7 +89,6 @@ if ($Restore) {
 # which re-exports from profile-boot-YYYY.js (actual implementation)
 $binContent = Get-Content $binJs -Raw
 
-# Find the wrapper import: await import("./profile-boot-XXXX.js")
 $wrapperMatch = [regex]::Match($binContent, 'import\("\./(profile-boot-[A-Za-z0-9_]+\.js)"\)')
 if (-not $wrapperMatch.Success) {
     Write-Host 'patch-cli: could not find profile-boot wrapper import in bin.js; aborting.' -ForegroundColor Red
@@ -92,126 +100,141 @@ if (-not (Test-Path $wrapperFile)) {
     exit 1
 }
 
-# Read the wrapper to find the actual implementation file
-$wrapperContent = Get-Content $wrapperFile -Raw
-$implMatch = [regex]::Match($wrapperContent, 'from\s*"\./(profile-boot-[A-Za-z0-9_]+\.js)"')
-if (-not $implMatch.Success) {
-    Write-Host 'patch-cli: could not find profile-boot implementation import in wrapper; aborting.' -ForegroundColor Red
+$implName = $null
+foreach ($candidate in Get-ChildItem $dshLib -Filter 'profile-boot-*.js') {
+    if ($candidate.Name -eq $wrapperMatch.Groups[1].Value) { continue }
+    if ($implName -eq $null -or $candidate.Length -gt (Get-Item (Join-Path $dshLib $implName)).Length) {
+        $implName = $candidate.Name
+    }
+}
+if ($implName -eq $null) {
+    Write-Host 'patch-cli: could not find the profile-boot implementation file; aborting.' -ForegroundColor Red
     exit 1
 }
-$implFile = Join-Path $dshLib $implMatch.Groups[1].Value
-if (-not (Test-Path $implFile)) {
-    Write-Host "patch-cli: implementation file not found: $implFile; aborting." -ForegroundColor Red
-    exit 1
-}
-Write-Host "profile-boot implementation: $($implMatch.Groups[1].Value)"
+$implFile = Join-Path $dshLib $implName
+Write-Host "profile-boot implementation: $implName"
 
 # --------------------------------------------------------------------
-# 4. Check if already patched
+# 4. Patches: literal find/replace pairs, verified before anything is written
 # --------------------------------------------------------------------
-$alreadyPatched = $binContent -match '--clean'
-if ($alreadyPatched) {
-    Write-Host 'patch-cli: CLI already patched (--clean flag detected).' -ForegroundColor Green
+# '\t' and '\n' placeholders keep the exact shipped indentation readable here.
+function Expand-Template([string]$text) {
+    return $text.Replace('\t', "`t").Replace('\n', "`n")
+}
+
+$cleanOptionFind = '.option("--dump-default-config", "print the profile tree without its user layer or --patch overlays and exit")'
+$cleanOptionAdd  = $cleanOptionFind + '.option("--clean", "skip user/custom plugins for a clean startup")'
+$webOptionFind   = '.option("--dump-default-config", "print the web profile''s bundle layers (no user layer) and exit")'
+$webOptionAdd    = $webOptionFind + '.option("--clean", "skip user/custom plugins for a clean startup")'
+
+$patches = @(
+    @{
+        file = $binJs
+        label = 'bin.js: --clean option on the profile command (and the `clean` boot fact)'
+        find = $cleanOptionFind
+        replace = $cleanOptionAdd
+    },
+    @{
+        file = $binJs
+        label = 'bin.js: --clean option on the web subcommand'
+        find = $webOptionFind
+        replace = $webOptionAdd
+    },
+    @{
+        file = $binJs
+        label = 'bin.js: carry `clean` out of resolveBoot for the profile mode'
+        find = Expand-Template '\t\tmode: "profile",\n\t\tprofile,\n\t\tfromDefaultProfile: options.fromDefaultProfile,\n\t\tpatches,\n\t\targs\n\t};'
+        replace = Expand-Template '\t\tmode: "profile",\n\t\tprofile,\n\t\tfromDefaultProfile: options.fromDefaultProfile,\n\t\tpatches,\n\t\targs,\n\t\tclean: options.clean === true\n\t};'
+    },
+    @{
+        file = $binJs
+        label = 'bin.js: pass `clean` into runProfile'
+        find = Expand-Template '\t\t\t\tpatchFiles: invocation.patches,\n\t\t\t\targs: invocation.args\n\t\t\t});'
+        replace = Expand-Template '\t\t\t\tpatchFiles: invocation.patches,\n\t\t\t\targs: invocation.args,\n\t\t\t\tclean: invocation.clean\n\t\t\t});'
+    },
+    @{
+        file = $implFile
+        label = 'profile-boot: composeProfile takes `clean`'
+        find = 'async function composeProfile(name, patchFiles, fromDefaultProfile) {'
+        replace = 'async function composeProfile(name, patchFiles, fromDefaultProfile, clean = false) {'
+    },
+    @{
+        file = $implFile
+        label = 'profile-boot: --clean drops the profile user layer'
+        find = Expand-Template '\tconst profile = prepareProfile(name, true, fromDefaultProfile);'
+        replace = Expand-Template '\tconst profile = prepareProfile(name, !clean, fromDefaultProfile);'
+    },
+    @{
+        file = $implFile
+        label = 'profile-boot: --clean drops the home + overlay patch layers'
+        find = Expand-Template '\tconst homePatches = loadOptionalPatches(NAME, homePatchPath()) ?? [];\n\tconst overlays = patchFiles.flatMap((file) => loadOverlayPatches(NAME, resolve(file)));'
+        replace = Expand-Template '\tconst homePatches = clean ? [] : loadOptionalPatches(NAME, homePatchPath()) ?? [];\n\tconst overlays = clean ? [] : patchFiles.flatMap((file) => loadOverlayPatches(NAME, resolve(file)));'
+    },
+    @{
+        file = $implFile
+        label = 'profile-boot: pass `clean` into composeProfile'
+        find = 'const composed = await composeProfile(options.profile, options.patchFiles, options.fromDefaultProfile);'
+        replace = 'const composed = await composeProfile(options.profile, options.patchFiles, options.fromDefaultProfile, options.clean);'
+    },
+    @{
+        file = $implFile
+        label = 'profile-boot: skip the live patch watcher under --clean'
+        find = 'if (composed.profile.patchReload === "live" && !signalShutdown.signal.aborted && ctx.fiber.state === 2 && ctx.get("loader") !== void 0) try {'
+        replace = 'if (!options.clean && composed.profile.patchReload === "live" && !signalShutdown.signal.aborted && ctx.fiber.state === 2 && ctx.get("loader") !== void 0) try {'
+    }
+)
+
+# Group by file so a failure leaves every file untouched.
+$byFile = @{}
+foreach ($p in $patches) {
+    if (-not $byFile.ContainsKey($p.file)) { $byFile[$p.file] = @() }
+    $byFile[$p.file] += $p
+}
+
+$contents = @{}
+$missing = @()
+$alreadyApplied = 0
+$toApply = @()
+foreach ($file in $byFile.Keys) {
+    $content = if ($contents.ContainsKey($file)) { $contents[$file] } else { Get-Content $file -Raw }
+    foreach ($p in $byFile[$file]) {
+        if ($content.Contains($p.replace)) {
+            $alreadyApplied++
+            continue
+        }
+        if (-not $content.Contains($p.find)) {
+            $missing += "$($p.label)"
+            continue
+        }
+        $content = $content.Replace($p.find, $p.replace)
+        $toApply += $p.label
+    }
+    $contents[$file] = $content
+}
+
+if ($missing.Count -gt 0) {
+    Write-Host ''
+    Write-Host 'patch-cli: the shipped CLI no longer matches these patterns:' -ForegroundColor Red
+    foreach ($m in $missing) { Write-Host "  [FAIL] $m" -ForegroundColor Red }
+    Write-Host '  Nothing was written. The dsh internals changed in this release:' -ForegroundColor Yellow
+    Write-Host '  re-derive the find/replace pairs in scripts/patch-cli.ps1, then re-run.' -ForegroundColor Yellow
+    exit 1
+}
+
+if ($toApply.Count -eq 0) {
+    Write-Host '  [OK] CLI already patched (--clean present in all expected places)' -ForegroundColor Green
     exit 0
 }
 
-# --------------------------------------------------------------------
-# 5. Patch bin.js
-# --------------------------------------------------------------------
-Backup-File $binJs
-
-Write-Host '  patching bin.js...'
-
-# 5a. Add --clean option to main program (after --dump-default-config)
-$binContent = $binContent.Replace(
-    '.option("--dump-default-config", "print the profile tree without its user layer or --patch overlays and exit")',
-    '.option("--dump-default-config", "print the profile tree without its user layer or --patch overlays and exit").option("--clean", "skip user/custom plugins for a clean startup")'
-)
-
-# 5b. Add clean to resolveBoot return for profile mode
-$binContent = $binContent.Replace(
-    "return {
-		mode: `"profile`",
-		profile,
-		patches,
-		args
-	};",
-    "return {
-		mode: `"profile`",
-		profile,
-		patches,
-		args,
-		clean: options.clean === true
-	};"
-)
-
-# 5c. Add --clean option to web subcommand (after --dump-default-config)
-$binContent = $binContent.Replace(
-    '.option("--dump-default-config", "print the web profile''s bundle layers (no user layer) and exit")',
-    '.option("--dump-default-config", "print the web profile''s bundle layers (no user layer) and exit").option("--clean", "skip user/custom plugins for a clean startup")'
-)
-
-# 5d. Pass clean to runProfile call
-$binContent = $binContent.Replace(
-    "await runProfile({
-			environment: loadLayeredEnv(`"dsh`"),
-			profile: invocation.profile,
-			patchFiles: invocation.patches,
-			args: invocation.args
-		});",
-    "await runProfile({
-			environment: loadLayeredEnv(`"dsh`"),
-			profile: invocation.profile,
-			patchFiles: invocation.patches,
-			args: invocation.args,
-			clean: invocation.clean
-		});"
-)
-
-Set-Content -Path $binJs -Value $binContent -Encoding UTF8 -NoNewline
-Write-Host '  [OK] bin.js patched'
+foreach ($file in $byFile.Keys) {
+    Backup-File $file | Out-Null
+    Set-Content -Path $file -Value $contents[$file] -Encoding UTF8 -NoNewline
+    Write-Host "  [OK] patched $(Split-Path $file -Leaf) ($($byFile[$file].Count) replacement(s))"
+}
+foreach ($label in $toApply) { Write-Host "       - $label" }
 
 # --------------------------------------------------------------------
-# 6. Patch profile-boot implementation
-# --------------------------------------------------------------------
-Backup-File $implFile
-$implContent = Get-Content $implFile -Raw
-
-Write-Host '  patching profile-boot implementation...'
-
-# 6a. Add clean parameter to composeProfile
-$implContent = $implContent.Replace(
-    'function composeProfile(name, patchFiles) {',
-    'function composeProfile(name, patchFiles, clean = false) {'
-)
-
-# 6b. Skip user patches when clean
-$implContent = $implContent.Replace(
-    "const profile = prepareProfile(name);
-	const homePatches = loadOptionalPatches(NAME, homePatchPath()) ?? [];
-	const overlays = patchFiles.flatMap((file) => loadOverlayPatches(NAME, resolve(file)));",
-    "const profile = prepareProfile(name, !clean);
-	const homePatches = clean ? [] : (loadOptionalPatches(NAME, homePatchPath()) ?? []);
-	const overlays = clean ? [] : patchFiles.flatMap((file) => loadOverlayPatches(NAME, resolve(file)));"
-)
-
-# 6c. Pass clean from runProfile to composeProfile
-$implContent = $implContent.Replace(
-    'const composed = composeProfile(options.profile, options.patchFiles);',
-    'const composed = composeProfile(options.profile, options.patchFiles, options.clean);'
-)
-
-# 6d. Skip hot-reload watch when clean (add !options.clean && guard)
-$implContent = $implContent.Replace(
-    "if (!signalShutdown.signal.aborted && ctx.fiber.state === 2 && ctx.get(`"loader`") !== void 0) try {",
-    "if (!options.clean && !signalShutdown.signal.aborted && ctx.fiber.state === 2 && ctx.get(`"loader`") !== void 0) try {"
-)
-
-Set-Content -Path $implFile -Value $implContent -Encoding UTF8 -NoNewline
-Write-Host '  [OK] profile-boot patched'
-
-# --------------------------------------------------------------------
-# 7. Summary
+# 5. Summary
 # --------------------------------------------------------------------
 Write-Host ''
 Write-Host 'patch-cli: DSH CLI patched successfully.' -ForegroundColor Green

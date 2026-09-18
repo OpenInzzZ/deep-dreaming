@@ -20,21 +20,19 @@
  *
  * Run: node patches/ui-settings-plugin-manager/verify-plugin-manager.mjs
  */
-import { createRequire } from 'node:module'
+import { loadDomDeps, createUiRequire } from '../../scripts/test-deps.mjs'
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const userProfile = process.env.USERPROFILE ?? process.env.HOME ?? ''
-const uiRequire = createRequire(join(userProfile, '.dsh', 'profiles', 'web', 'package.json'))
-const React = uiRequire('react')
+const uiRequire = createUiRequire(import.meta.url)
 
-let JSDOM = null
-try {
-  JSDOM = uiRequire('jsdom').JSDOM
-} catch { /* render section skipped below */ }
+const domDeps = loadDomDeps(import.meta.url)
+const React = domDeps.React
+const JSDOM = domDeps.JSDOM
+if (!domDeps.available) console.warn(`SKIP DOM checks: ${domDeps.hint}`)
 
 const hostPath = join(here, 'lib', 'index.js')
 const bundlePath = join(here, 'lib', 'client.js')
