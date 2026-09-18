@@ -1,24 +1,28 @@
-# dsh-project-memory: lightweight auto-recall / auto-review bridge to Memorix.
+# dsh-project-memory: lightweight auto-recall bridge to Memorix.
 #
 # This plugin NO LONGER provides its own memory tools. The actual storage,
 # search, deduplication, and maturity tracking are handled by Memorix
 # (installed via `memorix setup --agent dsh --global`). This plugin only
-# injects the system-prompt guidance and the session-start recall /
-# session-end review followups that tell the agent when to use the
+# injects the system-prompt guidance and the session-start recall message
+# that tell the agent when — and against which project root — to use the
 # mcp__memorix__* tools.
+#
+# There is no auto-review row: the retired autoReview phase queued an
+# agent.followup() after every completed turn, and a followup always becomes
+# a turn of its own (documented in @deepseek-ai/dsh-agent), so it added a
+# visible administrative turn per user turn. Saving is covered by the
+# guidance section below and by Memorix's own AGENTS.md rules.
 #
 # The row lives on the HOST plane: the prompt section lands in the global
 # systemPrompt layer (per-agent presets can still shadow it), and the
-# agent/status + session/event listeners are process-global by nature.
+# session/event + agent/disposed listeners are process-global by nature.
 - insert:
     - id: project-memory
       name: 'dsh-project-memory'
       config:
-        # Session-start memory recall: before the first real user turn, queue
-        # one recall followup so the agent loads relevant memories through
-        # mcp__memorix__memorix_search first (renders as the 记忆 · 检索 card).
+        # Session-start memory recall: on the first turn of a session with a
+        # workspace, inject one context message carrying that workspace root,
+        # so the agent binds the Memorix project and loads relevant memories
+        # before starting substantial work (rides inside the turn: renders as
+        # a folded context row, never as a turn of its own).
         autoRecall: true
-        # After every completed user turn, send the agent a short memory-review
-        # followup: the agent judges whether durable project knowledge was
-        # produced and saves it via mcp__memorix__memorix_store when it was.
-        autoReview: true

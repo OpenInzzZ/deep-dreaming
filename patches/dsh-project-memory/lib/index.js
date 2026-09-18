@@ -1,4 +1,4 @@
-// dsh-project-memory: lightweight auto-recall / auto-review bridge to Memorix.
+// dsh-project-memory: lightweight auto-recall bridge to Memorix.
 //
 // This plugin NO LONGER provides its own memory tools (project_memory_save /
 // search / list). Those tools are now provided by Memorix through DSH's MCP
@@ -8,13 +8,36 @@
 //  1. Inject a system-prompt section telling the agent that Memorix manages
 //     cross-session project memory, that it is PROJECT-SCOPED, and when to use
 //     its tools.
-//  2. (autoRecall) On the first real user message of a reviewable session,
-//     queue one recall followup that carries the session's project root, so
-//     the agent BINDS the project and then loads relevant memories before
-//     starting substantial work.
-//  3. (autoReview) After every completed user turn, send a short memory-review
-//     followup so the agent itself judges whether durable knowledge was
-//     produced and, if so, saves it through mcp__memorix__memorix_store.
+//  2. (autoRecall) On the FIRST turn of a recallable session, inject one
+//     context message that carries the session's project root, so the agent
+//     BINDS the project and then loads relevant memories before starting
+//     substantial work.
+//
+// There is deliberately NO auto-review phase. It used to queue a
+// `agent.followup(...)` after every completed turn, and `followup()` is
+// documented as "the item becomes the sole ordinary message of its own turn":
+// every user turn therefore bought a second, purely administrative turn whose
+// only visible trace was a Thinking row plus a one-line reply ("无需记录") —
+// measured at 23 extra turns in one 62-turn session. An assistant step is a
+// fixed chat-node kind owned by the shipped chat renderer, so that turn cannot
+// be re-rendered as a compact card without taking over assistant rendering for
+// every turn. Saving is instead driven by the guidance section below (and by
+// Memorix's own AGENTS.md rules); when the agent does save, the call renders as
+// the existing collapsible "记忆 · 保存/更新" tool card, which is the compact
+// form the user asked for.
+//
+// Why the recall uses `agent.inject(...)` rather than `followup(...)`: inject
+// queues model-facing context for the next pre-step WITHOUT waking the driver,
+// so the recall rides inside the user's own turn (exactly how DSH delivers its
+// own runtime-context notices) instead of opening another turn.
+//
+// Why it fires on `turn/start`: the previous implementation fired on the first
+// `user/message` session event and looked the agent up with `ctx.agents.get()`,
+// which returns undefined at that moment (the agent enters the registry when it
+// is published, after the message is logged). The recall therefore NEVER fired
+// — 0 recalls across the 8 largest session logs on this machine, while the
+// review fired on nearly every turn. `turn/start` is emitted by the agent that
+// owns the turn, so the lookup succeeds by construction.
 //
 // Why the binding step exists (dsh 0.1.5 / Memorix 1.9): Memorix isolates
 // memory per git-backed project, and DSH starts ONE MCP server for the whole
@@ -26,16 +49,16 @@
 //   memorix_session_start({ projectRoot: "<session workspace root>" })
 //
 // The host half knows that root (the session header's `cwd`), so the recall
-// and review followups hand it to the agent explicitly. Two sessions in
-// DIFFERENT workspaces share one server and therefore one binding: the last
-// binding wins, so each session must re-bind at its own start.
+// message hands it to the agent explicitly. Two sessions in DIFFERENT
+// workspaces share one server and therefore one binding: the last binding
+// wins, so each session must re-bind at its own start.
 //
 // The actual storage backend (SQLite + Orama search), deduplication, maturity
 // tracking, semantic search, Git Memory, and Reasoning Memory are all handled
 // by Memorix. This plugin is only the "prompt oracle" that tells the agent
 // when (and against which project) to use those tools.
 //
-// Subagent sessions are never reviewed; the project root is the owning
+// Subagent sessions never get a recall; the project root is the owning
 // session's header cwd (the workspace the user attached the session to).
 
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
@@ -45,18 +68,18 @@ const name = "project-memory";
 const inject = ["systemPrompt", "agents"];
 
 /**
- * Entry config schema. Only the two behavioural toggles remain; all
- * storage-layer options (memoryDirName, autoDedupe, mergeContentThreshold,
- * trackUsage) are now owned by Memorix's own config (memorix.toml /
- * ~/.memorix/config.toml).
+ * Entry config schema. Only the recall toggle remains; all storage-layer
+ * options (memoryDirName, autoDedupe, mergeContentThreshold, trackUsage) are
+ * owned by Memorix's own config (memorix.toml / ~/.memorix/config.toml), and
+ * the retired `autoReview` key is simply ignored by this schema (unknown keys
+ * are stripped, so an old patch-file config does not fail startup).
  */
 export const Config = z.object({
-  /** Session-start memory recall: before the first real user turn, queue a
-   * recall followup so the agent loads relevant memories first (renders as
-   * the collapsible "记忆 · 检索" card). */
+  /** Session-start memory recall: on the first turn of a session with a
+   * workspace, hand the agent its project root and the binding step, so it
+   * loads relevant memories before starting substantial work (renders as a
+   * folded context row, never as a turn of its own). */
   autoRecall: z.boolean().default(true),
-  /** Send a short memory-review followup after every completed user turn. */
-  autoReview: z.boolean().default(true),
 });
 
 /**
@@ -79,31 +102,23 @@ const GUIDANCE_SECTION = `\
 - 只记录事实与结论,不记录过程性对话。需要记忆详情用 mcp__memorix__memorix_detail,需要记忆图上下文用 mcp__memorix__memorix_graph_context。
 </project_memory>`;
 
-/** The session-start memory recall followup: bind the project, then load
+/** The session-start memory recall message: bind the project, then load
  * relevant memories first. The project root is the session's own workspace,
- * because one MCP server serves every workspace in the process. */
+ * because one MCP server serves every workspace in the process. The non-git
+ * clause matters for the temp-session workspace (`~/.dsh/tmp-workspaces`), a
+ * real directory that Memorix cannot bind: the agent must not retry there. */
 const recallPrompt = (projectRoot) => `\
 [项目记忆召回 · memory search] 会话开始。本会话的工作区根目录是 ${projectRoot}。
-第一步必须先绑定项目(未绑定时 Memorix 的记忆工具会拒绝服务):
+第一步先绑定项目(未绑定时 Memorix 的记忆工具会拒绝服务):
   mcp__memorix__memorix_session_start({ projectRoot: ${JSON.stringify(projectRoot)} })
-绑定后调用 mcp__memorix__memorix_project_context 取与本任务相关的既有记忆(项目约定、关键决策、踩坑经验、接口或数据结构事实等),遵循既有约定、避免重复探索;完成一次完整 brief 后即以此为检索边界,不要重复检索。若无相关记忆,直接开始工作即可。`;
+绑定后调用 mcp__memorix__memorix_project_context 取与本任务相关的既有记忆(项目约定、关键决策、踩坑经验、接口或数据结构事实等),遵循既有约定、避免重复探索;完成一次完整 brief 后即以此为检索边界,不要重复检索。若无相关记忆,直接开始工作即可;若该目录不是 git 仓库(例如临时会话目录)导致绑定失败,直接开始工作,不要反复重试。`;
 
-/** The auto-review followup message text (session-end memory save/update).
- * Deliberately terse and reply-guiding: the review prompt is folded into a
- * one-line context notice, and the agent's own reply should stay minimal —
- * the save result already renders as its own collapsible memory card, so the
- * reply must not restate it. The binding clause covers the case where the
- * session never ran the recall (autoRecall off, or a session that started
- * before the row was enabled). */
-const reviewPrompt = (projectRoot) => `\
-[项目记忆回顾 · memory save/update] 判断本轮是否产生值得跨会话保留的项目知识。若有,直接调用 mcp__memorix__memorix_store 保存或更新(同主题更新,否则新建),不要先输出分析文字,保存后也不要复述结果;若保存报错提示项目未绑定,先调用 mcp__memorix__memorix_session_start({ projectRoot: ${JSON.stringify(projectRoot)} }) 绑定本会话工作区再重试;若没有值得记录的内容,直接结束本轮,不输出任何内容。`;
-
-/** Whether an agent is a reviewable root session (has a project, not a subagent).
+/** Whether an agent is a recallable root session (has a project, not a subagent).
  * Subagent children are marked by the session header's `origin === 'subagent'`
  * (see @deepseek-ai/dsh-session `SessionHeader`); there is no `parentSessionId`
  * field — `parentSession` only records fork/seed lineage and does not
- * disqualify a session from review. */
-function reviewable(agent) {
+ * disqualify a session from recall. */
+function recallable(agent) {
   const header = agent.session?.header;
   if (header === void 0) return false;
   if (header.origin === "subagent") return false;
@@ -118,60 +133,16 @@ function projectRootOf(agent) {
   return typeof cwd === "string" && cwd.length > 0 ? cwd : "(unknown workspace)";
 }
 
-/** Install the session-end memory review: after a completed user turn, the
- * agent itself judges whether the work is worth remembering. */
-function installReview(ctx, autoReview) {
-  if (!autoReview) return;
-  const states = new Map();
-  const stateFor = (agent) => {
-    let state = states.get(agent);
-    if (state === void 0) {
-      state = { pending: false, reviewing: false };
-      states.set(agent, state);
-    }
-    return state;
-  };
-  ctx.on("agent/disposed", ({ agent }) => {
-    states.delete(agent);
-  });
-  ctx.on("session/event", (session, event) => {
-    const agent = ctx.agents.get(session.id);
-    if (agent === void 0 || agent.session !== session) return;
-    const state = stateFor(agent);
-    if (event.type === "user/message") {
-      // The review followup itself is a user/message with kind "memory";
-      // it must not arm another review. The event data IS the message
-      // object (source sits on `data.source`, not `data.message.source`).
-      if (event.data.source?.kind !== "memory") state.pending = true;
-    } else if (event.type === "turn/end") {
-      state.reviewing = false;
-      // Only review work that finished cleanly; aborted/error/max-tokens
-      // turns leave the agent in an unreliable state.
-      if (event.data.reason?.kind !== "completed") state.pending = false;
-    }
-  });
-  ctx.on("agent/status", ({ agent, status }) => {
-    if (status !== "idle") return;
-    const state = stateFor(agent);
-    if (!state.pending || state.reviewing || !reviewable(agent)) return;
-    state.pending = false;
-    state.reviewing = true;
-    try {
-      agent.followup(createUserMessage({
-        content: [{ type: "text", text: reviewPrompt(projectRootOf(agent)) }],
-        source: { kind: "memory", review: true, form: "notice", summary: "项目记忆回顾 · memory save/update" }
-      }));
-    } catch (error) {
-      ctx.logger.warn(`project-memory: could not queue the memory review for agent "${agent.id}": ${String(error)}`);
-      state.reviewing = false;
-    }
-  });
-}
-
-/** Install the session-start memory recall: on the first real user message of
- * a reviewable session, queue one recall followup so the agent loads relevant
- * memories before substantial work (the search call renders as the
- * collapsible "记忆 · 检索" memory card). Fires at most once per session. */
+/** Install the session-start memory recall: on the FIRST turn of a reviewable
+ * session, inject one context message into that turn.
+ *
+ * `inject` (next-step, no wake) rather than `followup` (next-turn, wake): the
+ * former rides inside the user's own turn like any other context notice, the
+ * latter would open a turn of its own. Fires at most once per agent.
+ *
+ * `turn/start` rather than the first `user/message`: the agent is only in
+ * `ctx.agents` once published, which happens after the first message is logged,
+ * so a message-triggered lookup always missed (see the module comment). */
 function installRecall(ctx, autoRecall) {
   if (!autoRecall) return;
   const recalled = new Set();
@@ -179,22 +150,20 @@ function installRecall(ctx, autoRecall) {
     recalled.delete(agent);
   });
   ctx.on("session/event", (session, event) => {
+    if (event.type !== "turn/start") return;
     const agent = ctx.agents.get(session.id);
     if (agent === void 0 || agent.session !== session) return;
     if (recalled.has(agent)) return;
-    if (event.type !== "user/message") return;
-    // Our own followups (recall/review) are user/message with kind "memory";
-    // they must not arm the recall. The event data IS the message object.
-    if (event.data.source?.kind === "memory") return;
-    if (!reviewable(agent)) return;
+    if (!recallable(agent)) return;
     recalled.add(agent);
     try {
-      agent.followup(createUserMessage({
+      agent.inject(createUserMessage({
         content: [{ type: "text", text: recallPrompt(projectRootOf(agent)) }],
         source: { kind: "memory", recall: true, form: "notice", summary: "项目记忆召回 · memory search" }
       }));
     } catch (error) {
-      ctx.logger.warn(`project-memory: could not queue the memory recall for agent "${agent.id}": ${String(error)}`);
+      recalled.delete(agent);
+      ctx.logger.warn(`project-memory: could not inject the memory recall for agent "${agent.id}": ${String(error)}`);
     }
   });
 }
@@ -209,10 +178,9 @@ function installGuidance(ctx) {
 }
 
 function apply(ctx, config) {
-  const { autoRecall, autoReview } = config ?? {};
+  const { autoRecall } = config ?? {};
   installGuidance(ctx);
   installRecall(ctx, autoRecall);
-  installReview(ctx, autoReview);
 }
 
 export { apply, inject, name };

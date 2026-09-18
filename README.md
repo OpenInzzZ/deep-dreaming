@@ -33,7 +33,7 @@ deep-dreaming/
 
 | 补丁 | 作用 | 部署方式 | 使用文档 |
 | --- | --- | --- | --- |
-| [dsh-project-memory](patches/dsh-project-memory/) | 跨会话项目记忆:**Memorix 桥接**——注入提示词并自动发起「会话开始召回 / 会话结束回顾」,记忆存取由 Memorix 经 MCP(`mcp__memorix__*`)完成;记忆工具调用以**可折叠「记忆阶段」卡片**展示 | `dsh plugin --profile web add` 安装到 profile(组合包)+ Memorix 全局安装与 `memorix setup --agent dsh --global` | [README](patches/dsh-project-memory/README.md) |
+| [dsh-project-memory](patches/dsh-project-memory/) | 跨会话项目记忆:**Memorix 桥接**——注入提示词并在会话第一轮召回既有记忆(带上工作区根目录与项目绑定),记忆存取由 Memorix 经 MCP(`mcp__memorix__*`)完成;记忆工具调用以**可折叠「记忆阶段」卡片**展示,**不产生额外对话轮次** | `dsh plugin --profile web add` 安装到 profile(组合包)+ Memorix 全局安装与 `memorix setup --agent dsh --global` | [README](patches/dsh-project-memory/README.md) |
 | [session-cleanup](patches/session-cleanup/) | 按天数/容量定期清理归档会话,跳过活跃会话 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/session-cleanup/README.md) |
 | [ui-settings-plugin-manager](patches/ui-settings-plugin-manager/) | Web 设置新增「插件管理」标签页:状态过滤 + 官方/自定义分类 + **启停开关(热生效)** | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-settings-plugin-manager/README.md) |
 | [ui-settings-other](patches/ui-settings-other/) | Web 设置新增「其他」页:服务运行状态(pid/端口/内存/版本)+ **重载用户插件(热,不中断会话)** + **创建桌面快捷方式(鲸鱼娘图标)** + 重启/中断服务(危险)+ 空闲自动停止(可配,默认 2h);**覆盖 Web 标题栏 favicon 为鲸鱼娘图标**;配套静默启动脚本与品牌资产 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-settings-other/README.md) |
@@ -161,11 +161,23 @@ node patches/whale-background/tests/load-smoke.mjs              # 鲸鱼娘图�
    0.1.5-rc.2 重写,并**逐个替换做校验**:模式不匹配时响亮失败、不写半套。
 5. **Memorix 必须绑定项目**:dsh 全进程只有一个 MCP 实例、工作目录是进程
    cwd(非 git 仓库),Memorix 会拒绝一切项目级工具,直到会话调用
-   `memorix_session_start({ projectRoot })`;`dsh-project-memory` 的召回/回顾
-   提示现在带上本会话工作区根目录。详见该补丁 README。
+   `memorix_session_start({ projectRoot })`;`dsh-project-memory` 的召回提示
+   现在带上本会话工作区根目录。详见该补丁 README。
 6. **`--clean` 仍然可用**:`dsh web --clean` 跳过用户层(`cordis.patch.yml`
    与 `--patch`),用户补丁把启动搞挂时的自救入口;它跳过的内容等价于
    `--dump-default-config` 打印的组合。
+7. **回合后的「记忆回顾」已删除**(实测噪音 + 机制限制):`agent.followup(...)`
+   的官方语义是「该条目自成一整轮」,所以旧 autoReview 每轮都多开一轮只含
+   Thinking + 一句「无需记录」的对话 —— 本机某 62 轮会话里有 23 轮是这么来的。
+   assistant 步骤的 chat node kind 由官方渲染器固定拥有,无法像工具卡片那样
+   折叠,因此不再做回顾;保存改由 guidance 与 Memorix 的 `AGENTS.md` 规约驱动
+   (保存时本来就是图 2 那种 `记忆 · 保存/更新` 卡片)。
+8. **会话开始召回此前是死代码**(顺带修好):旧实现挂在第一条 `user/message`
+   上并用 `ctx.agents.get()` 查 agent,而 agent 是在该消息落盘**之后**才发布
+   进注册表的,查询必然落空 —— 本机 8 份最大的会话日志里 **0 次召回**。现在
+   改挂 `turn/start`(由拥有该轮次的 agent 发出,查得到),并用
+   `agent.inject(...)`(next-step、不唤醒)投递,使召回落在用户本轮之内而不
+   新开一轮。
 
 ### 本轮部署状态(2026-09-18)
 
@@ -181,8 +193,9 @@ node patches/whale-background/tests/load-smoke.mjs              # 鲸鱼娘图�
 
 需要**重启 dsh web** 才生效:
 
-- host 半源码改动 —— `patches/dsh-project-memory/lib/index.js` 的 guidance
-  段落与召回/回顾提示(带本会话工作区根目录的绑定步骤);
+- host 半源码改动 —— `patches/dsh-project-memory/lib/index.js`:
+  guidance 段落、第一轮召回(带本会话工作区根目录与绑定步骤)、
+  **移除 autoReview**(重启后不再有回合结束的记忆回顾轮次);
 - `package.json` 里的 `dsh.client.inject` 元数据(启动时缓存的扫描结果)。
 
 重启命令:`powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.dsh\scripts\restart-dsh.ps1"`

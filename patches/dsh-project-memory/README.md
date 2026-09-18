@@ -40,13 +40,11 @@ No git project could be resolved from "C:\Users\<user>\.dsh\profiles\web".
 mcp__memorix__memorix_session_start({ projectRoot: "D:\\GitHub\\my-project" })
 ```
 
-本插件的 host 半知道该路径(会话 header 的 `cwd`),所以**召回/回顾提示里会
-直接带上它**,Agent 无需自己猜:
-
-- 会话开始(autoRecall)-> 「项目记忆召回 · memory search」,第一步就是绑定,
-  然后用 `mcp__memorix__memorix_project_context` 取任务 brief;
-- 会话结束(autoReview)-> 「项目记忆回顾 · memory save/update」,保存工具报
-  "未绑定" 时按提示绑定后重试。
+本插件的 host 半知道该路径(会话 header 的 `cwd`),所以**召回提示里会直接
+带上它**,Agent 无需自己猜:会话开始(autoRecall)收到「项目记忆召回 ·
+memory search」,第一步就是绑定,然后用
+`mcp__memorix__memorix_project_context` 取任务 brief。若该目录不是 git 仓库
+(例如临时会话目录),提示会要求 agent 直接开始工作、不要反复重试绑定。
 
 > **并发限制**:同一进程内所有会话共享这一个 MCP 实例,因此**绑定是全局的**
 > ——两个不同工作区的会话同时运行时,后绑定者会覆盖前者。各会话在自己的开始
@@ -58,14 +56,38 @@ mcp__memorix__memorix_session_start({ projectRoot: "D:\\GitHub\\my-project" })
 1. **常驻指令**(注入每个会话的 system prompt,`systemPrompt.section`
    `project-memory:guidance`):说明 Memorix 是项目级记忆、必须绑定、
    何时检索(brief)、何时保存(store),以及只记事实与结论。
-2. **会话开始自动召回**(`autoRecall`,默认开):根会话(有工作区)收到
-   **第一条**真实用户消息时立即发送一条 context notice 形态的提示
-   (摘要「项目记忆召回 · memory search」),要求先绑定、再取 brief。
-   每次会话仅一次;子代理不触发;没有工作区的会话不触发。
-3. **会话完成自动回顾**(`autoReview`,默认开):每轮用户消息被**完整**回答
-   后(turn 正常完成、agent 回到 idle),发送一条「项目记忆回顾 ·
-   memory save/update」提示,由 Agent 自行判断是否值得记录;中断/出错/超限
-   的轮次与子代理会话都不会触发,提示自身也不会再次武装回顾。
+2. **会话开始自动召回**(`autoRecall`,默认开):会话**第一轮**
+   (`turn/start`)把一条 context notice 注入**当轮**——携带本会话工作区
+   根目录与绑定调用,要求先绑定、再取 brief。每个会话仅一次;子代理不触发;
+   没有工作区的会话不触发。
+   - 用 `agent.inject(...)`(next-step,**不唤醒**驱动器)而不是
+     `agent.followup(...)`:前者像 DSH 自己的运行时上下文一样落在用户本轮
+     之内,后者按官方语义是「**该条目自成一整轮**」,会凭空多出一轮对话。
+   - 触发点用 `turn/start` 而不是第一条 `user/message`:第一条用户消息落盘时
+     agent 还没进入 `ctx.agents`(发布顺序在消息之后),`agents.get()` 必然
+     返回 undefined —— 这正是旧版召回**从未生效**的原因(实测:本机 8 份最大
+     的会话日志里 0 次召回)。
+3. **不产生任何额外轮次**:插件不再在回合结束后做任何事(见下)。
+
+### 为什么没有「会话结束自动回顾」
+
+旧版本的 `autoReview` 在每轮完成、agent 回到 idle 时调用
+`agent.followup(回顾提示)`,而 `followup()` 的官方语义是
+*The item becomes the sole ordinary message of its own turn* —— 于是**每个
+用户轮次都会多出一轮纯管理性的对话**,可见痕迹只有一行 Thinking 加一句
+「无需记录」。实测某 62 轮会话里有 **23 轮**是这样产生的。
+
+能否把它渲染成图 2 那种折叠卡?不能:assistant 步骤的 chat node kind 由官方
+chat 渲染器固定拥有(`conversation.chat.node` 的 key 表),要折叠它就得接管
+**所有**轮次的 assistant 渲染 —— 代价远超收益。(图 2 那种卡片之所以可行,是
+因为记忆**工具调用**走的是 `tool.call.toolview` 这个 key 开放的工具视图槽位;
+真正保存时它本来就已经是那个样子。)
+
+因此保存改为只由常驻指令 + Memorix 自带的 `~/.dsh/AGENTS.md` 规约驱动;agent
+保存时依旧渲染为可折叠的「记忆 · 保存/更新」卡片,不保存时不留下任何痕迹。
+旧配置里的 `autoReview: true` 会被 schema 忽略(未知键被剥离),不会导致启动
+失败;确实想恢复该行为可从 git 历史取回。
+
 4. **只做提示,不做存储**:本插件不 import 任何存储代码、不注册工具、
    不读写文件——Memorix 的 SQLite/Orama 后端、去重、成熟度、Git Memory、
    Reasoning Memory 都由 Memorix 自己拥有。
@@ -87,8 +109,9 @@ primitives 的 `DisclosureRow`):
 **默认全部折叠**(含执行中的卡片,摘要显示「运行中…」),点击行展开。
 修改 `client.js` 后需重启 dsh web 生效(与其它补丁源码一致)。
 
-会话开始/结束的**召回与回顾提示**本身以官方 context notice 形态注入
-(`source.form = 'notice'` + `summary`),折叠为一行摘要,不占对话流。
+会话开始的**召回提示**本身以官方 context notice 形态注入
+(`source.form = 'notice'` + `summary`),折叠为一行摘要,并落在用户本轮之内,
+不占额外对话轮次;召回里出现的 `mcp__memorix__*` 调用同样渲染为上面的卡片。
 
 ## 从旧版迁移
 
@@ -118,11 +141,11 @@ narrative。**旧笔记不会被删除**,确认导入成功后可自行归档/�
 - id: project-memory
   config:
     autoRecall: false   # 关闭会话开始自动召回(仍可手动调用记忆工具)
-    autoReview: false   # 关闭会话完成自动回顾(仍可手动调用记忆工具)
 ```
 
 > 旧配置里的 `memoryDirName` / `autoDedupe` / `mergeContentThreshold` /
-> `trackUsage` 已不存在:未知键会被 schema 忽略(不报错),便于平滑迁移。
+> `trackUsage` / `autoReview` 已不存在:未知键会被 schema 忽略(不报错),
+> 便于平滑迁移。
 
 ## 安装
 
@@ -162,15 +185,16 @@ node patches/dsh-project-memory/tests/client-contract.mjs  # 浏览器半:4 个�
 ```
 
 冒烟覆盖:apply 返回值不是 thenable(Invalid effect 回归)、Config 对错误
-类型响亮失败、guidance 段落含绑定步骤与工具名、召回提示携带本会话工作区根
-目录且只触发一次/排除子代理、回顾提示跟随 completed 轮次且不被自身消息重新
-武装、桥接不注册任何工具。
+类型响亮失败而旧键(含 `autoReview`)被容忍、guidance 段落含绑定步骤与工具名、
+召回在**第一轮** `turn/start` 时以 `inject` 投递(不是 followup、不自成一轮)、
+携带本会话工作区根目录、只触发一次、排除子代理与无工作区会话、
+**轮次结束/再次空闲后不再产生任何消息**(旧 autoReview 的噪音回归守卫)。
 
 ## 相关文件
 
-- `lib/index.js` — host 半:guidance 段落 + autoRecall/autoReview 事件流
+- `lib/index.js` — host 半:guidance 段落 + 第一轮召回(inject)
 - `client.js` — 浏览器半:Memorix 工具的折叠卡片
-- `cordis.patch.yml` — bundle 层条目(两个开关的默认值)
+- `cordis.patch.yml` — bundle 层条目(`autoRecall` 默认值)
 
 > 旧版本地存储实现(`lib/store.js`:相似度合并、成熟度、`.dsh-memory/` 读写)
 > 与其单测已在 Memorix 迁移完成后删除 —— 存储归 Memorix,笔记格式的解析由

@@ -1,24 +1,30 @@
 // Plugin smoke test against the REAL @deepseek-ai/cordis runtime.
 //
 // The plugin under test is the Memorix BRIDGE: it registers no tools of its
-// own, it injects prompt guidance and queues the session-start recall /
-// session-end review followups that tell the agent when (and against which
+// own, it injects prompt guidance and — on the first turn of a reviewable
+// session — one context message that tells the agent when (and against which
 // project root) to call the `mcp__memorix__*` tools. This test mounts it
 // through ctx.plugin() (so the Cordis loader validates the exported Config
 // schema and fills defaults), stubs the two injected services with
 // ctx.provide, then verifies:
 //  1. awaiting the fiber does not throw TypeError('Invalid effect') — the
 //     apply-return-value regression guard;
-//  2. config validation fails loudly for wrong-typed values, and the schema
-//     reports only the two behavioural toggles (storage options moved to
-//     Memorix, so legacy keys in an entry config are tolerated, not fatal);
+//  2. config validation fails loudly for wrong-typed values; storage-layer
+//     options moved to Memorix and the retired `autoReview` key are tolerated
+//     (unknown keys are stripped), so an old patch-file config cannot break
+//     startup;
 //  3. the guidance prompt section is registered and teaches the PROJECT
 //     BINDING step — the failure mode this bridge exists to avoid is an agent
 //     calling memory tools on an unbound Memorix instance, which refuses them;
-//  4. the session-start recall carries THIS session's workspace root and the
-//     binding call, fires once per session, and never for subagents;
-//  5. the auto-review followup follows a completed user turn, never re-arms
-//     itself, and never reviews subagents.
+//  4. the session-start recall is delivered with `inject` (in-turn, NOT a
+//     `followup` turn of its own), carries THIS session's workspace root and
+//     the binding call, fires once per session, fires only from `turn/start`
+//     (the first `user/message` precedes agent registration — the bug that made
+//     the old recall silently never fire), and never for subagents;
+//  5. NO turn is opened by the plugin afterwards: an idle status, a completed
+//     turn, or a further user message must not queue anything, because the
+//     retired auto-review phase did exactly that and produced one visible
+//     administrative turn per user turn.
 import { Context } from "@deepseek-ai/cordis";
 import * as plugin from "../lib/index.js";
 
@@ -36,11 +42,11 @@ ctx.provide("agents", {
 // Mount with a PARTIAL config on purpose: the loader resolves `plugin.Config`
 // and fills the schema defaults. Awaiting the fiber must NOT throw
 // TypeError('Invalid effect').
-const fiber = await ctx.plugin(plugin, { autoReview: true });
+const fiber = await ctx.plugin(plugin, {});
 
 // Config validation must fail loudly at load time ("配置错误要响亮") instead of
 // being silently clamped or defaulted.
-for (const badConfig of [{ autoRecall: "yes" }, { autoReview: 1 }]) {
+for (const badConfig of [{ autoRecall: "yes" }, { autoRecall: 1 }]) {
 	let validationError = null;
 	try {
 		await ctx.plugin(plugin, badConfig);
@@ -50,6 +56,16 @@ for (const badConfig of [{ autoRecall: "yes" }, { autoReview: 1 }]) {
 	if (validationError === null || !/invalid config/.test(String(validationError?.message))) {
 		throw new Error(`bad config was not rejected loudly: ${JSON.stringify(badConfig)} → ${validationError === null ? "no error" : validationError.message}`);
 	}
+}
+// A legacy config (the retired autoReview key, plus the old storage options)
+// must load cleanly: unknown keys are stripped, not rejected. Mounted on its
+// own context so the assertions below see exactly one live plugin instance.
+{
+	const legacyCtx = new Context();
+	legacyCtx.provide("systemPrompt", { section() { return () => {}; } });
+	legacyCtx.provide("agents", { get() { return undefined; } });
+	const legacyFiber = await legacyCtx.plugin(plugin, { autoRecall: true, autoReview: true, memoryDirName: ".dsh-memory" });
+	await legacyFiber.dispose();
 }
 
 try {
@@ -66,7 +82,12 @@ try {
 	ctx.provide("tools", { register(tool) { toolCalls.push(tool); return () => {}; } });
 
 	const section = registered.sections[0];
-	if (registered.sections.length !== 1 || section?.name !== "project-memory:guidance") throw new Error("guidance section missing");
+	// Every successful mount registers exactly one guidance section (the test
+	// deliberately mounts the plugin more than once: defaults + legacy config).
+	if (registered.sections.length < 1) throw new Error("guidance section missing");
+	if (registered.sections.some((s) => s.name !== "project-memory:guidance")) {
+		throw new Error(`unexpected prompt sections: ${registered.sections.map((s) => s.name).join(", ")}`);
+	}
 	// The binding step is the difference between working memory and a refused
 	// tool call, so the guidance must name the call and the parameter.
 	if (!section.text.includes("mcp__memorix__memorix_session_start")) throw new Error("guidance must teach the project-binding call");
@@ -75,24 +96,36 @@ try {
 	if (!section.text.includes("mcp__memorix__memorix_store")) throw new Error("guidance must name the save tool");
 	if (!section.text.includes("<project_memory>")) throw new Error("guidance must keep the prompt-section wrapper");
 
-	// ── session-start memory recall (memory search phase) ─────────────
+	const agent = (id, header) => ({
+		id,
+		session: { id, header },
+		followed: [],
+		injected: [],
+		followup(message) { this.followed.push(message); },
+		inject(message) { this.injected.push(message); },
+	});
+
+	// ── the first user message alone must NOT deliver the recall ───────
+	// It is logged before the agent is published, which is exactly why the old
+	// message-triggered lookup never found an agent.
 	const cwd = "D:\\GitHub\\deep-dreaming";
-	const recallAgent = {
-		id: "session-recall",
-		session: { id: "session-recall", header: { cwd, origin: void 0 } },
-		followed: void 0,
-		followup(message) { this.followed = message; }
-	};
-	agentStore.set("session-recall", recallAgent);
-	ctx.emit("session/event", recallAgent.session, { type: "user/message", data: { source: { kind: "user" } } });
-	if (!recallAgent.followed) throw new Error("recall followup was not sent on the first user message");
-	if (recallAgent.followed.source?.kind !== "memory" || recallAgent.followed.source?.recall !== true) {
-		throw new Error(`recall message source wrong: ${JSON.stringify(recallAgent.followed?.source)}`);
+	const root = agent("session-root", { cwd, origin: void 0 });
+	agentStore.set("session-root", root);
+	ctx.emit("session/event", root.session, { type: "user/message", data: { source: { kind: "user" } } });
+	if (root.injected.length !== 0) throw new Error("recall must not be delivered from the first user message");
+
+	// ── the first turn delivers it, in-turn ────────────────────────────
+	ctx.emit("session/event", root.session, { type: "turn/start", data: { turn: 1 } });
+	if (root.injected.length !== 1) throw new Error(`recall must be injected on turn/start, got ${root.injected.length}`);
+	if (root.followed.length !== 0) throw new Error("recall must NOT open a turn of its own (followup)");
+	const recall = root.injected[0];
+	if (recall.source?.kind !== "memory" || recall.source?.recall !== true) {
+		throw new Error(`recall message source wrong: ${JSON.stringify(recall.source)}`);
 	}
-	if (recallAgent.followed.source?.form !== "notice" || recallAgent.followed.source?.summary !== "项目记忆召回 · memory search") {
-		throw new Error(`recall must render as a collapsed context notice: ${JSON.stringify(recallAgent.followed?.source)}`);
+	if (recall.source?.form !== "notice" || recall.source?.summary !== "项目记忆召回 · memory search") {
+		throw new Error(`recall must render as a folded context notice: ${JSON.stringify(recall.source)}`);
 	}
-	const recallText = recallAgent.followed.content[0].text;
+	const recallText = recall.content[0].text;
 	if (!recallText.includes("项目记忆召回")) throw new Error("recall message text wrong");
 	if (!recallText.includes("mcp__memorix__memorix_session_start")) throw new Error("recall must instruct the project binding");
 	// The binding must carry THIS session's workspace, JSON-quoted so a
@@ -101,66 +134,37 @@ try {
 		throw new Error(`recall must bind the session workspace root ${JSON.stringify(cwd)}: ${recallText}`);
 	}
 	if (!recallText.includes("mcp__memorix__memorix_project_context")) throw new Error("recall must point at the autopilot brief");
+	if (!recallText.includes("git")) throw new Error("recall must cover the non-git workspace case (temp sessions)");
 
-	// the recall's own user/message event must not re-arm the recall
-	ctx.emit("session/event", recallAgent.session, { type: "user/message", data: recallAgent.followed });
-	recallAgent.followed = void 0;
-	ctx.emit("session/event", recallAgent.session, { type: "user/message", data: { source: { kind: "user" } } });
-	if (recallAgent.followed !== void 0) throw new Error("recall re-armed by a second user message");
-	// subagents must never receive the recall either
-	const recallSub = { id: "session-recall-sub", session: { id: "session-recall-sub", header: { cwd, origin: "subagent" } }, followed: void 0, followup(m) { this.followed = m; } };
-	agentStore.set("session-recall-sub", recallSub);
-	ctx.emit("session/event", recallSub.session, { type: "user/message", data: { source: { kind: "user" } } });
-	if (recallSub.followed !== void 0) throw new Error("subagent got a recall followup");
+	// once per session only, and later turns never re-deliver
+	root.injected.length = 0;
+	ctx.emit("session/event", root.session, { type: "turn/start", data: { turn: 2 } });
+	ctx.emit("session/event", root.session, { type: "user/message", data: { source: { kind: "user" } } });
+	if (root.injected.length !== 0) throw new Error("recall re-delivered on a later turn");
 
-	// ── auto-review event flow (real cordis events) ───────────────────
-	const fakeAgent = {
-		id: "session-fake",
-		session: { id: "session-fake", header: { cwd, origin: void 0 } },
-		followed: void 0,
-		followup(message) { this.followed = message; }
-	};
-	agentStore.set("session-fake", fakeAgent);
-	// user turn completes → idle → review followup queued
-	ctx.emit("session/event", fakeAgent.session, { type: "user/message", data: { source: { kind: "user" } } });
-	ctx.emit("agent/status", { agent: fakeAgent, status: "idle" });
-	if (!fakeAgent.followed) throw new Error("review followup was not sent");
-	if (fakeAgent.followed.source?.kind !== "memory") throw new Error("review message source wrong");
-	if (fakeAgent.followed.source?.form !== "notice" || fakeAgent.followed.source?.summary !== "项目记忆回顾 · memory save/update") {
-		throw new Error(`review must render as a collapsed context notice: ${JSON.stringify(fakeAgent.followed?.source)}`);
-	}
-	const reviewText = fakeAgent.followed.content[0].text;
-	if (!reviewText.includes("项目记忆回顾")) throw new Error("review message text wrong");
-	if (!reviewText.includes("mcp__memorix__memorix_store")) throw new Error("review must point at the store tool");
-	// The review is the fallback binder: a session whose recall never ran must
-	// still be able to bind before saving.
-	if (!reviewText.includes("mcp__memorix__memorix_session_start") || !reviewText.includes(JSON.stringify(cwd))) {
-		throw new Error(`review must carry the binding fallback for ${JSON.stringify(cwd)}: ${reviewText}`);
-	}
-	// the review's own user/message event (data IS the message, whose
-	// source.kind is "memory") must not arm another review
-	ctx.emit("session/event", fakeAgent.session, { type: "user/message", data: fakeAgent.followed });
-	fakeAgent.followed = void 0;
-	ctx.emit("agent/status", { agent: fakeAgent, status: "idle" });
-	if (fakeAgent.followed !== void 0) throw new Error("review re-armed by its own message");
-	// second idle without a new user message must NOT re-arm
-	ctx.emit("agent/status", { agent: fakeAgent, status: "idle" });
-	if (fakeAgent.followed !== void 0) throw new Error("review re-armed without a new user message");
-	// subagents (header.origin === "subagent") must never be reviewed
-	const sub = { id: "session-sub", session: { id: "session-sub", header: { cwd, origin: "subagent" } }, followed: void 0, followup(m) { this.followed = m; } };
+	// ── nothing may open a turn after a completed turn ─────────────────
+	// The retired auto-review phase did this; it is the noise the user asked
+	// to remove (one administrative turn per user turn).
+	ctx.emit("session/event", root.session, { type: "turn/end", data: { reason: { kind: "completed" } } });
+	ctx.emit("agent/status", { agent: root, status: "idle" });
+	if (root.followed.length !== 0) throw new Error("a completed turn must not queue a review turn");
+	if (root.injected.length !== 0) throw new Error("a completed turn must not inject anything");
+
+	// ── subagents and workspace-less sessions never get a recall ────────
+	const sub = agent("session-sub", { cwd, origin: "subagent" });
 	agentStore.set("session-sub", sub);
-	ctx.emit("session/event", sub.session, { type: "user/message", data: { source: { kind: "user" } } });
-	ctx.emit("agent/status", { agent: sub, status: "idle" });
-	if (sub.followed !== void 0) throw new Error("subagent got a review followup");
+	ctx.emit("session/event", sub.session, { type: "turn/start", data: { turn: 1 } });
+	if (sub.injected.length !== 0 || sub.followed.length !== 0) throw new Error("subagent got a recall");
+
+	const blank = agent("session-blank", { cwd: "", origin: void 0 });
+	agentStore.set("session-blank", blank);
+	ctx.emit("session/event", blank.session, { type: "turn/start", data: { turn: 1 } });
+	if (blank.injected.length !== 0) throw new Error("a session without a workspace must not get a recall");
+
+	// an unregistered session (agent lookup miss) must be ignored, not thrown
+	ctx.emit("session/event", { id: "session-ghost", header: { cwd } }, { type: "turn/start", data: { turn: 1 } });
 
 	if (toolCalls.length !== 0) throw new Error(`the bridge must register no tools, got ${toolCalls.length}`);
-
-	// A session with no workspace cannot be bound, so it is never reviewed.
-	const blank = { id: "session-blank", session: { id: "session-blank", header: { cwd: "", origin: void 0 } }, followed: void 0, followup(m) { this.followed = m; } };
-	agentStore.set("session-blank", blank);
-	ctx.emit("session/event", blank.session, { type: "user/message", data: { source: { kind: "user" } } });
-	ctx.emit("agent/status", { agent: blank, status: "idle" });
-	if (blank.followed !== void 0) throw new Error("a session without a workspace must not be reviewed");
 
 	console.log("smoke test OK");
 } finally {
