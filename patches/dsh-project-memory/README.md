@@ -159,7 +159,6 @@ npm install
 
 node patches/dsh-project-memory/tests/plugin.smoke.mjs     # 真实 Cordis 装载:Config 校验 + 提示词/事件流
 node patches/dsh-project-memory/tests/client-contract.mjs  # 浏览器半:4 个记忆卡片注册 + 折叠渲染
-node patches/dsh-project-memory/tests/store.test.mjs       # 旧版本地存储的纯逻辑单测(已停用,保留作格式参考)
 ```
 
 冒烟覆盖:apply 返回值不是 thenable(Invalid effect 回归)、Config 对错误
@@ -172,5 +171,8 @@ node patches/dsh-project-memory/tests/store.test.mjs       # 旧版本地存储�
 - `lib/index.js` — host 半:guidance 段落 + autoRecall/autoReview 事件流
 - `client.js` — 浏览器半:Memorix 工具的折叠卡片
 - `cordis.patch.yml` — bundle 层条目(两个开关的默认值)
-- `lib/store.js` + `tests/store.test.mjs` — **旧版**`.dsh-memory` 本地存储实现
-  与其单测;已被 Memorix 取代,保留作为笔记格式与迁移脚本的参考
+
+> 旧版本地存储实现(`lib/store.js`:相似度合并、成熟度、`.dsh-memory/` 读写)
+> 与其单测已在 Memorix 迁移完成后删除 —— 存储归 Memorix,笔记格式的解析由
+> `scripts/migrate-dsh-memory.mjs` 自带(它只读 front matter 的
+> title/category/keywords/usage_scenario,不依赖被删代码)。

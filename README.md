@@ -129,7 +129,6 @@ node patches/session-cleanup/verify-session-cleanup.mjs          # settings 集�
 node patches/session-cleanup/tests/load-smoke.mjs                # 真实 Cordis 加载冒烟(Invalid effect 回归)
 node patches/dsh-project-memory/tests/plugin.smoke.mjs           # Memorix 桥接:Config 校验 + 提示词/事件流
 node patches/dsh-project-memory/tests/client-contract.mjs        # 浏览器半契约(记忆折叠卡注册与渲染)
-node patches/dsh-project-memory/tests/store.test.mjs             # 旧版本地存储逻辑(已停用,保留作格式参考)
 node patches/ui-settings-plugin-manager/verify-plugin-manager.mjs  # 契约验证(启停逻辑 + 清单/过滤器)
 node patches/ui-settings-plugin-manager/tests/load-smoke.mjs      # 真实 Cordis 加载冒烟
 node patches/ui-settings-other/verify-settings-other.mjs         # settings-other host + client 验证
