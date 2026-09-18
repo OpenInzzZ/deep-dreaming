@@ -95,37 +95,33 @@ function makeInbox(ids) {
 }
 
 let handled = null
-let hostInjected = null
+const hostCleanups = []
 const fakeAgents = { get: () => undefined }
+// The plugin declares `inject = ['connection','agents']` STATICALLY and reads
+// them as ctx properties, so the harness exposes them directly. `inject` stays
+// available (and returns a thenable, the historical load-failure shape) so the
+// "apply must not return it" regression guard keeps its teeth.
 const hostCtx = {
-  inject: (services, callback) => {
-    hostInjected = services
-    const fakeConnectionCtx = {
-      connection: {
-        rpc: {
-          handle: (channel, handler, options) => {
-            handled = { channel, handler, options }
-            return () => {}
-          },
-        },
+  connection: {
+    rpc: {
+      handle: (channel, handler, options) => {
+        handled = { channel, handler, options }
+        return () => {}
       },
-      agents: fakeAgents,
-    }
-    // Run the callback synchronously so the endpoint logic below can exercise
-    // the real handler. Real Cordis would schedule the callback only after the
-    // services appear; the synchronous run is a harness convenience, NOT a
-    // model of Cordis. The thenable returned below IS the model: real
-    // `ctx.inject()` (registry.inject -> registry.plugin) returns a Fiber
-    // wrapper — a PromiseLike resolving to the Fiber instance — and `apply()`
-    // returning it is exactly the historical load failure.
-    callback(fakeConnectionCtx)
-    return { then: () => {} }
+    },
   },
+  agents: fakeAgents,
+  // The channel registration is owned by an effect (Cordis disposes it with
+  // the plugin); run the body now and keep the disposer.
+  effect: (fn) => {
+    const cleanup = fn()
+    if (typeof cleanup === 'function') hostCleanups.push(cleanup)
+    return cleanup
+  },
+  inject: () => ({ then: () => {} }),
 }
 const applied = host.apply(hostCtx)
-if (hostInjected === null || hostInjected.join(',') !== 'connection,agents') {
-  throw new Error(`host inject mismatch: ${hostInjected}`)
-}
+if (hostCleanups.length !== 1) throw new Error(`channel registration must be owned by exactly one effect, got ${hostCleanups.length}`)
 if (applied !== undefined && applied !== null && typeof applied.then === 'function') {
   throw new Error('apply() returned a thenable (the ctx.inject "return" bug): real Cordis would throw TypeError("Invalid effect")')
 }
@@ -345,6 +341,37 @@ if (reactPath === undefined) {
       throw new Error(`RPC args: ${JSON.stringify(call.payload)}`)
     }
     console.log('drag reorder OK: drag m1 onto m2 -> /queue reorder (session-1, m1, 1)')
+
+    // failure text must name the real cause: a TRANSPORT failure means the
+    // patch's host half is not live in this process (the channel is absent →
+    // HTTP 404), which is a different problem from "the message already
+    // started sending" and must not be reported as one.
+    {
+      const notifications = []
+      const failing = (failure) => async () => { throw failure }
+      for (const [failure, expected] of [
+        [Object.assign(new Error('transport failure for /queue/reorder: HTTP 404'), { code: 'transport' }), en.reorderUnavailable],
+        [Object.assign(new Error('queued item is no longer pending'), { code: 'queue-item-not-found' }), en.reorderFailed],
+      ]) {
+        notifications.length = 0
+        await act(async () => {
+          root.render(React.createElement(registered.component, {
+            ...renderProps(),
+            reorder: failing(failure),
+            notify: (level, text) => { notifications.push({ level, text }) },
+          }))
+        })
+        const rowEls = [...doc.querySelectorAll('.qt-row')]
+        await act(async () => { fireEvent.dragStart(rowEls[0]) })
+        await act(async () => { fireEvent.dragOver(rowEls[1]) })
+        await act(async () => { fireEvent.drop(rowEls[1]) })
+        if (notifications.length !== 1 || notifications[0].text !== expected) {
+          throw new Error(`reorder failure text: ${JSON.stringify(notifications)} (expected ${expected})`)
+        }
+      }
+      console.log('reorder failure text OK: transport -> 服务未加载, not-found -> 可能已开始发送')
+      await act(async () => { root.render(React.createElement(registered.component, renderProps())) })
+    }
 
     // editing the row blurs the edit button (no lingering focus tooltip)
     await act(async () => {

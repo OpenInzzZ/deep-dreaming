@@ -97,15 +97,32 @@ async function handleEndpoint(endpoint, payload) {
   return reorderQueueItem(agent, itemId, toIndex)
 }
 
-/** Cordis plugin entry: register the `/queue` RPC channel on the Connection. */
+/**
+ * Cordis plugin entry: register the `/queue` RPC channel on the Connection.
+ *
+ * The dependencies are declared STATICALLY on the plugin rather than through a
+ * dynamic `ctx.inject(...)` inside `apply`. Measured on dsh 0.1.5-rc.2: after a
+ * user-patch hot reload (any write to the profile's `cordis.patch.yml`), a row
+ * kept its client half but a channel registered from a dynamic inject never
+ * came back — the running process answered `POST /queue/reorder` with 404 until
+ * the next restart — while the one patch that used a static `inject`
+ * (whale-background) kept working across those reloads. Static inject is also
+ * the documented shape for a hard dependency, and it is strictly simpler here:
+ * `apply` registers the channel directly and Cordis itself waits for
+ * `connection` and `agents`.
+ */
+export const inject = ['connection', 'agents']
+
 export function apply(ctx) {
-  // `ctx.inject` returns a thenable Fiber; returning it from `apply` makes
-  // Cordis treat it as an Effect and fail with TypeError('Invalid effect').
-  // The child fiber's disposer is registered on the parent automatically.
-  ctx.inject(['connection', 'agents'], (ctx) => {
-    const bound = handleEndpoint.bind({ agents: ctx.agents })
-    return ctx.connection.rpc.handle('/queue', bound, { authority: 'loopback' })
-  })
+  // Never RETURN a thenable from apply: Cordis treats an apply return value as
+  // an Effect, and a returned Fiber fails with TypeError('Invalid effect').
+  // The channel disposer is owned here explicitly (same shape as
+  // whale-background's route), so unloading the row removes the route.
+  const bound = handleEndpoint.bind({ agents: ctx.agents })
+  ctx.effect(
+    () => ctx.connection.rpc.handle('/queue', bound, { authority: 'loopback' }),
+    'ui-queue-tools: /queue rpc channel',
+  )
 }
 
 export { handleEndpoint }

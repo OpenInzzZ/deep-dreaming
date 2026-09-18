@@ -101,6 +101,28 @@ dsh web 对 profile 的 `cordis.patch.yml` 内置热加载(`watchUserPatches`,
   实测:home 层新增 `@deepseek-ai/dsh-mcp-client` 行后,运行中的 dsh 数秒内就
   拉起了 `memorix serve`(日志 `[memorix] MCP Server running on stdio`),
   工具随之出现在会话里。
+- ⚠️ **但改写 patch 文件会让"已有行"的 host 半失效,直到重启**(0.1.5-rc.2
+  实测):每次写入都会让 watcher 重新应用整个用户层 —— **新增行**能正常装载
+  (whale-background 就是这样热接上线的),而**已经存在的行**可能只保住条目、
+  丢掉 host 半:客户端半照常加载(界面看起来一切正常),但它的 RPC 通道与
+  settings namespace 都没了。2026-09-18 实测:一次 patch 文件写入之后,
+  `/queue`、`/app`、`/session-cleanup`、`/temp-session`、`/plugin-toggle`
+  五个通道全部消失(表现:排队消息拖拽排序报"排序失败",因为
+  `POST /queue/reorder` 落到 404),`session-cleanup` / `ui-settings-other`
+  的 settings namespace 也从 `settings.describe()` 里消失,而这两个补丁的
+  客户端半仍在正常渲染。**改动 patch 文件之后,依赖 host 侧功能前先重启。**
+  - 自查:连接服务把每个 RPC 通道挂成 `webServer` 的 prefix 路由,通道是否在册
+    可直接看路由表(host 端 `webServer.prefixes`,含 `/queue`、`/app` 等);
+    从浏览器侧对比更简单 —— 已注册通道对未授权裸请求回 **401**,不存在的位置
+    回 **405**。
+  - `install.ps1` 因此只在内容真的变化时才写该文件(无变化时 mtime 不变,
+    不再触发无谓的整层重载)。
+  - **host 半注册 RPC 通道必须用静态 `inject`**(如
+    `export const inject = ['connection','agents']` + 在 `apply` 里直接
+    `ctx.effect(() => ctx.connection.rpc.handle(...))`),不要把注册塞进
+    `apply` 内的动态 `ctx.inject(...)`:本轮实测中,能扛过上述重载的
+    whale-background 正是静态 inject,而五个用动态 inject 注册通道的补丁
+    全部失效。仓库里五个 host 半已统一改为静态 inject。
 - **host 半源码改动不热加载**(模块级 HMR 被官方禁用,补丁又在 `node_modules`
   下),必须重启 dsh web(`restart-dsh.ps1`,会中断运行中会话,请在空闲时进行);
 - **client 半源码改动会被重新下发**:client-modules 的 HMR 会让该行改用新的
@@ -178,6 +200,12 @@ node patches/whale-background/tests/load-smoke.mjs              # 鲸鱼娘图�
    改挂 `turn/start`(由拥有该轮次的 agent 发出,查得到),并用
    `agent.inject(...)`(next-step、不唤醒)投递,使召回落在用户本轮之内而不
    新开一轮。
+9. **patch 文件热重载会丢"已有行"的 host 半**(实测,详见「热插拔」一节):
+   `install.ps1` 的一次写入让 `/queue` 等五个通道消失,排队消息拖拽排序因此
+   报"排序失败"(`POST /queue/reorder` → 404),而客户端半仍在正常渲染。
+   `install.ps1` 已改为内容无变化就不写文件;`ui-queue-tools` 的失败提示也
+   改成区分"服务未加载"与"消息可能已开始发送",不再把前者说成后者。
+   **结论:改过 patch 文件后,先重启再用 host 侧功能。**
 
 ### 本轮部署状态(2026-09-18)
 
@@ -196,6 +224,10 @@ node patches/whale-background/tests/load-smoke.mjs              # 鲸鱼娘图�
 - host 半源码改动 —— `patches/dsh-project-memory/lib/index.js`:
   guidance 段落、第一轮召回(带本会话工作区根目录与绑定步骤)、
   **移除 autoReview**(重启后不再有回合结束的记忆回顾轮次);
+- **五个已有补丁行的 host 半**(`/queue`、`/app`、`/session-cleanup`、
+  `/temp-session`、`/plugin-toggle`):它们在 21:00 的那次 patch 文件写入后
+  就没再注册,重启后才会回来 —— 排队消息拖拽排序、设置「其他」页的服务
+  状态/重启/中断、会话清理卡片、临时会话按钮都依赖它们;
 - `package.json` 里的 `dsh.client.inject` 元数据(启动时缓存的扫描结果)。
 
 重启命令:`powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.dsh\scripts\restart-dsh.ps1"`

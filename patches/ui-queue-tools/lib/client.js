@@ -83,6 +83,7 @@ const zh = {
   removeFailed: '删除失败：这条消息可能已经开始发送。',
   steerFailed: '插话发送失败，请重试。',
   reorderFailed: '排序失败：这条消息可能已经开始发送。',
+  reorderUnavailable: '排序失败：排序服务未加载（重启 dsh 后恢复）。',
 };
 
 /** English dictionary checked against the Chinese key set. */
@@ -99,6 +100,7 @@ const en = {
   removeFailed: 'Removal failed: this message may have already started sending.',
   steerFailed: 'Steering failed. Try again.',
   reorderFailed: 'Reorder failed: this message may have already started sending.',
+  reorderUnavailable: 'Reorder failed: the reorder service is not loaded (recovers after a dsh restart).',
 };
 
 /** Dictionary namespace owned by this plugin. */
@@ -153,8 +155,13 @@ function QueueToolsDock({ useSession, updateQueue, notify, reorder, t }) {
     setBusy(itemId);
     try {
       await reorder(itemId, toIndex);
-    } catch {
-      notify('error', t('reorderFailed'));
+    } catch (error) {
+      // A transport failure means the patch's host half is not loaded — the
+      // reloaded-user-plugin path can leave an EXISTING row's host half
+      // unregistered until the next restart, and the generic "message may
+      // already be sending" text would blame the wrong thing.
+      const code = error !== null && typeof error === 'object' ? error.code : undefined;
+      notify('error', code === 'transport' ? t('reorderUnavailable') : t('reorderFailed'));
     } finally {
       setBusy((current) => current === itemId ? null : current);
     }
@@ -321,11 +328,22 @@ function apply(ctx) {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-queue-tools: dictionaries')
 
   const reorder = async (sessionId, itemId, toIndex) => {
-    const result = await ctx.connection.rpc.call('/queue', 'reorder', { args: { sessionId, itemId, toIndex } })
-    if (!result.ok) {
-      throw new Error('queue reorder failed: ' + result.error.code + ': ' + result.error.message)
+    let result;
+    try {
+      result = await ctx.connection.rpc.call('/queue', 'reorder', { args: { sessionId, itemId, toIndex } });
+    } catch (error) {
+      // The RPC transport itself failed (channel not registered → HTTP 404,
+      // trust rejection → 401/403): the host half is not live in this process.
+      const failure = new Error('queue reorder transport: ' + (error !== null && typeof error === 'object' && error.message ? error.message : String(error)));
+      failure.code = 'transport';
+      throw failure;
     }
-    return result.value
+    if (!result.ok) {
+      const failure = new Error('queue reorder failed: ' + result.error.code + ': ' + result.error.message);
+      failure.code = result.error.code;
+      throw failure;
+    }
+    return result.value;
   }
 
   ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({

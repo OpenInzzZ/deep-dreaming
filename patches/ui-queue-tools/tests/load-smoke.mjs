@@ -88,6 +88,9 @@ ctx.provide('agents', agentsStub)
 // declaration and silently ignore its return. Reproduce the DSH load shape.
 const guarded = {
   name: 'ui-queue-tools',
+  // The runner must forward the module's STATIC inject declaration: the plugin
+  // reads ctx.connection / ctx.agents as injected properties.
+  inject: host.inject,
   apply(ctx) {
     return host.apply(ctx)
   },

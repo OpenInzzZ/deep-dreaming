@@ -69,7 +69,8 @@ $entries = @(
     @{ id = 'temp-session';               name = '@local/dsh-client-ui-temp-session';             config = '' },
     @{ id = 'whale-background';           name = '@local/dsh-client-whale-background';           config = '' }
 )
-$patchContent = Get-Content $patchFile -Raw
+$patchOriginal = Get-Content $patchFile -Raw
+$patchContent = $patchOriginal
 foreach ($e in $entries) {
     if ($patchContent -match "(?m)^\s*- id: $($e.id)\s*$") {
         Write-Host "  [OK] entry $($e.id) (already present)"
@@ -80,7 +81,17 @@ foreach ($e in $entries) {
     $patchContent = $patchContent.TrimEnd() + "`n" + $block + "`n"
     Write-Host "  [OK] added entry $($e.id)"
 }
-Set-Content -Path $patchFile -Value $patchContent -Encoding UTF8
+# Write ONLY on a real change. dsh watches this file (watchUserPatches) and
+# re-applies the whole user layer on every write; a gratuitous rewrite is not
+# free -- measured on dsh 0.1.5-rc.2, a rewrite can leave the HOST half of an
+# already-present row unregistered until the next restart (the client half
+# keeps loading, so the row still looks present in the UI).
+if ($patchContent -eq $patchOriginal) {
+    Write-Host '  [OK] patch file unchanged (not rewritten: a needless write would reload the user layer)'
+} else {
+    Set-Content -Path $patchFile -Value $patchContent -Encoding UTF8
+    Write-Host '  [i] patch file rewritten -> the running dsh reloads the user layer; restart it before relying on host-side channels'
+}
 
 # --- 3. dsh-project-memory bundle (pnpm link + dsh.profile.bundles) -----------
 if (-not $SkipMemoryBundle) {

@@ -69,33 +69,35 @@ export async function ensureTempWorkspace(ctx, config) {
 }
 
 /**
- * Cordis plugin: register the `/temp-session` RPC channel (loopback) once the
- * `connection` and `workspaceRegistry` services are available. NEVER return
- * the `ctx.inject(...)` value from `apply` (Cordis treats a thenable return
- * as an invalid Effect).
+ * Cordis plugin: register the `/temp-session` RPC channel (loopback). The two
+ * dependencies are declared STATICALLY on the plugin so Cordis itself waits for
+ * them, instead of a dynamic `ctx.inject(...)` inside `apply`: after a
+ * user-patch hot reload the dynamic form was measured NOT to re-activate on
+ * dsh 0.1.5-rc.2 (the channel stayed 404 until a restart), while a static
+ * `inject` kept working. NEVER return a thenable from `apply` either.
  */
+export const inject = ['connection', 'workspaceRegistry']
+
 export function apply(ctx, config = {}) {
-  ctx.inject(['connection', 'workspaceRegistry'], (inner) => {
-    inner.connection.rpc.handle('/temp-session', async (endpoint, payload) => {
-      if (endpoint !== 'ensure') {
-        return { ok: false, error: { code: 'bad-request', message: `unknown endpoint: ${endpoint}`, details: {} } }
+  ctx.effect(() => ctx.connection.rpc.handle('/temp-session', async (endpoint, payload) => {
+    if (endpoint !== 'ensure') {
+      return { ok: false, error: { code: 'bad-request', message: `unknown endpoint: ${endpoint}`, details: {} } }
+    }
+    if (payload?.args !== undefined && typeof payload.args !== 'object') {
+      return { ok: false, error: { code: 'bad-request', message: 'ensure accepts no args', details: {} } }
+    }
+    try {
+      const value = await ensureTempWorkspace(ctx, config)
+      return { ok: true, value }
+    } catch (error) {
+      return {
+        ok: false,
+        error: {
+          code: 'temp-workspace-failed',
+          message: `cannot ensure temp workspace: ${error instanceof Error ? error.message : String(error)}`,
+          details: {},
+        },
       }
-      if (payload?.args !== undefined && typeof payload.args !== 'object') {
-        return { ok: false, error: { code: 'bad-request', message: 'ensure accepts no args', details: {} } }
-      }
-      try {
-        const value = await ensureTempWorkspace(inner, config)
-        return { ok: true, value }
-      } catch (error) {
-        return {
-          ok: false,
-          error: {
-            code: 'temp-workspace-failed',
-            message: `cannot ensure temp workspace: ${error instanceof Error ? error.message : String(error)}`,
-            details: {},
-          },
-        }
-      }
-    }, { authority: 'loopback' })
-  })
+    }
+  }, { authority: 'loopback' }), 'temp-session: /temp-session rpc channel')
 }

@@ -68,57 +68,48 @@ function makeCtx({ withSettings }) {
     logger,
     calls,
     effect,
+    // The plugin declares `inject = ['sessions','connection']` STATICALLY and
+    // reads the services as ctx properties, so the mock exposes them directly
+    // (and `inject` keeps working for the optional `settings` dependency the
+    // plugin still requests dynamically).
+    get sessions() { return sessionsStub },
+    get connection() { return connectionStub },
+    get settings() { return withSettings ? settingsStub : undefined },
     inject: (services, callback) => {
-      const list = services.join(',')
-      if (list === 'sessions,connection') {
-        return callback({
-          logger,
-          calls,
-          effect,
-          inject: ctx.inject,
-          sessions: { list: () => [] },
-          connection: {
-            rpc: {
-              handle: (channel, handler, options) => {
-                const entry = { channel, handler, options }
-                calls.rpcHandles.push(entry)
-                return () => {
-                  const i = calls.rpcHandles.indexOf(entry)
-                  if (i >= 0) calls.rpcHandles.splice(i, 1)
-                }
-              },
-            },
-          },
-        })
+      const available = services.every((name) => ctx[name] !== undefined)
+      return available ? callback(ctx) : undefined
+    },
+  }
+  const sessionsStub = { list: () => [] }
+  const connectionStub = {
+    rpc: {
+      handle: (channel, handler, options) => {
+        const entry = { channel, handler, options }
+        calls.rpcHandles.push(entry)
+        return () => {
+          const i = calls.rpcHandles.indexOf(entry)
+          if (i >= 0) calls.rpcHandles.splice(i, 1)
+        }
+      },
+    },
+  }
+  const settingsStub = {
+    register: (ns, schema, options) => {
+      calls.registered = { ns, options }
+      const stored = { ...host.DEFAULTS, ...options.base }
+      return {
+        get: () => ({ ...stored }),
+        watch: (cb) => { calls.watchCb = cb; return () => {} },
+        update: async (fields) => {
+          Object.assign(stored, fields)
+          calls.settingsUpdates.push(fields)
+        },
+        replace: async (fields) => {
+          for (const k of Object.keys(stored)) delete stored[k]
+          Object.assign(stored, fields)
+          calls.settingsReplaces.push(fields)
+        },
       }
-      if (list === 'settings' && withSettings) {
-        return callback({
-          logger,
-          calls,
-          effect,
-          inject: ctx.inject,
-          settings: {
-            register: (ns, schema, options) => {
-              calls.registered = { ns, options }
-              const stored = { ...host.DEFAULTS, ...options.base }
-              return {
-                get: () => ({ ...stored }),
-                watch: (cb) => { calls.watchCb = cb; return () => {} },
-                update: async (fields) => {
-                  Object.assign(stored, fields)
-                  calls.settingsUpdates.push(fields)
-                },
-                replace: async (fields) => {
-                  for (const k of Object.keys(stored)) delete stored[k]
-                  Object.assign(stored, fields)
-                  calls.settingsReplaces.push(fields)
-                },
-              }
-            },
-          },
-        })
-      }
-      return undefined
     },
   }
   return ctx

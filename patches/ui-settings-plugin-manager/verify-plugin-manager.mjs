@@ -93,27 +93,31 @@ writeFileSync(tmpPatch, PATCH_HEADER)
 // apply(): /plugin-toggle channel registration + endpoint validation
 {
   let handled = null
+  const hostCleanups = []
+  // Static `inject = ['connection']`: the service is read as a ctx property and
+  // the registration is owned by an effect.
   const hostCtx = {
-    inject: (services, callback) => {
-      if (services.join(',') === 'connection') {
-        return callback({
-          connection: {
-            rpc: {
-              handle: (channel, handler, options) => {
-                handled = { channel, handler, options }
-                return () => {}
-              },
-            },
-          },
-        })
-      }
-      return undefined
+    connection: {
+      rpc: {
+        handle: (channel, handler, options) => {
+          handled = { channel, handler, options }
+          return () => {}
+        },
+      },
     },
+    effect: (fn) => {
+      const cleanup = fn()
+      if (typeof cleanup === 'function') hostCleanups.push(cleanup)
+      return cleanup
+    },
+    // Kept so the "apply must not return a thenable" guard keeps its teeth.
+    inject: () => ({ then: () => {} }),
   }
   const ret = host.apply(hostCtx, { patchFile: tmpPatch })
   if (ret !== undefined && typeof ret.then === 'function') {
     throw new Error('P0 regression: apply returned a thenable (Invalid effect)')
   }
+  if (hostCleanups.length !== 1) throw new Error(`channel registration must be owned by exactly one effect, got ${hostCleanups.length}`)
   if (handled === null || handled.channel !== '/plugin-toggle') throw new Error(`channel: ${JSON.stringify(handled)}`)
   if (handled.options.authority !== 'loopback') throw new Error(`authority: ${handled.options.authority}`)
 

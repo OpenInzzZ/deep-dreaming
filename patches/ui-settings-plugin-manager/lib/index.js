@@ -96,31 +96,36 @@ function toggleError(code, message) {
   return { ok: false, error: { code, message, details: {} } }
 }
 
-/** Cordis plugin entry: register the `/plugin-toggle` RPC channel. */
+/**
+ * Cordis plugin entry: register the `/plugin-toggle` RPC channel.
+ *
+ * `connection` is a STATIC dependency (documented shape for a hard dependency).
+ * A dynamic `ctx.inject(...)` inside apply was measured on dsh 0.1.5-rc.2 not to
+ * re-activate after a user-patch hot reload, which left this channel answering
+ * 404 until a restart; `apply` must also never RETURN a thenable.
+ */
+export const inject = ['connection']
+
 export function apply(ctx, config = {}) {
-  // Statement call on purpose: returning the ctx.inject() thenable Fiber from
-  // apply makes Cordis throw TypeError('Invalid effect') (see repo memory).
-  ctx.inject(['connection'], (ctx) => {
-    const patchFile = resolvePatchFile(config)
-    return ctx.connection.rpc.handle('/plugin-toggle', async (endpoint, payload) => {
-      if (endpoint !== 'setEnabled') {
-        return toggleError('bad-request', `unknown endpoint: ${endpoint}`)
-      }
-      const args = payload?.args
-      const id = args?.entryId
-      const enabled = args?.enabled
-      if (typeof id !== 'string' || typeof enabled !== 'boolean') {
-        return toggleError('bad-request', 'setEnabled requires entryId (string) and enabled (boolean)')
-      }
-      if (!ID_RE.test(id)) {
-        return toggleError('bad-request', `entryId must be a plain identifier (${ID_HINT})`)
-      }
-      try {
-        const result = await setEnabled(patchFile, id, enabled)
-        return { ok: true, value: { ...result, entryId: id, patchFile } }
-      } catch (error) {
-        return toggleError('internal', `failed to update patch file: ${String(error?.message ?? error)}`)
-      }
-    }, { authority: 'loopback' })
-  })
+  const patchFile = resolvePatchFile(config)
+  ctx.effect(() => ctx.connection.rpc.handle('/plugin-toggle', async (endpoint, payload) => {
+    if (endpoint !== 'setEnabled') {
+      return toggleError('bad-request', `unknown endpoint: ${endpoint}`)
+    }
+    const args = payload?.args
+    const id = args?.entryId
+    const enabled = args?.enabled
+    if (typeof id !== 'string' || typeof enabled !== 'boolean') {
+      return toggleError('bad-request', 'setEnabled requires entryId (string) and enabled (boolean)')
+    }
+    if (!ID_RE.test(id)) {
+      return toggleError('bad-request', `entryId must be a plain identifier (${ID_HINT})`)
+    }
+    try {
+      const result = await setEnabled(patchFile, id, enabled)
+      return { ok: true, value: { ...result, entryId: id, patchFile } }
+    } catch (error) {
+      return toggleError('internal', `failed to update patch file: ${String(error?.message ?? error)}`)
+    }
+  }, { authority: 'loopback' }), 'ui-settings-plugin-manager: /plugin-toggle rpc channel')
 }

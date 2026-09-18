@@ -161,7 +161,7 @@ const host = await import(pathToFileURL(hostPath).href)
 
 let handled = null
 let cancelled = []
-let innerCtx = null
+const hostCleanups = []
 let settingsRegistered = null
 let settingsWatchCb = null
 let appExitCalls = []
@@ -172,31 +172,31 @@ const fakeAgents = {
   get: (id) => fakeAgents.list().find((a) => a.id === id),
 }
 let settingsAvailable = false
+// Static `inject = ['connection','agents']`: both arrive as ctx properties, and
+// the /app channel registration is owned by an effect. `settings` stays a
+// dynamic (optional) dependency the plugin requests itself.
 const hostCtx = {
+  connection: {
+    rpc: {
+      handle: (channel, handler, options) => {
+        handled = { channel, handler, options }
+        return () => {}
+      },
+    },
+  },
+  agents: fakeAgents,
+  logger: { info: () => {}, warn: () => {} },
+  get: (name) => (name === 'appExit' ? (code) => { appExitCalls.push(code) } : undefined),
+  effect: (fn) => {
+    const cleanup = fn()
+    if (typeof cleanup === 'function') hostCleanups.push(cleanup)
+    return cleanup
+  },
   inject: (services, callback) => {
     const list = services.join(',')
-    if (list === 'connection,agents') {
-      innerCtx = {
-        connection: {
-          rpc: {
-            handle: (channel, handler, options) => {
-              handled = { channel, handler, options }
-              return () => {}
-            },
-          },
-        },
-        agents: fakeAgents,
-        logger: { info: () => {}, warn: () => {} },
-        get: (name) => (name === 'appExit' ? (code) => { appExitCalls.push(code) } : undefined),
-        inject: hostCtx.inject,
-        effect: (fn) => fn(),
-        fiber: { state: 0 },
-      }
-      return callback(innerCtx)
-    }
     if (list === 'settings' && settingsAvailable) {
       return callback({
-        ...innerCtx,
+        ...hostCtx,
         settings: {
           register: (ns, schema, options) => {
             settingsRegistered = { ns, options }
@@ -210,7 +210,6 @@ const hostCtx = {
     }
     return undefined
   },
-  effect: (fn) => fn(),
 }
 
 // config.script points at a NON-EXISTENT path so the restart endpoint fails

@@ -309,230 +309,164 @@ function settingsError(code, message) {
 }
 
 /** Cordis plugin entry: register the `/app` RPC channel + the idle monitor. */
+export const inject = ['connection', 'agents']
+
 export function apply(ctx, config = {}) {
   const settingsEntry = pickSettings(config)
 
   // State is per-instance: module-level mutable state would leak across HMR
   // reloads (a stale `restarting` flag would permanently block restarts).
-  ctx.inject(['connection', 'agents'], (ctx) => {
-    const logger = ctx.logger
-    let source = () => ({ ...DEFAULTS, ...settingsEntry })
-    let configScope = null
-    let monitorApi = null
-    let restarting = false
-    let disposed = false
+  const logger = ctx.logger
+  let source = () => ({ ...DEFAULTS, ...settingsEntry })
+  let configScope = null
+  let monitorApi = null
+  let restarting = false
+  let disposed = false
 
-    const busyFailure = (sessions) => ({
-      ok: false,
-      error: {
-        code: 'sessions-running',
-        message: `${sessions.length} 个会话正在运行,重启会中断它们(可强制重启)`,
-        details: { running: sessions.length, sessions },
-      },
+  const busyFailure = (sessions) => ({
+    ok: false,
+    error: {
+      code: 'sessions-running',
+      message: `${sessions.length} 个会话正在运行,重启会中断它们(可强制重启)`,
+      details: { running: sessions.length, sessions },
+    },
+  })
+
+  /** Graceful shutdown request through the launcher's exit hook. */
+  const stopService = () => {
+    const current = source()
+    logger.info(`[ui-settings-other] idle auto-stop: no running session for ${current.idleMinutes} minutes; stopping dsh web`)
+    try {
+      const exit = ctx.get('appExit')
+      if (typeof exit === 'function') {
+        exit(0)
+        return
+      }
+    } catch {
+      /* fall through to a hard exit */
+    }
+    process.exit(0)
+  }
+
+  /** (Re)build the idle monitor from the current source (settings > entry). */
+  const rebuildMonitor = () => {
+    if (disposed) return
+    if (monitorApi !== null) {
+      monitorApi.stop()
+      monitorApi = null
+    }
+    const current = source()
+    if (current.idleEnabled !== true || !(current.idleMinutes > 0)) return
+    monitorApi = createIdleMonitor({
+      busy: () => runningSessionIds(ctx.agents).length > 0,
+      idleMinutes: () => source().idleMinutes,
+      onStop: stopService,
     })
+  }
 
-    /** Graceful shutdown request through the launcher's exit hook. */
-    const stopService = () => {
-      const current = source()
-      logger.info(`[ui-settings-other] idle auto-stop: no running session for ${current.idleMinutes} minutes; stopping dsh web`)
+  // The idle monitor owns a raw interval; dispose it with the plugin. This
+  // must run before registerConfigSection's disposer (reverse order), so a
+  // stale rebuild during unload is a no-op via `disposed`.
+  ctx.effect(() => () => {
+    disposed = true
+    if (monitorApi !== null) {
+      monitorApi.stop()
+      monitorApi = null
+    }
+  }, 'ui-settings-other: idle monitor')
+
+  registerConfigSection(ctx, SETTINGS_NAMESPACE, ConfigSchema, settingsEntry, {
+    setSource: (current) => { source = current },
+    onChange: rebuildMonitor,
+  }, (scope) => { configScope = scope })
+  rebuildMonitor()
+
+  // Branding: override the shipped favicon with the whale-girl icon. The
+  // exact route wins over the SPA dist fallback; the icon is bundled in
+  // this patch and served as an SVG wrapper around the 128px PNG.
+  const webServer = ctx.get('webServer')
+  if (webServer !== undefined) {
+    const svg = faviconSvg(patchAssetPath('favicon-128.png'))
+    ctx.effect(() => webServer.register({
+      kind: 'exact',
+      path: '/favicon.svg',
+      handler: (req, res) => {
+        res.writeHead(200, {
+          'content-type': 'image/svg+xml',
+          'cache-control': 'public, max-age=86400',
+        })
+        res.end(svg)
+      },
+    }), 'ui-settings-other: favicon route')
+  }
+  ctx.effect(() => ctx.connection.rpc.handle('/app', async (endpoint, payload) => {
+    if (endpoint === 'getSettings') {
+      return { ok: true, value: source() }
+    }
+    if (endpoint === 'setSettings') {
+      if (configScope === null) {
+        return settingsError('settings-unavailable', 'settings service is not ready yet')
+      }
+      const fields = payload?.args?.fields
+      if (typeof fields !== 'object' || fields === null || Array.isArray(fields)) {
+        return settingsError('bad-request', 'fields must be a plain object')
+      }
       try {
-        const exit = ctx.get('appExit')
-        if (typeof exit === 'function') {
-          exit(0)
-          return
-        }
-      } catch {
-        /* fall through to a hard exit */
-      }
-      process.exit(0)
-    }
-
-    /** (Re)build the idle monitor from the current source (settings > entry). */
-    const rebuildMonitor = () => {
-      if (disposed) return
-      if (monitorApi !== null) {
-        monitorApi.stop()
-        monitorApi = null
-      }
-      const current = source()
-      if (current.idleEnabled !== true || !(current.idleMinutes > 0)) return
-      monitorApi = createIdleMonitor({
-        busy: () => runningSessionIds(ctx.agents).length > 0,
-        idleMinutes: () => source().idleMinutes,
-        onStop: stopService,
-      })
-    }
-
-    // The idle monitor owns a raw interval; dispose it with the plugin. This
-    // must run before registerConfigSection's disposer (reverse order), so a
-    // stale rebuild during unload is a no-op via `disposed`.
-    ctx.effect(() => () => {
-      disposed = true
-      if (monitorApi !== null) {
-        monitorApi.stop()
-        monitorApi = null
-      }
-    }, 'ui-settings-other: idle monitor')
-
-    registerConfigSection(ctx, SETTINGS_NAMESPACE, ConfigSchema, settingsEntry, {
-      setSource: (current) => { source = current },
-      onChange: rebuildMonitor,
-    }, (scope) => { configScope = scope })
-    rebuildMonitor()
-
-    // Branding: override the shipped favicon with the whale-girl icon. The
-    // exact route wins over the SPA dist fallback; the icon is bundled in
-    // this patch and served as an SVG wrapper around the 128px PNG.
-    const webServer = ctx.get('webServer')
-    if (webServer !== undefined) {
-      const svg = faviconSvg(patchAssetPath('favicon-128.png'))
-      ctx.effect(() => webServer.register({
-        kind: 'exact',
-        path: '/favicon.svg',
-        handler: (req, res) => {
-          res.writeHead(200, {
-            'content-type': 'image/svg+xml',
-            'cache-control': 'public, max-age=86400',
-          })
-          res.end(svg)
-        },
-      }), 'ui-settings-other: favicon route')
-    }
-    return ctx.connection.rpc.handle('/app', async (endpoint, payload) => {
-      if (endpoint === 'getSettings') {
+        await configScope.update(fields)
         return { ok: true, value: source() }
+      } catch (error) {
+        return settingsError('settings-rejected', String(error?.message ?? error))
       }
-      if (endpoint === 'setSettings') {
-        if (configScope === null) {
-          return settingsError('settings-unavailable', 'settings service is not ready yet')
-        }
-        const fields = payload?.args?.fields
-        if (typeof fields !== 'object' || fields === null || Array.isArray(fields)) {
-          return settingsError('bad-request', 'fields must be a plain object')
-        }
-        try {
-          await configScope.update(fields)
-          return { ok: true, value: source() }
-        } catch (error) {
-          return settingsError('settings-rejected', String(error?.message ?? error))
-        }
+    }
+    if (endpoint === 'resetSettings') {
+      if (configScope === null) {
+        return settingsError('settings-unavailable', 'settings service is not ready yet')
       }
-      if (endpoint === 'resetSettings') {
-        if (configScope === null) {
-          return settingsError('settings-unavailable', 'settings service is not ready yet')
-        }
-        try {
-          await configScope.replace({})
-          return { ok: true, value: source() }
-        } catch (error) {
-          return settingsError('settings-rejected', String(error?.message ?? error))
-        }
+      try {
+        await configScope.replace({})
+        return { ok: true, value: source() }
+      } catch (error) {
+        return settingsError('settings-rejected', String(error?.message ?? error))
       }
-      if (endpoint === 'status') {
-        const sessions = runningSessionIds(ctx.agents)
-        const current = source()
-        const idle = {
-          enabled: current.idleEnabled === true && current.idleMinutes > 0,
-          idleMinutes: current.idleMinutes,
-        }
-        if (idle.enabled && monitorApi !== null) idle.lastBusyAt = monitorApi.lastBusyAt()
-        return { ok: true, value: { running: sessions.length, sessions, service: serviceInfo(), idle } }
+    }
+    if (endpoint === 'status') {
+      const sessions = runningSessionIds(ctx.agents)
+      const current = source()
+      const idle = {
+        enabled: current.idleEnabled === true && current.idleMinutes > 0,
+        idleMinutes: current.idleMinutes,
       }
-      if (endpoint === 'installShortcut') {
-        // Create the desktop shortcut (silent start, whale-girl icon). The
-        // script is idempotent; an existing shortcut is reported, not replaced.
-        const result = installShortcut()
-        if (!result.ok) {
-          return {
-            ok: false,
-            error: { code: 'internal', message: result.output, details: {} },
-          }
-        }
-        return { ok: true, value: { created: true, icon: result.icon, output: result.output } }
-      }
-      if (endpoint === 'stop') {
-        // Stop (not restart) the service: graceful exit through the launcher's
-        // appExit hook. The exit is deferred so the RPC response reaches the
-        // browser first; sessions-running is protected like restart.
-        const force = payload?.args?.force === true
-        const running = runningSessionIds(ctx.agents)
-        if (running.length > 0 && !force) {
-          return {
-            ok: false,
-            error: {
-              code: 'sessions-running',
-              message: `${running.length} 个会话正在运行,中断会打断它们(可强制中断)`,
-              details: { running: running.length, sessions: running },
-            },
-          }
-        }
-        if (running.length > 0) {
-          for (const id of running) {
-            const agent = ctx.agents.get(id)
-            if (agent !== undefined && agent.status === 'running') {
-              agent.cancel({ kind: 'user' }, { keepInbox: true })
-            }
-          }
-        }
-        logger.info(`[ui-settings-other] stop requested${force ? ' (force)' : ''}; exiting gracefully`)
-        setTimeout(() => {
-          try {
-            const exit = ctx.get('appExit')
-            if (typeof exit === 'function') {
-              exit(0)
-              return
-            }
-          } catch {
-            /* fall through to a hard exit */
-          }
-          process.exit(0)
-        }, 500)
-        return { ok: true, value: { stopping: true } }
-      }
-      if (endpoint === 'reloadPlugins') {
-        // Hot-reload the user patch layer: touching the profile's
-        // cordis.patch.yml triggers dsh's watchUserPatches (a Cordis HMR
-        // config watch), which transactionally re-applies the whole user
-        // layer — every user-level plugin (host + client) is unloaded and
-        // remounted without restarting the service, so running sessions and
-        // the durable inbox are untouched.
-        const patchFile = resolvePatchFile(config)
-        try {
-          const marker = `# dsh-plugin-reload: ${new Date().toISOString()}`
-          let content = await readFile(patchFile, 'utf8')
-          if (/^# dsh-plugin-reload: /m.test(content)) {
-            content = content.replace(/^# dsh-plugin-reload: .*$/m, marker)
-          } else {
-            content = content.replace(/\s*$/, '\n') + marker + '\n'
-          }
-          await writeFile(patchFile, content, 'utf8')
-          return { ok: true, value: { requested: true, patchFile, marker } }
-        } catch (error) {
-          return {
-            ok: false,
-            error: { code: 'internal', message: `failed to touch patch file: ${String(error)}`, details: {} },
-          }
-        }
-      }
-      if (endpoint !== 'restart') {
+      if (idle.enabled && monitorApi !== null) idle.lastBusyAt = monitorApi.lastBusyAt()
+      return { ok: true, value: { running: sessions.length, sessions, service: serviceInfo(), idle } }
+    }
+    if (endpoint === 'installShortcut') {
+      // Create the desktop shortcut (silent start, whale-girl icon). The
+      // script is idempotent; an existing shortcut is reported, not replaced.
+      const result = installShortcut()
+      if (!result.ok) {
         return {
           ok: false,
-          error: { code: 'bad-request', message: `unknown endpoint: ${endpoint}`, details: {} },
+          error: { code: 'internal', message: result.output, details: {} },
         }
       }
-      if (restarting) {
-        return { ok: true, value: { scheduled: true, already: true, script: resolveRestartScript(config) } }
-      }
-
+      return { ok: true, value: { created: true, icon: result.icon, output: result.output } }
+    }
+    if (endpoint === 'stop') {
+      // Stop (not restart) the service: graceful exit through the launcher's
+      // appExit hook. The exit is deferred so the RPC response reaches the
+      // browser first; sessions-running is protected like restart.
       const force = payload?.args?.force === true
       const running = runningSessionIds(ctx.agents)
       if (running.length > 0 && !force) {
-        return busyFailure(running)
+        return {
+          ok: false,
+          error: {
+            code: 'sessions-running',
+            message: `${running.length} 个会话正在运行,中断会打断它们(可强制中断)`,
+            details: { running: running.length, sessions: running },
+          },
+        }
       }
-
-      restarting = true
-
-      // Force path: cancel running agents first so sessions stay resumable.
       if (running.length > 0) {
         for (const id of running) {
           const agent = ctx.agents.get(id)
@@ -541,56 +475,122 @@ export function apply(ctx, config = {}) {
           }
         }
       }
-
-      const scriptPath = resolveRestartScript(config)
-      try {
-        statSync(scriptPath)
-      } catch {
-        restarting = false
-        return {
-          ok: false,
-          error: {
-            code: 'internal',
-            message: `restart script not found: ${scriptPath} (run scripts/deploy.ps1 to install it)`,
-            details: {},
-          },
-        }
-      }
-
-      const invocation = buildRestartSpawn(scriptPath, ['-OpenBrowser'])
-      try {
-        const child = spawn(invocation.file, invocation.args, {
-          detached: true,
-          stdio: 'ignore',
-          cwd: process.cwd(),
-          env: process.env,
-          windowsHide: true,
-        })
-        child.unref()
-        // A successful restart kills this process before the child exits; any
-        // other outcome (spawn failure or a non-zero script exit) must clear
-        // the lock so later restarts are not stuck at "already scheduled".
-        child.on('error', (error) => {
-          logger.warn(`[ui-settings-other] restart spawn failed: ${String(error)}`)
-          restarting = false
-        })
-        child.on('exit', (code) => {
-          if (code !== 0) {
-            logger.warn(`[ui-settings-other] restart script exited with code ${code}; restart may have failed`)
-            restarting = false
+      logger.info(`[ui-settings-other] stop requested${force ? ' (force)' : ''}; exiting gracefully`)
+      setTimeout(() => {
+        try {
+          const exit = ctx.get('appExit')
+          if (typeof exit === 'function') {
+            exit(0)
+            return
           }
-        })
-        // Watchdog: if the script neither restarts the service nor exits
-        // non-zero within 90s, release the lock anyway.
-        setTimeout(() => { restarting = false }, 90_000)
+        } catch {
+          /* fall through to a hard exit */
+        }
+        process.exit(0)
+      }, 500)
+      return { ok: true, value: { stopping: true } }
+    }
+    if (endpoint === 'reloadPlugins') {
+      // Hot-reload the user patch layer: touching the profile's
+      // cordis.patch.yml triggers dsh's watchUserPatches (a Cordis HMR
+      // config watch), which transactionally re-applies the whole user
+      // layer — every user-level plugin (host + client) is unloaded and
+      // remounted without restarting the service, so running sessions and
+      // the durable inbox are untouched.
+      const patchFile = resolvePatchFile(config)
+      try {
+        const marker = `# dsh-plugin-reload: ${new Date().toISOString()}`
+        let content = await readFile(patchFile, 'utf8')
+        if (/^# dsh-plugin-reload: /m.test(content)) {
+          content = content.replace(/^# dsh-plugin-reload: .*$/m, marker)
+        } else {
+          content = content.replace(/\s*$/, '\n') + marker + '\n'
+        }
+        await writeFile(patchFile, content, 'utf8')
+        return { ok: true, value: { requested: true, patchFile, marker } }
       } catch (error) {
-        restarting = false
         return {
           ok: false,
-          error: { code: 'internal', message: String(error), details: {} },
+          error: { code: 'internal', message: `failed to touch patch file: ${String(error)}`, details: {} },
         }
       }
-      return { ok: true, value: { scheduled: true, script: scriptPath } }
-    }, { authority: 'loopback' })
-  })
+    }
+    if (endpoint !== 'restart') {
+      return {
+        ok: false,
+        error: { code: 'bad-request', message: `unknown endpoint: ${endpoint}`, details: {} },
+      }
+    }
+    if (restarting) {
+      return { ok: true, value: { scheduled: true, already: true, script: resolveRestartScript(config) } }
+    }
+
+    const force = payload?.args?.force === true
+    const running = runningSessionIds(ctx.agents)
+    if (running.length > 0 && !force) {
+      return busyFailure(running)
+    }
+
+    restarting = true
+
+    // Force path: cancel running agents first so sessions stay resumable.
+    if (running.length > 0) {
+      for (const id of running) {
+        const agent = ctx.agents.get(id)
+        if (agent !== undefined && agent.status === 'running') {
+          agent.cancel({ kind: 'user' }, { keepInbox: true })
+        }
+      }
+    }
+
+    const scriptPath = resolveRestartScript(config)
+    try {
+      statSync(scriptPath)
+    } catch {
+      restarting = false
+      return {
+        ok: false,
+        error: {
+          code: 'internal',
+          message: `restart script not found: ${scriptPath} (run scripts/deploy.ps1 to install it)`,
+          details: {},
+        },
+      }
+    }
+
+    const invocation = buildRestartSpawn(scriptPath, ['-OpenBrowser'])
+    try {
+      const child = spawn(invocation.file, invocation.args, {
+        detached: true,
+        stdio: 'ignore',
+        cwd: process.cwd(),
+        env: process.env,
+        windowsHide: true,
+      })
+      child.unref()
+      // A successful restart kills this process before the child exits; any
+      // other outcome (spawn failure or a non-zero script exit) must clear
+      // the lock so later restarts are not stuck at "already scheduled".
+      child.on('error', (error) => {
+        logger.warn(`[ui-settings-other] restart spawn failed: ${String(error)}`)
+        restarting = false
+      })
+      child.on('exit', (code) => {
+        if (code !== 0) {
+          logger.warn(`[ui-settings-other] restart script exited with code ${code}; restart may have failed`)
+          restarting = false
+        }
+      })
+      // Watchdog: if the script neither restarts the service nor exits
+      // non-zero within 90s, release the lock anyway.
+      setTimeout(() => { restarting = false }, 90_000)
+    } catch (error) {
+      restarting = false
+      return {
+        ok: false,
+        error: { code: 'internal', message: String(error), details: {} },
+      }
+    }
+    return { ok: true, value: { scheduled: true, script: scriptPath } }
+  }, { authority: 'loopback' }), 'ui-settings-other: /app rpc channel')
 }

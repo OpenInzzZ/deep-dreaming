@@ -82,6 +82,8 @@ ctx.provide('connection', connectionStub)
 // isConstructor -> `new` branch and silently ignore the return).
 const guarded = {
   name: host.name,
+  // Forward the module's STATIC inject declaration (see ui-queue-tools smoke).
+  inject: host.inject,
   apply(ctx, config) {
     return host.apply(ctx, config)
   },

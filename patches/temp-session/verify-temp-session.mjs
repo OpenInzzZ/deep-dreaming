@@ -74,31 +74,29 @@ const host = await import(pathToFileURL(hostPath).href)
 
 // apply: RPC channel + endpoint validation (no real workspace registry needed)
 let handled = null
-let innerCtx = null
+const hostCleanups = []
+// Static `inject = ['connection','workspaceRegistry']`: both services arrive as
+// ctx properties, and the channel registration is owned by an effect.
 const hostCtx = {
-  inject: (services, callback) => {
-    if (services.join(',') === 'connection,workspaceRegistry') {
-      innerCtx = {
-        connection: {
-          rpc: {
-            handle: (channel, handler, options) => {
-              handled = { channel, handler, options }
-              return () => {}
-            },
-          },
-        },
-        workspaceRegistry: {
-          resolveByPath: async (path) => undefined,
-          create: async (path, title) => ({ id: 'ws-rpc', path, title }),
-        },
-        effect: (fn) => fn(),
-        fiber: { state: 0 },
-      }
-      return callback(innerCtx)
-    }
-    return undefined
+  connection: {
+    rpc: {
+      handle: (channel, handler, options) => {
+        handled = { channel, handler, options }
+        return () => {}
+      },
+    },
   },
-  effect: (fn) => fn(),
+  workspaceRegistry: {
+    resolveByPath: async () => undefined,
+    create: async (path, title) => ({ id: 'ws-rpc', path, title }),
+  },
+  effect: (fn) => {
+    const cleanup = fn()
+    if (typeof cleanup === 'function') hostCleanups.push(cleanup)
+    return cleanup
+  },
+  // Kept so the "apply must not return a thenable" guard keeps its teeth.
+  inject: () => ({ then: () => {} }),
 }
 const ret = host.apply(hostCtx, { dir: join(tmpdir(), 'temp-session-verify-apply'), title: '临时会话' })
 // P0 regression guard: returning the ctx.inject() thenable Fiber from apply
@@ -106,6 +104,7 @@ const ret = host.apply(hostCtx, { dir: join(tmpdir(), 'temp-session-verify-apply
 if (ret !== undefined && typeof ret.then === 'function') {
   throw new Error('P0 regression: apply returned a thenable (Invalid effect)')
 }
+if (hostCleanups.length !== 1) throw new Error(`channel registration must be owned by exactly one effect, got ${hostCleanups.length}`)
 if (handled === null || handled.channel !== '/temp-session') {
   throw new Error(`host channel mismatch: ${JSON.stringify(handled)}`)
 }
