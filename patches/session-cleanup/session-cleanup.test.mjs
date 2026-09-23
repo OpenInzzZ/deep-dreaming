@@ -72,6 +72,26 @@ async function main() {
     result = await runCleanup(root, { maxAgeDays: 0, keepSessions: 0, maxTotalMB: 0 }, new Set(), NOW)
     check('无任何删除(无天数无容量规则)', result.removed.length === 0)
 
+    console.log('== 场景5: 超龄删除释放的空间已足够时, 容量规则不得重复计数 ==')
+    // 回归用例: 规则 A 选中删除的会话体积必须先从容量总量中扣除。
+    // 旧实现只 `if (remove.has(c.key)) continue`, 不扣体积, 于是总量偏高,
+    // 会把本可留下的会话也删掉。
+    {
+      const root2 = await mkdtemp(join(tmpdir(), 'cleanup-test-cap-'))
+      try {
+        // 80MB/40天(超龄, 规则 A 删除) + 30MB/20天 + 10MB/2天 = 120MB; 上限 100MB
+        await makeSession(root2, 'proj-c', 'session-oldbig', 40, 80)
+        await makeSession(root2, 'proj-c', 'session-mid', 20, 30)
+        await makeSession(root2, 'proj-c', 'session-new', 2, 10)
+        const aged = await runCleanup(root2, { maxAgeDays: 30, keepSessions: 1, maxTotalMB: 100 }, new Set(), NOW)
+        check('只删除超龄会话, 不再额外删除', JSON.stringify(aged.removed.map((r) => r.id)) === JSON.stringify(['session-oldbig']))
+        check('超龄释放后总占用已 <= 上限', aged.totalBytes - aged.freedBytes <= 100 * 1024 * 1024)
+        check('20 天前的会话保留', await exists(join(root2, 'proj-c', 'session-mid')))
+      } finally {
+        await rm(root2, { recursive: true, force: true })
+      }
+    }
+
     console.log(`\n结果: ${passed} 通过, ${failed} 失败`)
     process.exit(failed > 0 ? 1 : 0)
   } finally {

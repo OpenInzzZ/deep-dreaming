@@ -16,7 +16,7 @@
 patches/ui-settings-plugin-manager/
 ├── package.json            # 声明 dsh.client 浏览器入口 + 依赖顺序
 ├── lib/
-│   ├── index.js            # host 半:/plugin-toggle RPC 通道(启停写 patch 文件)
+│   ├── index.js            # host 半:/plugin-toggle 前缀路由(启停写 patch 文件)
 │   └── client.js           # 浏览器端实现(手写 bundle,无构建步骤)
 ├── tests/
 │   └── load-smoke.mjs      # 真实 Cordis 加载冒烟(Invalid effect 回归)
@@ -26,7 +26,8 @@ patches/ui-settings-plugin-manager/
 
 `client.js` 只依赖平台模块表内的词(`react`、`react/jsx-runtime`、
 `@deepseek-ai/dsh-client-ui-primitives`),不依赖任何构建工具;host 半只
-用 Node 内置模块与注入的 `connection` 服务。
+用 Node 内置模块,webServer 载体是**声明的依赖**(`ctx.inject(['webServer'], …)`,
+激活等待载体就绪,而不是在 `apply` 里 `ctx.get('webServer')` 与载体绑定竞态)。
 
 ## 部署(加载到 dsh)
 
@@ -50,8 +51,9 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 ```
 
 `cordis.patch.yml` 由运行中的 dsh 热加载(watch-only HMR):保存后数秒内自动
-挂载,host 与 client 半均热生效,**无需重启服务器**;其它用户补丁的变更
-可在设置 →「其他」页点 **重载用户插件** 手动触发同样的热重载。
+挂载,host 与 client 半均热生效,**无需重启服务器**。触发条件是文件内容
+确有变化(增删行、改 `config`):`Entry.update` 对 options 做深比较,只改
+注释、或写回一份内容等价的文件都不会触发重挂。
 修改本补丁源码后需重启 dsh web 才生效。
 
 **职责边界**:本页**仅负责插件启停管理**(清单 + 启停按钮);插件的配置
@@ -74,7 +76,12 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
    点击后 host 端改写 `~/.dsh/profiles/web/cordis.patch.yml`(追加/移除
    `- id: <条目> + disabled: true` 补丁行),dsh 的热加载在数秒内卸载或
    重新装载该插件 —— **不重启服务、不中断会话**,且选择写入 patch 文件、
-   重启后保持。操作结果(已生效/失败)显示在按钮旁,列表自动刷新。
+   重启后保持。操作结果显示在按钮旁,列表自动刷新:
+   - 已生效(清除 N 行禁用行):请求的状态已在本文件中确认;
+   - **未能确认**:文件里的禁用行形状无法判定(或本文件根本没有该条目),
+     host 不写入、不改写,鼠标悬停可看到具体行号,请手工编辑该文件。
+   停用是幂等的:任何可识别的禁用行(带引号、缩进、额外键、`disabled` 写在
+   下一行等)都会阻止重复追加;启用会一次清除同一 id 的全部禁用行并报出条数。
 6. 常用排查场景:某个插件没生效 → 状态筛「挂载失败」,或筛选「自定义」+
    「已停用」查看被禁用的条目。
 
@@ -86,10 +93,23 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 | 停用(手工) | 追加顶层补丁行 `- id: <条目id>` + `  disabled: true` |
 | 卸载 | 删除补丁条目,并删除 `node_modules/@local/` 下的链接 |
 
-> 启停按钮的 host 实现(`lib/index.js`)经 `/plugin-toggle` RPC 通道
-> (`authority: 'loopback'`)读写 patch 文件;只有 `entryId` 为普通标识符
-> (字母/数字/`.`/`_`/`-`)的条目可操作,非法值被响亮拒绝。本管理页自身
-> 被保护,不能从页面停用(否则无法在此恢复),需手工编辑 patch 文件。
+> 启停按钮的 host 实现(`lib/index.js`)经 `/plugin-toggle` 前缀路由
+> (`POST /plugin-toggle/setEnabled`,注册在 `webServer` 服务上,自带同源
+> 栅栏 + 只收 POST + 只收 `application/json`)读写 patch 文件;只有
+> `entryId` 为普通标识符
+> (字母/数字/`.`/`_`/`-`)的条目可操作,非法值被响亮拒绝。禁用行按 YAML
+> 语义宽容识别:前导缩进、引号包裹的 id、`disabled` 前后还有别的键、
+> `disabled` 的值写在下一行、单行 flow 映射都算;只有 `false`/`null`/`~`/`0`
+> 视为「未禁用」,`no`、`off`、`"false"`、`1` 等都是真值(与 Loader 一致)。
+> 判定不了的形状只报告、绝不改写。本管理页自身被保护,不能从页面停用
+> (否则无法在此恢复),需手工编辑 patch 文件。
+>
+> 为什么不是 `ctx.connection.rpc.handle`:dsh 0.1.5-rc.1 的 Connection 注册表
+> 对连接包之外的插件必然抛 `cannot get property "webServer" without inject`
+> (`dsh-client-connection/lib/index.js` 的 `register()` 里
+> `owner.effect(() => owner.webServer.register(route))`,`owner` 从未声明
+> `webServer`),通道根本不会存在,浏览器请求会落到 SPA 兜底。迁移做法与
+> `ui-settings-other` 一致:`createRpcRoute(path, handle)` + `webServer.register`。
 
 ## 注意事项
 
@@ -97,8 +117,10 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
   届时删除本用户级插件即可。
 - 修改 `client.js` 后无需重启服务器:补丁层热加载只处理条目增删,浏览器
   端 bundle 内容变更需要刷新页面(若 rev 未变可强制刷新)。
-- 停用/启用写入 patch 文件后由 dsh 热加载生效;若热重载失败,条目保持
-  上次状态,可点设置 →「其他」页的 **重载用户插件** 重试。
+- 停用/启用写入 patch 文件后由 dsh 热加载生效(写入确实增删了行,属于真实
+  变化);若热重载失败,条目保持上次状态 —— 重挂只由**内容真实变化**触发,
+  重试需要让该文件再发生一次真实改动(例如手工删掉再补回那一行),只改注释
+  不会触发。
 
 ## 测试
 
@@ -108,7 +130,17 @@ node verify-plugin-manager.mjs          # 契约验证(host 启停逻辑用临�
 node tests/load-smoke.mjs               # 真实 Cordis 加载冒烟
 ```
 
-覆盖:host 半 disabled 块追加/移除/幂等、非法 entryId 拒绝、`/plugin-toggle`
-通道(loopback)与端点校验、apply 不返回 thenable 的 P0 回归守卫;client 半
-bundle handoff、tab 注册(id/order)、zh/en 字典对齐、toggleEnabled 注入面;
-DOM 段(需 jsdom)覆盖过滤器与卡片启停按钮点击 → `/plugin-toggle` 调用。
+覆盖:host 半 disabled 块追加/移除/幂等、宽容识别(引号 id、缩进行、额外键、
+下一行取值、flow 映射)、同 id 多行重复禁用一次清除并计数、同 id 非禁用行不被
+误删、无法判定的形状回报为「未能确认」而不是成功、非法 entryId 拒绝、
+`/plugin-toggle` 前缀路由(kind=prefix)与栅栏(403 跨源 Origin / 405 非 POST /
+415 非 JSON / 404 端点段数 / 400 非 JSON body / 413 超 1MB / 500 handler 抛错)、
+载体未就绪时**等待**(声明的 `webServer` 依赖,回调不运行也绝不注册任何东西,
+载体一出现即注册路由;签名与语义与旧的 `ctx.get` 竞态版本一致)、register 抛错时
+只告警、路由由 `ctx.effect` 持有、apply 不返回
+thenable 的 P0 回归守卫;client 半 bundle handoff、tab 注册(id/order)、zh/en
+字典对齐、toggleEnabled 注入面(经 fetch 桩断言 URL/method/content-type/body
+与信封解析、`.code`/`.details` 透出、HTTP 与网络失败均 reject)、
+`recognized:false` 不显示「已生效」;DOM 段(需 jsdom)
+覆盖过滤器与卡片启停按钮点击 → `POST /plugin-toggle/setEnabled`、状态文案
+(已生效/清除 N 行/未能确认)。所有 patch 文件写入都发生在系统临时目录内。

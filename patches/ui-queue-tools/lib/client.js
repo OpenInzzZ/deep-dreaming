@@ -7,10 +7,11 @@
  *
  * 1. Hovering a queued message preview shows the FULL text (the shipped dock
  *    truncates the preview to 200 chars and has no full-text affordance).
- * 2. Each row gains move-up / move-down buttons that reorder the pending
- *    queue through the host half's `/queue` RPC channel (Inbox.splice on the
- *    agent's next-turn list); the durable event stream then refreshes every
- *    client, so the dock needs no optimistic local reorder.
+ * 2. Rows are draggable: dropping one on another reorders the pending queue
+ *    through the host half's `/queue` prefix route, declaring the `queued`
+ *    placement the drop index was computed on (Inbox.splice on that list); the
+ *    durable event stream then refreshes every client, so the dock needs no
+ *    optimistic local reorder.
  *
  * All other shipped behavior (collapse header, edit, remove, steer) is
  * reproduced verbatim; the component receives the same props the slot
@@ -104,8 +105,49 @@ const en = {
 /** Dictionary namespace owned by this plugin. */
 const NS = 'queue.tools';
 
+/** The one placement this dock renders (`next-turn` rows). Every `toIndex` it
+ *  sends is relative to that list, and the host validates it as such. */
+const QUEUED_PLACEMENT = 'queued';
+
 /** Services required by the queue-dock registration. */
-const inject = ['slots', 'locale', 'connection', 'conversation', 'sessions'];
+const inject = ['slots', 'locale', 'sessions'];
+
+/**
+ * One call to the host half over its `/queue` prefix route.
+ *
+ * This used to be `ctx.connection.rpc.call('/queue', …)`, which cannot work in
+ * dsh 0.1.5-rc.1: the Connection registry throws `cannot get property
+ * "webServer" without inject` for every plugin outside the connection package,
+ * so the channel never exists and the request would land on the SPA fallback.
+ * The host half registers that route itself (see `createRpcRoute` there) and
+ * answers the same `{ ok, value }` / `{ ok, error }` envelope.
+ *
+ * Same-origin by construction, JSON in and out — the host's fence requires it.
+ */
+const call = async (endpoint, args) => {
+  let response
+  try {
+    response = await fetch('/queue/' + endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ args: args ?? {} }),
+    })
+  } catch (error) {
+    throw new Error('rpc ' + endpoint + ' failed: ' + String(error?.message ?? error))
+  }
+  if (!response.ok) throw new Error('rpc ' + endpoint + ' failed: HTTP ' + String(response.status))
+  const envelope = await response.json()
+  if (envelope === null || typeof envelope !== 'object' || envelope.ok !== true) {
+    const error = new Error(
+      'rpc ' + endpoint + ' failed: ' +
+      String(envelope?.error?.code ?? 'malformed') + ': ' + String(envelope?.error?.message ?? 'malformed envelope'),
+    )
+    error.code = envelope?.error?.code
+    error.details = envelope?.error?.details
+    throw error
+  }
+  return envelope.value
+}
 
 /**
  * Enhanced queue strip: the shipped dock plus full-text hover preview
@@ -115,7 +157,7 @@ const inject = ['slots', 'locale', 'connection', 'conversation', 'sessions'];
  */
 function QueueToolsDock({ useSession, updateQueue, notify, reorder, t }) {
   const inbox = useSession((s) => s.queue);
-  const queue = useMemo(() => inbox.filter((row) => row.placement === 'queued'), [inbox]);
+  const queue = useMemo(() => inbox.filter((row) => row.placement === QUEUED_PLACEMENT), [inbox]);
   const running = useSession((s) => s.running);
   const queueMutable = useSession((s) => s.subagent === null);
   const [editing, setEditing] = useState(null);
@@ -320,12 +362,17 @@ function QueueToolsDock({ useSession, updateQueue, notify, reorder, t }) {
 function apply(ctx) {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-queue-tools: dictionaries')
 
-  const reorder = async (sessionId, itemId, toIndex) => {
-    const result = await ctx.connection.rpc.call('/queue', 'reorder', { args: { sessionId, itemId, toIndex } })
-    if (!result.ok) {
-      throw new Error('queue reorder failed: ' + result.error.code + ': ' + result.error.message)
+  const reorder = async (sessionId, itemId, toIndex, placement) => {
+    try {
+      return await call('reorder', { sessionId, itemId, toIndex, placement })
+    } catch (error) {
+      // Keep this patch's own failure wording while preserving the transport's
+      // machine-readable fields for callers that branch on them.
+      const wrapped = new Error('queue reorder failed: ' + String(error?.message ?? error))
+      wrapped.code = error?.code
+      wrapped.details = error?.details
+      throw wrapped
     }
-    return result.value
   }
 
   ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
@@ -344,7 +391,9 @@ function apply(ctx) {
         notify: (level, text) => {
           conversation.input.for(actx).notify(level, text)
         },
-        reorder: (itemId, toIndex) => reorder(sessionId, itemId, toIndex),
+        // Every index this dock computes comes from the `queued` rows it
+        // renders, so the host can refuse a move onto any other list.
+        reorder: (itemId, toIndex) => reorder(sessionId, itemId, toIndex, QUEUED_PLACEMENT),
       }
     },
   }, QueueToolsDock))

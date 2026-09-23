@@ -1,3 +1,16 @@
+// ⚠️ LEGACY MODULE — NOT REFERENCED AT RUNTIME.
+//
+// This file is the leftovers of the previous generation of dsh-project-memory,
+// which implemented a complete `.dsh-memory/` note store (save / search / list,
+// dedupe, maturity) inside the plugin. That implementation has been replaced by
+// the Memorix bridge: `lib/index.js` and `client.js` no longer import anything
+// from here, Memorix now owns storage / search / dedupe / maturity, and this
+// module is not reachable through package.json `exports` either. Its only
+// remaining consumer is `tests/store.test.mjs`, which still covers the pure
+// logic below. Kept on purpose (project convention: keep `store.js` and the
+// `.dsh-memory/` directory until the Memorix workflow has proven itself) — do
+// not delete, and do not start new work on top of it.
+//
 // dsh-project-memory store: pure filesystem logic for the `.dsh-memory`
 // note store. No dsh imports — kept standalone so it can be unit-tested and
 // reused. A note is one Markdown file with a YAML front matter block:

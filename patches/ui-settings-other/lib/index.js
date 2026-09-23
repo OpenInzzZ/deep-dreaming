@@ -20,10 +20,17 @@
  *   until the service answers. Keeping the lifecycle in a script makes the
  *   restart independently testable (`-DryRun`) and keeps this host entry a
  *   thin, dependency-free trigger.
- * - `installShortcut` → creates the desktop shortcut that silently starts
- *   dsh web (via `install-desktop-shortcut.ps1`), first ensuring the whale-girl
- *   icon asset exists under `~/.dsh/assets/`.
- * - `reloadPlugins` → hot-reloads the user patch layer (see below).
+ * - `installShortcut` → creates the desktop shortcut that starts dsh web (via
+ *   `install-desktop-shortcut.ps1`; the shortcut opens a console window and
+ *   waits for a key press — `start-dsh.ps1 -Pause`), first ensuring the
+ *   whale-girl icon asset exists under `~/.dsh/assets/`.
+ *
+ * There is deliberately no `stop` endpoint: stopping the service is a
+ * CLI/desktop action (`stop-dsh.ps1`), and the only destructive control the UI
+ * offers is the single restart button. `reloadPlugins` is gone too — a
+ * comment-only rewrite of cordis.patch.yml parses to the same patch list, and
+ * `Entry.update` returns early on equal options, so it never remounted
+ * anything; editing the layer's rows/config is what actually hot-applies.
  *
  * Session safety: a restart kills the service process, which interrupts every
  * RUNNING agent session. To keep restarts from silently breaking in-flight
@@ -36,8 +43,10 @@
  * (settings namespace `ui-settings-other`, default 120 = 2 h, editable in
  * 设置 → 插件 → 插件配置), the service requests a graceful shutdown through
  * `ctx.appExit` — the launcher-provided exit request that disposes the app
- * fiber — falling back to `process.exit(0)` when absent. `applies: live`:
- * settings changes rebuild the monitor immediately.
+ * fiber — falling back to `process.exit(0)` when absent. The namespace is
+ * registered by hand (`settings.register` + `scope.watch`), NOT through
+ * `settings.installSection`, and it is not `applies: live`: re-deriving the
+ * idle monitor from a committed change is this plugin's own job.
  *
  * The script path comes from the patch config (`script`), defaulting to
  * `~/.dsh/scripts/restart-dsh.ps1`.
@@ -52,7 +61,6 @@ import { spawn, execFileSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join, isAbsolute, dirname, resolve } from 'node:path'
 import { statSync, readFileSync, copyFileSync, existsSync, mkdirSync } from 'node:fs'
-import { readFile, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import z from '@deepseek-ai/schemastery'
 
@@ -66,14 +74,14 @@ export const DEFAULTS = { idleEnabled: true, idleMinutes: 120 }
 
 /**
  * Settings schema for the namespace (defaults are the floor). Exported as
- * `Config` so the Loader validates the entry config at load time and strips
- * nothing (unknown keys would be dropped by the schema's default strip).
+ * `Config` so the Loader validates the entry config at load time. Unknown keys
+ * are tolerated (kept, not rejected), so dropping a key here never breaks an
+ * existing entry config.
  */
 export const ConfigSchema = z.object({
   idleEnabled: z.boolean().default(true),
   idleMinutes: z.number().default(120).min(1),
   script: z.string().default(''),
-  patchFile: z.string().default(''),
 })
 
 export const Config = ConfigSchema
@@ -85,15 +93,6 @@ export function resolveRestartScript(config = {}) {
     return isAbsolute(configured) ? configured : join(homedir(), '.dsh', configured)
   }
   return join(homedir(), '.dsh', 'scripts', 'restart-dsh.ps1')
-}
-
-/** Resolve the user patch layer to touch for a hot plugin reload. */
-export function resolvePatchFile(config = {}) {
-  const configured = config.patchFile
-  if (typeof configured === 'string' && configured.length > 0) {
-    return isAbsolute(configured) ? configured : join(homedir(), '.dsh', configured)
-  }
-  return join(homedir(), '.dsh', 'profiles', 'web', 'cordis.patch.yml')
 }
 
 /** Absolute path of one bundled brand asset inside this patch. */
@@ -119,26 +118,42 @@ export function ensureIconAsset() {
   return target
 }
 
+/** Absolute path of the deployed desktop-shortcut installer script. */
+export function shortcutScriptPath() {
+  return join(homedir(), '.dsh', 'scripts', 'install-desktop-shortcut.ps1')
+}
+
 /**
- * Create (or refresh) the desktop shortcut that silently starts dsh web.
- * Runs the deployed `install-desktop-shortcut.ps1` synchronously and returns
- * its output; the script is idempotent (existing shortcut → "already exists").
- * @returns {{ ok: boolean, output: string, icon: string }}
+ * Whether installer output reports an existing shortcut left untouched. The
+ * script is idempotent and says so (`shortcut already exists with -Pause: …`)
+ * instead of rewriting the `.lnk`; every other outcome ends with the file
+ * saved, so this is what separates "created" from "already there".
+ */
+export function shortcutAlreadyExisted(output) {
+  return /already exists/i.test(String(output ?? ''))
+}
+
+/**
+ * Create (or refresh) the desktop shortcut that starts dsh web in a console
+ * window (`start-dsh.ps1 -OpenBrowser -Pause`). Runs the deployed
+ * `install-desktop-shortcut.ps1` synchronously and reports what really
+ * happened: `created` is derived from the script's own report, never assumed.
+ * @returns {{ ok: boolean, created: boolean, output: string, icon: string, script: string }}
  */
 export function installShortcut() {
   const icon = ensureIconAsset()
-  const script = join(homedir(), '.dsh', 'scripts', 'install-desktop-shortcut.ps1')
+  const script = shortcutScriptPath()
   if (!existsSync(script)) {
-    return { ok: false, output: `install script missing: ${script} (run scripts/deploy.ps1 first)`, icon }
+    return { ok: false, created: false, output: `install script missing: ${script} (run scripts/deploy.ps1 first)`, icon, script }
   }
   try {
     const output = execFileSync('powershell', [
       '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
-    ], { encoding: 'utf8', windowsHide: true, timeout: 30_000 })
-    return { ok: true, output: output.trim(), icon }
+    ], { encoding: 'utf8', windowsHide: true, timeout: 30_000 }).trim()
+    return { ok: true, created: !shortcutAlreadyExisted(output), output, icon, script }
   } catch (error) {
     const detail = error?.stdout?.toString()?.trim() || error?.message || String(error)
-    return { ok: false, output: detail, icon }
+    return { ok: false, created: false, output: detail, icon, script }
   }
 }
 
@@ -157,6 +172,96 @@ export function buildRestartSpawn(scriptPath, extraArgs = []) {
   return {
     file: 'powershell',
     args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, ...extraArgs],
+  }
+}
+
+/**
+ * Local RPC over a `webServer` route, replacing `ctx.connection.rpc`.
+ *
+ * dsh 0.1.5-rc.1 broke the Connection RPC registry for every plugin outside
+ * the connection package: `handle()` calls `register()`, which touches
+ * `owner.webServer` on a context that never declared `webServer`, so it throws
+ * `cannot get property "webServer" without inject`. The channel then never
+ * exists and the browser's `POST /<channel>/<endpoint>` requests fall through
+ * to the SPA fallback (405/404).
+ *
+ * This is the same contract on the surface a plugin does own: one prefix route,
+ * a same-origin fence, JSON-only bodies, and the identical
+ * `{ ok, value }` / `{ ok, error: { code, message, details } }` envelope the
+ * endpoint handlers already return. The fence mirrors the Connection's own
+ * reasoning: a cross-site POST always carries its own `Origin`, and requiring
+ * `application/json` makes the browser preflight it (we never answer that
+ * preflight), so a page the user merely visits cannot reach these endpoints.
+ *
+ * @param path - prefix route path, e.g. `/app`.
+ * @param handle - `async (endpoint, payload) => envelope`, unchanged from the
+ *   RPC handler signature.
+ */
+export function createRpcRoute(path, handle) {
+  const MAX_BODY_BYTES = 1 << 20
+  const fail = (res, status, code, message) => {
+    res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+    res.end(JSON.stringify({ ok: false, error: { code, message, details: {} } }))
+  }
+  return {
+    kind: 'prefix',
+    path,
+    handler: (req, res) => {
+      const host = req.headers.host
+      const origin = req.headers.origin
+      if (typeof origin === 'string' && origin.length > 0) {
+        let sameOrigin = false
+        try {
+          sameOrigin = new URL(origin).host === host
+        } catch {
+          sameOrigin = false
+        }
+        if (!sameOrigin) return fail(res, 403, 'forbidden', 'cross-origin request refused')
+      }
+      if (req.method !== 'POST') return fail(res, 405, 'method-not-allowed', 'RPC endpoints accept POST only')
+      const contentType = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase()
+      if (contentType !== 'application/json') return fail(res, 415, 'unsupported-media-type', 'content-type must be application/json')
+      const url = String(req.url ?? '')
+      const query = url.indexOf('?')
+      const pathname = query === -1 ? url : url.slice(0, query)
+      const endpoint = pathname.startsWith(`${path}/`) ? pathname.slice(path.length + 1) : undefined
+      if (endpoint === undefined || endpoint.length === 0 || endpoint.includes('/')) {
+        return fail(res, 404, 'unknown-endpoint', `unknown endpoint: ${JSON.stringify(pathname)}`)
+      }
+      let raw = ''
+      let overflow = false
+      req.on('data', (chunk) => {
+        if (overflow) return
+        raw += chunk
+        if (raw.length > MAX_BODY_BYTES) {
+          overflow = true
+          req.destroy()
+        }
+      })
+      req.on('error', () => { /* client went away */ })
+      req.on('end', () => {
+        if (overflow) return fail(res, 413, 'payload-too-large', 'request body is too large')
+        let payload
+        try {
+          payload = raw.length === 0 ? {} : JSON.parse(raw)
+        } catch {
+          return fail(res, 400, 'bad-request', 'body is not JSON')
+        }
+        void Promise.resolve()
+          .then(() => handle(endpoint, payload))
+          .then(
+            (envelope) => {
+              if (res.writableEnded) return
+              res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+              res.end(JSON.stringify(envelope))
+            },
+            (error) => {
+              if (res.writableEnded) return
+              fail(res, 500, 'internal', String(error?.message ?? error))
+            },
+          )
+      })
+    },
   }
 }
 
@@ -283,29 +388,66 @@ function pickSettings(config) {
 }
 
 /**
+ * Cordis `FiberState` members that mean "this fiber is going down". A const
+ * enum has no runtime object, so the values are mirrored here — the same
+ * mirror dsh's own settings provider keeps for its `isUnloading` guard.
+ */
+const FIBER_DISPOSED = 4
+const FIBER_UNLOADING = 5
+
+/**
+ * Whether a context's own fiber is unloading — as opposed to merely losing a
+ * service it had injected. The two cases reach the same disposer and need
+ * opposite reactions, so they must not be conflated.
+ */
+function isUnloading(ctx) {
+  const state = ctx?.fiber?.state
+  return state === FIBER_UNLOADING || state === FIBER_DISPOSED
+}
+
+/**
  * Register the settings namespace and hand the write scope to `onScope`.
- * Mirrors dsh-settings' installSettingsSection (including its `isUnloading`
- * guard: the disposer restores the entry source but must not rebuild
- * resources while the plugin is going down — a rebuild would leak a fresh
- * monitor/timer on a disposed context).
+ *
+ * This is a hand-rolled `settings.installSection` (the namespace is registered
+ * with `settings.register` + `scope.watch`, NOT with `applies: live`), and it
+ * keeps that helper's `isUnloading` guard: the disposer below runs both when
+ * the settings provider detaches (the plugin keeps running, so `entrySource` —
+ * the entry config resolved exactly like `apply` resolves it — becomes the
+ * source again) and when this plugin itself unloads (the entry value is
+ * irrelevant and rebuilding resources would create a timer on a dying
+ * context). `hooks.isUnloading()` reports WHICH of the two it is; it inspects
+ * the plugin's own fiber, never the settings child fiber, because the child
+ * unloads in both cases.
+ *
+ * The unloading branch closes the resource path itself, before it could notify
+ * any change: Cordis releases a fiber's effects in reverse registration order
+ * and this settings child fiber is registered after the monitor effect in
+ * `apply`, so this disposer really does run first during an unload.
  */
 function registerConfigSection(ctx, ns, schema, entry, hooks, onScope) {
   ctx.inject(['settings'], (sctx) => {
     const scope = sctx.settings.register(ns, schema, { base: entry })
     hooks.setSource(() => scope.get())
     sctx.effect(() => () => {
-      hooks.setSource(() => entry)
+      if (hooks.isUnloading()) {
+        hooks.onClose()
+        return
+      }
+      hooks.setSource(hooks.entrySource)
       hooks.onChange()
     })
     hooks.onChange()
-    scope.watch(() => { hooks.onChange() })
+    scope.watch(() => {
+      if (hooks.isUnloading()) return
+      hooks.onChange()
+    })
     onScope(scope)
   })
 }
 
 /** RPC failure envelope for the config endpoints. */
-function settingsError(code, message) {
-  return { ok: false, error: { code, message, details: {} } }
+function settingsError(code, message, details = {}) {
+  return { ok: false, error: { code, message, details } }
 }
 
 /** Cordis plugin entry: register the `/app` RPC channel + the idle monitor. */
@@ -314,13 +456,47 @@ export function apply(ctx, config = {}) {
 
   // State is per-instance: module-level mutable state would leak across HMR
   // reloads (a stale `restarting` flag would permanently block restarts).
-  ctx.inject(['connection', 'agents'], (ctx) => {
+  //
+  // `webServer` is a DECLARED dependency, not an optional read: Cordis mounts
+  // rows in parallel and the HTTP carrier is bound later than `agents`, so
+  // reading it with `ctx.get('webServer')` during this callback races that
+  // binding, sees `undefined`, and silently skips the page's whole transport.
+  // That race is exactly how four of five migrated patches came up dead after
+  // the first restart. Waiting on it here makes the registration unconditional.
+  ctx.inject(['webServer', 'agents'], (ctx) => {
     const logger = ctx.logger
-    let source = () => ({ ...DEFAULTS, ...settingsEntry })
+    // The plugin's own context: its fiber state, not the settings child's,
+    // tells "the settings provider went away" from "this plugin is unloading".
+    const ownerCtx = ctx
+    /** Entry-config source, resolved with the schema defaults as the floor. */
+    const entrySource = () => ({ ...DEFAULTS, ...settingsEntry })
+    let source = entrySource
     let configScope = null
     let monitorApi = null
     let restarting = false
-    let disposed = false
+    let restartWatchdog = null
+    let closed = false
+
+    // Diagnostics: this host half's state, directly observable on loopback at
+    // /ui-settings-other/health. Without it, "the /app channel never
+    // registered" and "the status endpoint threw" are indistinguishable from
+    // the page — both render 运行状态获取失败. Read-only, no-store, exact route.
+    const diagnostics = { channel: false, settings: false, branding: false, warnings: [] }
+    const webServer = ctx.get('webServer')
+    try {
+      if (webServer !== undefined) {
+        ctx.effect(() => webServer.register({
+          kind: 'exact',
+          path: '/ui-settings-other/health',
+          handler: (req, res) => {
+            res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+            res.end(JSON.stringify({ ok: true, namespace: SETTINGS_NAMESPACE, ...diagnostics }))
+          },
+        }), 'ui-settings-other: health route')
+      }
+    } catch (error) {
+      logger.warn(`[ui-settings-other] health route unavailable: ${String(error?.message ?? error)}`)
+    }
 
     const busyFailure = (sessions) => ({
       ok: false,
@@ -347,15 +523,32 @@ export function apply(ctx, config = {}) {
       process.exit(0)
     }
 
-    /** (Re)build the idle monitor from the current source (settings > entry). */
-    const rebuildMonitor = () => {
-      if (disposed) return
+    /** Stop the idle monitor, if one is live (idempotent). */
+    const stopMonitor = () => {
       if (monitorApi !== null) {
         monitorApi.stop()
         monitorApi = null
       }
+    }
+
+    /**
+     * Single assembly path for the idle monitor: make it match the current
+     * source (settings > entry) instead of unconditionally rebuilding it.
+     * `idleMinutes` is read through `source()` on every tick, so only the
+     * enabled/disabled decision needs assembling at all; calling this twice for
+     * the same configuration — the settings section attaching after the entry
+     * fallback below, or a no-op settings write — must not build a second
+     * monitor and stop the first.
+     */
+    const syncMonitor = () => {
+      if (closed) return
       const current = source()
-      if (current.idleEnabled !== true || !(current.idleMinutes > 0)) return
+      const wanted = current.idleEnabled === true && current.idleMinutes > 0
+      if (!wanted) {
+        stopMonitor()
+        return
+      }
+      if (monitorApi !== null) return
       monitorApi = createIdleMonitor({
         busy: () => runningSessionIds(ctx.agents).length > 0,
         idleMinutes: () => source().idleMinutes,
@@ -363,69 +556,122 @@ export function apply(ctx, config = {}) {
       })
     }
 
-    // The idle monitor owns a raw interval; dispose it with the plugin. This
-    // must run before registerConfigSection's disposer (reverse order), so a
-    // stale rebuild during unload is a no-op via `disposed`.
-    ctx.effect(() => () => {
-      disposed = true
-      if (monitorApi !== null) {
-        monitorApi.stop()
-        monitorApi = null
-      }
-    }, 'ui-settings-other: idle monitor')
+    /**
+     * Close the rebuild path and stop whatever timer is live. BOTH disposers
+     * call it, because Cordis releases a fiber's effects in reverse
+     * registration order: the monitor effect below is registered before the
+     * settings child fiber (`ctx.inject`), so during an unload the settings
+     * section's disposer runs FIRST — while a flag owned by this effect is
+     * still false. The section therefore closes the path itself (see
+     * `registerConfigSection`) before it can notify a change, and this effect
+     * closes it again as the outer safety net. In either order, no monitor can
+     * be created during the unload and none survives it.
+     */
+    const closeMonitor = () => {
+      closed = true
+      stopMonitor()
+    }
 
-    registerConfigSection(ctx, SETTINGS_NAMESPACE, ConfigSchema, settingsEntry, {
-      setSource: (current) => { source = current },
-      onChange: rebuildMonitor,
-    }, (scope) => { configScope = scope })
-    rebuildMonitor()
+    ctx.effect(() => () => closeMonitor(), 'ui-settings-other: idle monitor')
+
+    // The restart watchdog is a plugin-owned timer too: unloading must cancel
+    // a pending 90 s release instead of letting it fire on a disposed fiber
+    // (and hold the process's event loop open).
+    ctx.effect(() => () => {
+      if (restartWatchdog !== null) {
+        clearTimeout(restartWatchdog)
+        restartWatchdog = null
+      }
+    }, 'ui-settings-other: restart watchdog')
+
+    // Everything between here and the `/app` registration below is optional
+    // setup, and the RPC channel is the section's only lifeline: a throw in
+    // the settings wiring or in the favicon branding used to skip the
+    // registration entirely, which leaves the whole page showing
+    // "运行状态获取失败" with every button dead. Each step is therefore
+    // isolated and reports its own failure instead of taking the channel down.
+    try {
+      registerConfigSection(ctx, SETTINGS_NAMESPACE, ConfigSchema, settingsEntry, {
+        setSource: (current) => { source = current },
+        entrySource,
+        onChange: syncMonitor,
+        onClose: closeMonitor,
+        isUnloading: () => isUnloading(ownerCtx),
+      }, (scope) => { configScope = scope; diagnostics.settings = true })
+    } catch (error) {
+      const message = `settings wiring failed (${String(error?.message ?? error)}); the page runs on the entry-config defaults`
+      diagnostics.warnings.push(message)
+      logger.warn(`[ui-settings-other] ${message}`)
+    }
+
+    // Entry-config fallback: the section above assembles the monitor as soon
+    // as it attaches (its `ctx.inject` callback runs on a later microtask), so
+    // this only covers a boot without a settings service — and because
+    // `syncMonitor` is idempotent it stays a single assembly either way.
+    try {
+      syncMonitor()
+    } catch (error) {
+      const message = `idle monitor not armed: ${String(error?.message ?? error)}`
+      diagnostics.warnings.push(message)
+      logger.warn(`[ui-settings-other] ${message}`)
+    }
 
     // Branding: override the shipped favicon with the whale-girl icon. The
     // exact route wins over the SPA dist fallback; the icon is bundled in
-    // this patch and served as an SVG wrapper around the 128px PNG.
-    const webServer = ctx.get('webServer')
+    // this patch and served as an SVG wrapper around the 128px PNG. A missing
+    // or unreadable asset only skips the branding.
     if (webServer !== undefined) {
-      const svg = faviconSvg(patchAssetPath('favicon-128.png'))
-      ctx.effect(() => webServer.register({
-        kind: 'exact',
-        path: '/favicon.svg',
-        handler: (req, res) => {
-          res.writeHead(200, {
-            'content-type': 'image/svg+xml',
-            'cache-control': 'public, max-age=86400',
-          })
-          res.end(svg)
-        },
-      }), 'ui-settings-other: favicon route')
+      try {
+        const svg = faviconSvg(patchAssetPath('favicon-128.png'))
+        ctx.effect(() => webServer.register({
+          kind: 'exact',
+          path: '/favicon.svg',
+          handler: (req, res) => {
+            res.writeHead(200, {
+              'content-type': 'image/svg+xml',
+              'cache-control': 'public, max-age=86400',
+            })
+            res.end(svg)
+          },
+        }), 'ui-settings-other: favicon route')
+        diagnostics.branding = true
+      } catch (error) {
+        const message = `favicon override skipped: ${String(error?.message ?? error)}`
+        diagnostics.warnings.push(message)
+        logger.warn(`[ui-settings-other] ${message}`)
+      }
     }
-    return ctx.connection.rpc.handle('/app', async (endpoint, payload) => {
+    const handleEndpoint = async (endpoint, payload) => {
       if (endpoint === 'getSettings') {
         return { ok: true, value: source() }
       }
       if (endpoint === 'setSettings') {
         if (configScope === null) {
-          return settingsError('settings-unavailable', 'settings service is not ready yet')
+          return settingsError('settings-unavailable', 'settings service is not ready yet', { namespace: SETTINGS_NAMESPACE })
         }
         const fields = payload?.args?.fields
         if (typeof fields !== 'object' || fields === null || Array.isArray(fields)) {
-          return settingsError('bad-request', 'fields must be a plain object')
+          return settingsError('bad-request', 'fields must be a plain object', {
+            namespace: SETTINGS_NAMESPACE,
+            received: Array.isArray(fields) ? 'array' : typeof fields,
+          })
         }
         try {
           await configScope.update(fields)
           return { ok: true, value: source() }
         } catch (error) {
-          return settingsError('settings-rejected', String(error?.message ?? error))
+          return settingsError('settings-rejected', String(error?.message ?? error), { namespace: SETTINGS_NAMESPACE })
         }
       }
       if (endpoint === 'resetSettings') {
         if (configScope === null) {
-          return settingsError('settings-unavailable', 'settings service is not ready yet')
+          return settingsError('settings-unavailable', 'settings service is not ready yet', { namespace: SETTINGS_NAMESPACE })
         }
         try {
           await configScope.replace({})
           return { ok: true, value: source() }
         } catch (error) {
-          return settingsError('settings-rejected', String(error?.message ?? error))
+          return settingsError('settings-rejected', String(error?.message ?? error), { namespace: SETTINGS_NAMESPACE })
         }
       }
       if (endpoint === 'status') {
@@ -439,85 +685,22 @@ export function apply(ctx, config = {}) {
         return { ok: true, value: { running: sessions.length, sessions, service: serviceInfo(), idle } }
       }
       if (endpoint === 'installShortcut') {
-        // Create the desktop shortcut (silent start, whale-girl icon). The
-        // script is idempotent; an existing shortcut is reported, not replaced.
+        // Create the desktop shortcut (console window + whale-girl icon). The
+        // script is idempotent: an existing shortcut is reported, not replaced,
+        // and `created` carries that real outcome back to the caller.
         const result = installShortcut()
         if (!result.ok) {
           return {
             ok: false,
-            error: { code: 'internal', message: result.output, details: {} },
+            error: { code: 'internal', message: result.output, details: { script: result.script } },
           }
         }
-        return { ok: true, value: { created: true, icon: result.icon, output: result.output } }
-      }
-      if (endpoint === 'stop') {
-        // Stop (not restart) the service: graceful exit through the launcher's
-        // appExit hook. The exit is deferred so the RPC response reaches the
-        // browser first; sessions-running is protected like restart.
-        const force = payload?.args?.force === true
-        const running = runningSessionIds(ctx.agents)
-        if (running.length > 0 && !force) {
-          return {
-            ok: false,
-            error: {
-              code: 'sessions-running',
-              message: `${running.length} 个会话正在运行,中断会打断它们(可强制中断)`,
-              details: { running: running.length, sessions: running },
-            },
-          }
-        }
-        if (running.length > 0) {
-          for (const id of running) {
-            const agent = ctx.agents.get(id)
-            if (agent !== undefined && agent.status === 'running') {
-              agent.cancel({ kind: 'user' }, { keepInbox: true })
-            }
-          }
-        }
-        logger.info(`[ui-settings-other] stop requested${force ? ' (force)' : ''}; exiting gracefully`)
-        setTimeout(() => {
-          try {
-            const exit = ctx.get('appExit')
-            if (typeof exit === 'function') {
-              exit(0)
-              return
-            }
-          } catch {
-            /* fall through to a hard exit */
-          }
-          process.exit(0)
-        }, 500)
-        return { ok: true, value: { stopping: true } }
-      }
-      if (endpoint === 'reloadPlugins') {
-        // Hot-reload the user patch layer: touching the profile's
-        // cordis.patch.yml triggers dsh's watchUserPatches (a Cordis HMR
-        // config watch), which transactionally re-applies the whole user
-        // layer — every user-level plugin (host + client) is unloaded and
-        // remounted without restarting the service, so running sessions and
-        // the durable inbox are untouched.
-        const patchFile = resolvePatchFile(config)
-        try {
-          const marker = `# dsh-plugin-reload: ${new Date().toISOString()}`
-          let content = await readFile(patchFile, 'utf8')
-          if (/^# dsh-plugin-reload: /m.test(content)) {
-            content = content.replace(/^# dsh-plugin-reload: .*$/m, marker)
-          } else {
-            content = content.replace(/\s*$/, '\n') + marker + '\n'
-          }
-          await writeFile(patchFile, content, 'utf8')
-          return { ok: true, value: { requested: true, patchFile, marker } }
-        } catch (error) {
-          return {
-            ok: false,
-            error: { code: 'internal', message: `failed to touch patch file: ${String(error)}`, details: {} },
-          }
-        }
+        return { ok: true, value: { created: result.created, icon: result.icon, output: result.output } }
       }
       if (endpoint !== 'restart') {
         return {
           ok: false,
-          error: { code: 'bad-request', message: `unknown endpoint: ${endpoint}`, details: {} },
+          error: { code: 'bad-request', message: `unknown endpoint: ${endpoint}`, details: { channel: '/app', endpoint: String(endpoint) } },
         }
       }
       if (restarting) {
@@ -552,7 +735,7 @@ export function apply(ctx, config = {}) {
           error: {
             code: 'internal',
             message: `restart script not found: ${scriptPath} (run scripts/deploy.ps1 to install it)`,
-            details: {},
+            details: { script: scriptPath },
           },
         }
       }
@@ -581,16 +764,45 @@ export function apply(ctx, config = {}) {
           }
         })
         // Watchdog: if the script neither restarts the service nor exits
-        // non-zero within 90s, release the lock anyway.
-        setTimeout(() => { restarting = false }, 90_000)
+        // non-zero within 90s, release the lock anyway. It is owned by the
+        // plugin lifecycle (the effect registered in `apply`), so an unload
+        // cancels it instead of leaving it to fire on a disposed fiber.
+        if (restartWatchdog !== null) clearTimeout(restartWatchdog)
+        restartWatchdog = setTimeout(() => {
+          restartWatchdog = null
+          restarting = false
+        }, 90_000)
       } catch (error) {
         restarting = false
         return {
           ok: false,
-          error: { code: 'internal', message: String(error), details: {} },
+          error: { code: 'internal', message: String(error), details: { script: scriptPath } },
         }
       }
       return { ok: true, value: { scheduled: true, script: scriptPath } }
-    }, { authority: 'loopback' })
+    }
+
+    // The page reaches this half over one prefix route on the web carrier.
+    // `ctx.connection.rpc.handle` is not an option in dsh 0.1.5-rc.1: its
+    // registry reads `owner.webServer` on a context that never declared it and
+    // throws `cannot get property "webServer" without inject`, so no channel
+    // would exist and the page's RPC calls would land on the SPA fallback.
+    // See createRpcRoute() for the fence that replaces the Connection's own.
+    if (webServer === undefined) {
+      const message = 'webServer is unavailable; the page cannot reach this half'
+      diagnostics.warnings.push(message)
+      logger.warn(`[ui-settings-other] ${message}`)
+      return undefined
+    }
+    try {
+      const route = createRpcRoute('/app', handleEndpoint)
+      ctx.effect(() => webServer.register(route), 'ui-settings-other: /app rpc route')
+      diagnostics.channel = true
+    } catch (error) {
+      const message = `the /app route could not be registered: ${String(error?.message ?? error)}`
+      diagnostics.warnings.push(message)
+      logger.warn(`[ui-settings-other] ${message}`)
+    }
+    return undefined
   })
 }

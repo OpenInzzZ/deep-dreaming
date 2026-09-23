@@ -131,6 +131,8 @@ const zh = {
   disable: '停用',
   toggleBusy: '处理中…',
   toggleDone: '已生效',
+  toggleCleared: '已生效,清除 {n} 行禁用行',
+  toggleUnconfirmed: '未能确认,请手工检查 cordis.patch.yml',
   toggleFailed: '操作失败',
   selfProtected: '本管理页不能停用(否则无法在此恢复,需手动编辑 cordis.patch.yml)',
 };
@@ -169,6 +171,8 @@ const en = {
   disable: 'Disable',
   toggleBusy: 'Working…',
   toggleDone: 'Applied',
+  toggleCleared: 'Applied, cleared {n} disabled row(s)',
+  toggleUnconfirmed: 'Not confirmed — check cordis.patch.yml by hand',
   toggleFailed: 'Operation failed',
   selfProtected: 'This manager page cannot be disabled (otherwise it could not be restored here; edit cordis.patch.yml manually instead)',
 };
@@ -177,7 +181,7 @@ const en = {
 const NS = 'settings.pluginManager';
 
 /** Services required by the Settings registration. */
-const inject = ['slots', 'locale', 'connection', 'remote', 'remote.pluginInventory'];
+const inject = ['slots', 'locale', 'remote', 'remote.pluginInventory'];
 
 const PHASE_KEYS = { pending: 'pending', loading: 'loadingPhase', active: 'active', failed: 'failed', unloading: 'unloading' };
 
@@ -221,7 +225,7 @@ function PluginManagerSettingsTab({ list, toggleEnabled, t }) {
   const [state, setState] = useState({ status: 'loading' });
   const [toggleBusyId, setToggleBusyId] = useState(null);
   const [toggleFailedId, setToggleFailedId] = useState(null);
-  const [toggleDoneId, setToggleDoneId] = useState(null);
+  const [toggleReport, setToggleReport] = useState(null);
 
   useEffect(() => {
     let current = true
@@ -260,11 +264,20 @@ function PluginManagerSettingsTab({ list, toggleEnabled, t }) {
     const target = !entry.enabled
     setToggleBusyId(entry.entryId)
     setToggleFailedId(null)
-    setToggleDoneId(null)
+    setToggleReport(null)
     void Promise.resolve().then(() => toggleEnabled(entry.entryId, target)).then(
-      () => {
+      (value) => {
         setToggleBusyId(null)
-        setToggleDoneId(entry.entryId)
+        // The host reports honestly: `recognized === false` means the patch
+        // file's row shape could not be confirmed (or no row was found at all),
+        // and the tab must not claim the toggle took effect. `removed` is how
+        // many disable rows the write cleared.
+        setToggleReport({
+          entryId: entry.entryId,
+          removed: typeof value?.removed === 'number' ? value.removed : 0,
+          recognized: value?.recognized !== false,
+          warnings: Array.isArray(value?.warnings) ? value.warnings : [],
+        })
         setRequest(value => value + 1)
       },
       () => {
@@ -398,8 +411,21 @@ function PluginManagerSettingsTab({ list, toggleEnabled, t }) {
                   toggleFailedId === entry.entryId
                     ? jsx('span', { className: 'pm-toggle-status', 'data-tone': 'error', children: t('toggleFailed') }, 'toggle-fail')
                     : null,
-                  toggleDoneId === entry.entryId
-                    ? jsx('span', { className: 'pm-toggle-status', 'data-tone': 'ok', children: t('toggleDone') }, 'toggle-done')
+                  toggleReport !== null && toggleReport.entryId === entry.entryId
+                    ? (toggleReport.recognized
+                        ? jsx('span', {
+                            className: 'pm-toggle-status',
+                            'data-tone': 'ok',
+                            children: toggleReport.removed > 0
+                              ? t('toggleCleared').replace('{n}', String(toggleReport.removed))
+                              : t('toggleDone'),
+                          }, 'toggle-done')
+                        : jsx('span', {
+                            className: 'pm-toggle-status',
+                            'data-tone': 'error',
+                            title: toggleReport.warnings.join('\n'),
+                            children: t('toggleUnconfirmed'),
+                          }, 'toggle-unconfirmed'))
                     : null,
                 ] }, 'actions'),
             open ? jsx('div', { className: 'pm-card-details', id: detailId, children: [
@@ -422,6 +448,44 @@ function PluginManagerSettingsTab({ list, toggleEnabled, t }) {
   ] });
 }
 
+/**
+ * One call to the host half over its `/plugin-toggle` prefix route.
+ *
+ * This used to go through the Connection RPC registry (`rpc.call` on the
+ * `connection` service), which cannot work in dsh
+ * 0.1.5-rc.1: that registry throws `cannot get property "webServer" without
+ * inject` for every plugin outside the connection package, so the channel never
+ * exists and the request would land on the SPA fallback. The host half
+ * registers the prefix route itself (see `createRpcRoute` there) and answers
+ * the same `{ ok, value }` / `{ ok, error }` envelope.
+ *
+ * Same-origin by construction, JSON in and out — the host's fence requires it.
+ */
+const call = async (endpoint, args) => {
+  let response
+  try {
+    response = await fetch('/plugin-toggle/' + endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ args: args ?? {} }),
+    })
+  } catch (error) {
+    throw new Error('rpc ' + endpoint + ' failed: ' + String(error?.message ?? error))
+  }
+  if (!response.ok) throw new Error('rpc ' + endpoint + ' failed: HTTP ' + String(response.status))
+  const envelope = await response.json()
+  if (envelope === null || typeof envelope !== 'object' || envelope.ok !== true) {
+    const error = new Error(
+      'rpc ' + endpoint + ' failed: ' +
+      String(envelope?.error?.code ?? 'malformed') + ': ' + String(envelope?.error?.message ?? 'malformed envelope'),
+    )
+    error.code = envelope?.error?.code
+    error.details = envelope?.error?.details
+    throw error
+  }
+  return envelope.value
+}
+
 /** Contribute the lazy filterable plugin tab to the Plugins settings section. */
 function apply(ctx) {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-settings-plugin-manager: dictionaries')
@@ -434,13 +498,7 @@ function apply(ctx) {
     }
     return result.value
   }
-  const toggleEnabled = async (entryId, enabled) => {
-    const result = await ctx.connection.rpc.call('/plugin-toggle', 'setEnabled', { args: { entryId, enabled } })
-    if (!result.ok) {
-      throw new Error('setEnabled failed: ' + result.error.code + ': ' + result.error.message)
-    }
-    return result.value
-  }
+  const toggleEnabled = (entryId, enabled) => call('setEnabled', { entryId, enabled })
   const injected = () => ({ list, toggleEnabled })
 
   ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({

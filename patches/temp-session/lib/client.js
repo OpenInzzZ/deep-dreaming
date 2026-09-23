@@ -1,22 +1,24 @@
 /**
- * Browser half of the temp-session patch: a sidebar-footer action that starts
- * an ad-hoc session bound to a user-level temporary workspace.
+ * Browser half of the temp-session patch: on load the host half eagerly
+ * registers the user-level temp directory (default `~/.dsh/tmp-workspaces/`)
+ * as a real Workspace titled "临时会话". It then appears as a workspace group
+ * in the sidebar browser — users can click its "+" or "新会话" row just like
+ * any project. The sidebar-footer action is a one-click shortcut that jumps
+ * directly to a new session inside that workspace.
  *
  * Hand-written in the client-bundle contract (no build step): the shell's
  * module loader receives this file through `window.__ModuleLoader__.load` and
  * answers every `require()` from the frozen module table. Only platform seed
  * words are used: `react`, `react/jsx-runtime`, and the icon set from
  * `@deepseek-ai/dsh-client-ui-primitives`. Everything else (slots, locale,
- * connection, workspaces) arrives as services on the `apply(ctx)` context.
+ * uiWorkspace) arrives as services on the `apply(ctx)` context.
  *
  * dsh only lets you start a session inside a Workspace (the hero input is
- * inert otherwise). For quick non-project chats this action calls the host
- * half's `/temp-session` channel `ensure` endpoint — which idempotently
- * registers the user-level temp directory (default `~/.dsh/tmp-workspaces/`)
- * as a real Workspace titled "临时会话 / Temporary" — then refreshes the
- * workspace list and starts a new session bound to it. The session appears
- * under the temp workspace group in the sidebar, and agent file operations
- * land in the user-level directory instead of any project.
+ * inert otherwise). For quick non-project chats the host half idempotently
+ * ensures the temp workspace exists; the sidebar shortcut starts a new session
+ * bound to it. The session appears under the temp workspace group in the
+ * sidebar, and agent file operations land in the user-level directory instead
+ * of any project.
  */
 window.__ModuleLoader__.load({ id: '@local/dsh-client-ui-temp-session', factory: (require) => {
 var module = { exports: {} }; var exports = module.exports;
@@ -30,7 +32,8 @@ const PLUGIN_ID = '@local/dsh-client-ui-temp-session';
 const NS = 'sidebar.tempSession';
 
 /* Injected once per page; the module loader tracks `style[data-plugin]` tags
-   and removes them when the bundle unloads. */
+   and removes them when the bundle unloads, and the `data-plugin-css` key
+   keeps a re-injection (hot reload) from stacking a second copy. */
 const CSS = [
   /* Wrap: the footerActions seat is a flex row, so the wrapper must claim the
      full width — otherwise the button's calc(100% + 8px) collapses to the
@@ -51,7 +54,7 @@ const CSS = [
 
 const zh = {
   label: '临时会话',
-  title: '发起临时会话(绑定用户级临时目录,不关联项目)',
+  title: '快速发起临时会话(用户级临时目录,不关联项目) — 也可在侧边栏"临时会话"工作组中点击 + 创建',
   busy: '正在创建…',
   error: '发起失败,请重试',
 };
@@ -59,18 +62,55 @@ const zh = {
 /** English dictionary checked against the Chinese key set. */
 const en = {
   label: 'Temporary',
-  title: 'Start a temporary session (user-level dir, no project)',
+  title: 'Quick-start a temporary session (user-level dir, no project) — also available as a workspace group in the sidebar',
   busy: 'Creating…',
   error: 'Failed, retry',
 };
 
 /** Services required by the registrations. */
-const inject = ['slots', 'locale', 'connection', 'workspaces'];
+const inject = ['slots', 'locale', 'uiWorkspace'];
+
+/**
+ * One call to the host half over its `/temp-session` prefix route.
+ *
+ * This used to be `ctx.connection.rpc.call('/temp-session', …)`, which cannot
+ * work in dsh 0.1.5-rc.1: the Connection registry throws `cannot get property
+ * "webServer" without inject` for every plugin outside the connection package,
+ * so the channel never exists and the request would land on the SPA fallback.
+ * The host half registers that route itself (see `createRpcRoute` there) and
+ * answers the same `{ ok, value }` / `{ ok, error }` envelope.
+ *
+ * Same-origin by construction, JSON in and out — the host's fence requires it.
+ */
+const call = async (endpoint, args) => {
+  let response;
+  try {
+    response = await fetch('/temp-session/' + endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ args: args ?? {} }),
+    });
+  } catch (error) {
+    throw new Error('rpc ' + endpoint + ' failed: ' + String(error?.message ?? error));
+  }
+  if (!response.ok) throw new Error('rpc ' + endpoint + ' failed: HTTP ' + String(response.status));
+  const envelope = await response.json();
+  if (envelope === null || typeof envelope !== 'object' || envelope.ok !== true) {
+    const error = new Error(
+      'rpc ' + endpoint + ' failed: ' +
+      String(envelope?.error?.code ?? 'malformed') + ': ' + String(envelope?.error?.message ?? 'malformed envelope'),
+    );
+    error.code = envelope?.error?.code;
+    error.details = envelope?.error?.details;
+    throw error;
+  }
+  return envelope.value;
+}
 
 /**
  * Sidebar-footer action row: wide shows icon + label, rail only the icon.
- * Clicking calls the host `/temp-session` ensure endpoint, refreshes the
- * workspace baseline, then starts a session bound to the temp workspace.
+ * Clicking calls the host `/temp-session` ensure endpoint, then starts a
+ * session bound to the temp workspace.
  */
 function TempSessionAction({ wide, startTempSession, t }) {
   const [busy, setBusy] = useState(false);
@@ -105,18 +145,22 @@ function TempSessionAction({ wide, startTempSession, t }) {
 /** Contribute the sidebar-footer temp-session action. */
 function apply(ctx) {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'temp-session: dictionaries')
-  const t = ctx.locale.bind(NS)
 
   const startTempSession = async () => {
-    const result = await ctx.connection.rpc.call('/temp-session', 'ensure', { args: {} })
-    if (!result.ok) {
-      throw new Error('ensure failed: ' + result.error.code + ': ' + result.error.message)
+    let value;
+    try {
+      value = await call('ensure', {});
+    } catch (error) {
+      // Keep this patch's own failure wording while preserving the transport's
+      // machine-readable fields for callers that branch on them.
+      const wrapped = new Error('ensure failed: ' + String(error?.message ?? error));
+      wrapped.code = error?.code;
+      wrapped.details = error?.details;
+      throw wrapped;
     }
-    // The new workspace must be in the client baseline before connectWorkspace
-    // can reuse-or-create its blank session; startSession resolves via the
-    // list store, so refresh first.
-    await ctx.workspaces.refresh()
-    ctx.workspaces.startSession(result.value.workspaceId)
+    // The follow stream auto-delivers the new workspace to the client baseline;
+    // no manual refresh needed. Just start the session via uiWorkspace.
+    ctx.uiWorkspace.startSession(value.workspaceId);
   }
 
   ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
@@ -128,12 +172,16 @@ function apply(ctx) {
   }, TempSessionAction))
 }
 
-if (typeof document !== 'undefined') {
-  const style = document.createElement('style');
-  style.dataset.plugin = PLUGIN_ID;
-  style.textContent = CSS;
-  document.head.appendChild(style);
-}
+(function () {
+  if (typeof document === 'undefined') return
+  const tagId = PLUGIN_ID + '/temp-session.css'
+  if (document.querySelector('style[data-plugin-css="' + tagId + '"]') !== null) return
+  const tag = document.createElement('style')
+  tag.dataset.plugin = PLUGIN_ID
+  tag.dataset.pluginCss = tagId
+  tag.textContent = CSS
+  document.head.appendChild(tag)
+})();
 
 module.exports = { apply, inject, NS };
 return module.exports;

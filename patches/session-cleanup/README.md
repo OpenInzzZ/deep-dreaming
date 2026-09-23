@@ -42,8 +42,10 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 
 3. **保存即生效,无需重启**:dsh web 对 `cordis.patch.yml` 内置热加载
    (`watchUserPatches`),条目增删/配置修改保存后数秒内事务性生效(host 与
-   client 半都重新装载);也可在设置 →「其他」页点 **重载用户插件** 手动
-   触发。**修改本补丁源码后需重启 dsh web** 才生效。
+   client 半都重新装载),**不中断会话** —— 前提是文件内容确有真实变化
+   (增删行、改 `config`);`Entry.update` 对 options 做深比较,只改注释、
+   或写回一份内容等价的文件都**不会**触发重挂。
+   **修改本补丁源码后需重启 dsh web** 才生效。
 
 启动时立即执行一次清理,之后按 `intervalMinutes` 周期执行。
 
@@ -72,17 +74,31 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 配置来源(优先级从低到高):schema 默认值 < 组合层条目配置
 (`cordis.patch.yml` 的 `config`)< 设置文档用户层。**推荐在界面配置**:
 
-1. 打开 dsh Web → **设置** → **插件** → **插件配置** 标签页(或 **插件管理**
-   页展开本插件卡片);
+1. 打开 dsh Web → **设置** → **插件** → **插件配置** 标签页;
 2. 找到 **会话清理** 卡片,展开即可编辑全部字段;
 3. 修改后点 **保存** —— 配置写入 `~/.dsh/settings.yaml`(namespace
    `session-cleanup`),**即时生效**(定时器按新间隔重建,保存即触发一次
    清理);点 **恢复默认** 可整体回退到组合层配置。
 
-> 配置卡片经插件自身的 `/session-cleanup` RPC 通道读写(getConfig /
-> setConfig / resetConfig),不依赖 dsh 设置的暴露白名单(apiproxy),在
+> 配置卡片经插件自身的 `/session-cleanup` 前缀路由读写(getConfig /
+> setConfig / resetConfig;`POST /session-cleanup/<endpoint>`,注册在
+> `webServer` 服务上,自带同源栅栏 + 只收 POST + 只收 `application/json`),
+> 不依赖 dsh 设置的暴露白名单(apiproxy),在
 > **设置 → 插件 → 插件配置** 页编辑(插件管理页仅负责插件启停,不承载
 > 配置卡片)。
+>
+> 载体是**声明的依赖**:`ctx.inject(['webServer', 'sessions'], …)` 让激活等待
+> HTTP 载体就绪,而不是在回调里 `ctx.get('webServer')` 与载体绑定竞态 ——
+> 后者会在载体尚未 listen 时读到 `undefined` 并静默跳过整个传输通道。
+>
+> 为什么不是 `ctx.connection.rpc.handle`:dsh 0.1.5-rc.1 的 Connection 注册表
+> 对连接包之外的插件必然抛 `cannot get property "webServer" without inject`
+> (`dsh-client-connection/lib/index.js` 的 `register()` 里
+> `owner.effect(() => owner.webServer.register(route))`,`owner` 从未声明
+> `webServer`),通道根本不会存在,浏览器请求会落到 SPA 兜底。迁移做法与
+> `ui-settings-other` 一致:`createRpcRoute(path, handle)` + `webServer.register`,
+> 且路由注册排在设置分区之前 —— inject 回调抛错会回滚它此前注册的全部
+> effect,传输先落地才不会被设置挂掉带走。
 
 > 手动编辑 `~/.dsh/settings.yaml` 同样生效(文件被监听,改动即重载):
 >
@@ -117,14 +133,16 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 - **规则 A(超龄)**:按最后修改时间从新到旧排序,仅对超出 `keepSessions`
   的最旧部分,删除 `mtime` 早于 `now - maxAgeDays` 天的会话 —— 最近常用的
   会话即使超龄也受 `keepSessions` 保护。
-- **规则 B(超容量)**:全部候选(不含活跃会话)总占用超过 `maxTotalMB`
-  时,从最旧开始删直到低于上限;被规则 A 选中的会话不重复计。
+- **规则 B(超容量)**:可删候选(不含活跃会话)的合计占用超过 `maxTotalMB`
+  时,从最旧开始删直到不超过上限;统计时先扣除规则 A 已选中删除的会话
+  —— 它们这一轮一定会被删掉,再计入"留下的占用"会让判断偏高、比实际需要
+  多删。
 - 删除后会顺带清理变空的 `<项目>` 目录(演练模式不做任何删除)。
 
 ## 卸载
 
 1. 删除 `~/.dsh/profiles/web/cordis.patch.yml` 中的 `session-cleanup` 条目
-   (**热生效**:数秒后清理任务停止、`/session-cleanup` 通道注销);
+   (**热生效**:数秒后清理任务停止、`/session-cleanup` 路由注销);
 2. 删除 `~/.dsh/profiles/node_modules/@local/dsh-plugin-session-cleanup`
    链接。
 
@@ -137,9 +155,14 @@ node patches/session-cleanup/verify-session-cleanup.mjs    # settings 集成 + �
 node patches/session-cleanup/tests/load-smoke.mjs          # 真实 Cordis 加载冒烟
 ```
 
-覆盖:超龄删除、`keepSessions` 保护、容量上限、活跃会话跳过、演练模式、
-空项目目录清理;host 侧 settings 注册与配置变更重建定时器、无 settings
-时回退条目配置、apply 不返回 thenable 的 P0 回归守卫、isUnloading 卸载
-守卫;client 侧配置卡片渲染、保存/恢复默认经 `/session-cleanup` RPC 通道
-(getConfig/setConfig/resetConfig)。DOM 交互段需要 jsdom,未安装时自动
-跳过。
+覆盖:超龄删除、`keepSessions` 保护、容量上限(含"超龄释放的空间已足够时不得
+再多删"的重复计数回归)、活跃会话跳过、演练模式、空项目目录清理;host 侧
+settings 注册与配置变更重建定时器、无 settings 时回退条目配置、apply 不返回
+thenable 的 P0 回归守卫、`/session-cleanup` 前缀路由随插件卸载注销、路由排在
+设置分区之前的顺序保证、isUnloading 卸载守卫,以及栅栏与端点(403 跨源 Origin /
+405 非 POST / 415 非 JSON / 404 端点段数 / 400 非 JSON body / 413 超 1MB /
+500 handler 抛错;getConfig 回退条目配置、setConfig/resetConfig 经设置 scope
+写入);client 侧配置卡片渲染、逐字段按宿主 schema 校验(`intervalMinutes`
+低于 1 时在字段下报错且不发出 setConfig)、保存/恢复默认经
+`POST /session-cleanup/setConfig|resetConfig`,fetch 桩直接接到真实 host 路由,
+网络/HTTP/信封失败均 reject。DOM 交互段需要 jsdom,未安装时自动跳过。

@@ -3,7 +3,7 @@
  *
  * Loads the exact deployed `client.js` the browser will execute through a
  * minimal DOM shim, asserts the module-table handoff, then applies it against
- * a mock ctx and verifies that all three project-memory tools register a
+ * a mock ctx and verifies that all five Memorix MCP tools register a
  * `tool.call.toolview` entry (collapsible memory cards). Rendering needs
  * jsdom; when absent the pure contract checks still run.
  *
@@ -18,17 +18,28 @@ import { dirname, join } from 'node:path'
 const here = dirname(fileURLToPath(import.meta.url))
 const patchDir = join(here, '..')
 const userProfile = process.env.USERPROFILE ?? process.env.HOME ?? ''
-const uiRequire = createRequire(join(userProfile, '.dsh', 'profiles', 'web', 'package.json'))
+// Resolve from the deployed profile first; a DSH reinstall can prune the
+// profile's hoisted copies (dangling links), so the harness checkout backs it up.
+const harnessAnchor = 'D:/GitHub/deepseek-harness/apps/web/package.json'
+const uiRequire = (spec) => {
+  try { return createRequire(join(userProfile, '.dsh', 'profiles', 'web', 'package.json'))(spec) } catch { return createRequire(harnessAnchor)(spec) }
+}
 const React = uiRequire('react')
 
 let JSDOM = null
-try {
-  JSDOM = uiRequire('jsdom').JSDOM
-} catch { /* render section skipped below */ }
+try { JSDOM = uiRequire('jsdom').JSDOM } catch { /* render section skipped below */ }
 
 const clientPath = join(patchDir, 'client.js')
 const PLUGIN_ID = 'dsh-project-memory'
-const KEYS = ['project_memory_save', 'project_memory_search', 'project_memory_list']
+const KEYS = [
+  // The recall followup asks the agent to bind the project first, so the
+  // session-start tool must render as a memory card too (not the default card).
+  'mcp__memorix__memorix_session_start',
+  'mcp__memorix__memorix_search',
+  'mcp__memorix__memorix_store',
+  'mcp__memorix__memorix_project_context',
+  'mcp__memorix__memorix_detail',
+]
 
 // --- load the bundle exactly like the shell kernel does ----------------------
 let handoff = null
@@ -81,6 +92,7 @@ const requireTable = (spec) => {
       IconListPenOutline16: icon,
       IconSearchOutline16: icon,
       IconChecklistOutline14: icon,
+      IconSparkleOutline16: icon,
     }
   }
   throw new Error(`unexpected module-table word: ${spec}`)
@@ -91,11 +103,11 @@ if (!Array.isArray(exports_.inject) || exports_.inject.join(',') !== 'slots') {
   throw new Error(`exports.inject mismatch: ${JSON.stringify(exports_.inject)}`)
 }
 if (JSON.stringify(Object.keys(exports_.TITLES).sort()) !== JSON.stringify([...KEYS].sort())) {
-  throw new Error(`TITLES must cover exactly the three memory tools: ${JSON.stringify(exports_.TITLES)}`)
+  throw new Error(`TITLES must cover exactly the five Memorix tools: ${JSON.stringify(exports_.TITLES)}`)
 }
 console.log('exports contract OK:', JSON.stringify(exports_.inject), 'TITLES =', JSON.stringify(exports_.TITLES))
 
-// --- apply(): three keyed toolview registrations ------------------------------
+// --- apply(): one keyed toolview registration per Memorix tool -----------------
 const registrations = []
 const clientCtx = {
   effect: (fn) => fn(),
@@ -106,7 +118,7 @@ const clientCtx = {
 }
 exports_.apply(clientCtx)
 const views = registrations.filter((r) => r.name === 'tool.call.toolview')
-if (views.length !== 3) throw new Error(`expected 3 toolview registrations, got ${views.length}`)
+if (views.length !== KEYS.length) throw new Error(`expected ${KEYS.length} toolview registrations, got ${views.length}`)
 for (const key of KEYS) {
   if (!views.some((v) => v.key === key)) throw new Error(`missing toolview key ${key}`)
   if (typeof views.find((v) => v.key === key).component !== 'function') throw new Error(`toolview ${key} must carry a component`)
@@ -124,13 +136,13 @@ const { act } = React
 const { createRoot } = uiRequire('react-dom/client')
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
-const component = views.find((v) => v.key === 'project_memory_save').component
+const component = views.find((v) => v.key === 'mcp__memorix__memorix_store').component
 const settled = {
   kind: 'tool-result',
   seq: 1,
   time: Date.now(),
   callId: 'call-1',
-  call: { name: 'project_memory_save', argsRaw: '{"title":"测试笔记","content":"x","keywords":["测试","笔记"]}' },
+  call: { name: 'mcp__memorix__memorix_store', argsRaw: '{"title":"测试笔记","content":"x","keywords":["测试","笔记"]}' },
   callTime: null,
   content: [{ type: 'text', text: 'Project memory saved: 测试笔记 [general] (new, used 1) -> C:\\w\\x.md' }],
   isError: false,
@@ -141,13 +153,13 @@ const settled = {
 const host = document.createElement('div')
 const root = createRoot(host)
 await act(async () => {
-  root.render(React.createElement(component, { block: settled, callId: 'call-1', toolName: 'project_memory_save' }))
+  root.render(React.createElement(component, { block: settled, callId: 'call-1', toolName: 'mcp__memorix__memorix_store' }))
 })
 const card = host.querySelector('[data-memory-card]')
 if (card === null) throw new Error('memory card did not render')
 const head = host.querySelector('[data-disclosure-row]')
 if (head === null) throw new Error('card head missing (DisclosureRow)')
-if (!head.textContent.includes('记忆') || !head.textContent.includes('已保存')) {
+if (!head.textContent.includes('记忆') || !head.textContent.includes('保存')) {
   throw new Error(`head summary missing: ${head.textContent}`)
 }
 if (!head.textContent.includes('测试') || !head.textContent.includes('笔记')) {
@@ -158,16 +170,16 @@ if (host.querySelector('.pmem-text') !== null) throw new Error('settled card mus
 await act(async () => { head.dispatchEvent(new window.MouseEvent('click', { bubbles: true })) })
 const text = host.querySelector('.pmem-text')
 if (text === null || !text.textContent.includes('Project memory saved')) throw new Error('expanded text missing')
-console.log('render OK: settled save card (DisclosureRow) collapses to 已保存:<title> + keywords, expands to full text')
+console.log('render OK: settled store card (DisclosureRow) collapses to 保存/更新:<title> + keywords, expands to full text')
 
 // running card stays collapsed too (memory cards never auto-expand); the
 // summary row still shows "运行中…", and expanding reveals the running text
-const runningComponent = views.find((v) => v.key === 'project_memory_search').component
-const runningBlock = { callId: 'call-2', name: 'project_memory_search', argsRaw: '{"query":"约定"}', turn: 1, step: 1, time: Date.now(), callView: null, subCalls: [] }
+const runningComponent = views.find((v) => v.key === 'mcp__memorix__memorix_search').component
+const runningBlock = { callId: 'call-2', name: 'mcp__memorix__memorix_search', argsRaw: '{"query":"约定"}', turn: 1, step: 1, time: Date.now(), callView: null, subCalls: [] }
 const host2 = document.createElement('div')
 const root2 = createRoot(host2)
 await act(async () => {
-  root2.render(React.createElement(runningComponent, { block: runningBlock, callId: 'call-2', toolName: 'project_memory_search' }))
+  root2.render(React.createElement(runningComponent, { block: runningBlock, callId: 'call-2', toolName: 'mcp__memorix__memorix_search' }))
 })
 if (host2.querySelector('.pmem-text') !== null) throw new Error('running card must start collapsed')
 if (!host2.querySelector('.pmem-summary').textContent.includes('运行中')) throw new Error('running summary missing')

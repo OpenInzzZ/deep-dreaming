@@ -17,6 +17,13 @@
  * host respawns the dsh process and exits the current one, so the page will
  * briefly disconnect — the copy tells the user to refresh afterwards.
  *
+ * Deliberately absent: a "reload user plugins" button (rewriting the patch
+ * layer's comments never re-mounts anything — `Entry.update` deep-compares
+ * options and returns early on an unchanged patch list) and a "stop service"
+ * button (stopping is a CLI/desktop action via `stop-dsh.ps1`; the single
+ * destructive control here is the restart button). Do not re-add either one
+ * without a mechanism that actually works.
+ *
  * The status block polls `/app/status` every 10 s and shows the live process
  * snapshot (pid, ports, uptime, memory, versions, running sessions, idle
  * auto-stop countdown) with a manual refresh button.
@@ -86,15 +93,15 @@ const CSS = [
   '.soc-input{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}',
   '.soc-input:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:none}',
   '.soc-input:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}',
-  '.soc-invalid{border-color:var(--dsw-alias-label-error)}',
-  '.soc-invalid-text{color:var(--dsw-alias-label-error);margin:0;font-size:12px;line-height:1.5}',
+  '.soc-invalid{border-color:var(--dsw-alias-state-error-primary)}',
+  '.soc-invalid-text{color:var(--dsw-alias-state-error-primary);margin:0;font-size:12px;line-height:1.5}',
   '.soc-hint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:1.5}',
   '.soc-toggle{accent-color:var(--dsw-alias-brand-primary);width:16px;height:16px}',
   '.soc-footer{border-top:1px solid var(--dsw-alias-border-l2);justify-content:flex-end;align-items:center;gap:8px;padding:12px 0 4px;display:flex}',
-  '.soc-failed{min-width:0;color:var(--dsw-alias-label-error);flex:1;margin:0;font-size:12px;line-height:1.5}',
+  '.soc-failed{min-width:0;color:var(--dsw-alias-state-error-primary);flex:1;margin:0;font-size:12px;line-height:1.5}',
   '.soc-discard,.soc-save{appearance:none;font:inherit;cursor:pointer;border:1px solid transparent;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5}',
   '.soc-discard{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);background:0 0}',
-  '.soc-save{background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-on-brand)}',
+  '.soc-save{background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-foreground)}',
   '.soc-save:disabled,.soc-discard:disabled{opacity:.5;cursor:default}',
 ].join('\n');
 (function () {
@@ -118,7 +125,7 @@ const zh = {
   confirm: '确认重启',
   cancel: '取消',
   restarting: '正在重启…',
-  scheduled: '已请求重启,服务即将断开,请稍后刷新页面。',
+  scheduled: '已请求重启,服务即将断开;稍后会自动打开新地址(端口可能变化),也可直接刷新页面。',
   error: '重启请求失败,请重试。',
   retry: '重试',
   busy: '有 {n} 个会话正在运行,重启会中断它们。',
@@ -143,24 +150,13 @@ const zh = {
   unitHour: '小时',
   unitMin: '分',
   unitSec: '秒',
-  reloadPlugins: '重载用户插件',
-  reloading: '重载中…',
-  reloadRequested: '已请求重载,数秒内生效,无需刷新页面。',
-  reloadFailed: '重载请求失败,请重试。',
-  dangerNote: '以下操作会终止 dsh 进程并中断所有运行中的会话,仅在升级 dsh 或修改核心插件时使用;日常更新用户插件请用上方的「重载用户插件」。',
+  dangerNote: '以下操作会终止 dsh 进程并中断所有运行中的会话,仅在升级 dsh 或修改核心插件时使用;日常调整用户插件(增删行、改 config)只需编辑 cordis.patch.yml,数秒内热生效,改补丁源码才需要重启。',
   createShortcut: '创建桌面快捷方式',
   shortcutBusy: '创建中…',
   shortcutCreated: '快捷方式已创建:',
   shortcutExists: '快捷方式已存在:',
   shortcutFailed: '快捷方式创建失败:',
-  shortcutHint: '在桌面创建 dsh-web 快捷方式(鲸鱼娘图标),双击即可静默启动服务。',
-  stopService: '中断服务',
-  stopConfirmPrompt: '确定中断服务?服务将停止,需用桌面快捷方式或 start-dsh.ps1 重新启动。',
-  confirmStop: '确认中断',
-  stopBusy: '正在中断…',
-  stopBusyPrompt: '{n} 个会话正在运行,中断会打断它们(可强制中断)。',
-  stopped: '服务已停止,可用桌面快捷方式或 start-dsh.ps1 重新启动。',
-  stopFailed: '中断请求失败,请重试。',
+  shortcutHint: '在桌面创建 dsh-web 快捷方式(鲸鱼娘图标),双击即可启动服务(窗口会显示端口并等待按键)。',
 };
 
 /** English dictionary checked against the Chinese key set. */
@@ -173,7 +169,7 @@ const en = {
   confirm: 'Restart',
   cancel: 'Cancel',
   restarting: 'Restarting…',
-  scheduled: 'Restart requested. The service is disconnecting; refresh the page shortly.',
+  scheduled: 'Restart requested. The service is disconnecting; the new address opens shortly (the port may change) — or just refresh the page.',
   error: 'The restart request failed. Please try again.',
   retry: 'Retry',
   busy: '{n} session(s) are running; restarting will interrupt them.',
@@ -198,24 +194,13 @@ const en = {
   unitHour: 'h',
   unitMin: 'm',
   unitSec: 's',
-  reloadPlugins: 'Reload user plugins',
-  reloading: 'Reloading…',
-  reloadRequested: 'Reload requested; takes effect within seconds, no page refresh needed.',
-  reloadFailed: 'The reload request failed. Try again.',
-  dangerNote: 'The action below terminates the dsh process and interrupts every running session. Use it only to upgrade dsh or change core plugins; for user-plugin updates use "Reload user plugins" above.',
+  dangerNote: 'The action below terminates the dsh process and interrupts every running session. Use it only to upgrade dsh or change core plugins; everyday user-plugin edits (adding rows, changing config) only need cordis.patch.yml and apply within seconds — patch source changes are what require a restart.',
   createShortcut: 'Create desktop shortcut',
   shortcutBusy: 'Creating…',
   shortcutCreated: 'Shortcut created:',
   shortcutExists: 'Shortcut already exists:',
   shortcutFailed: 'Shortcut creation failed:',
-  shortcutHint: 'Creates a dsh-web desktop shortcut (whale-girl icon) that silently starts the service on double-click.',
-  stopService: 'Stop service',
-  stopConfirmPrompt: 'Stop the service? It will not restart; use the desktop shortcut or start-dsh.ps1 to bring it back.',
-  confirmStop: 'Stop',
-  stopBusy: 'Stopping…',
-  stopBusyPrompt: '{n} session(s) are running; stopping will interrupt them (force is available).',
-  stopped: 'Service stopped. Restart it with the desktop shortcut or start-dsh.ps1.',
-  stopFailed: 'The stop request failed. Try again.',
+  shortcutHint: 'Creates a dsh-web desktop shortcut (whale-girl icon) that starts the service on double-click (the window shows the port and waits for a key).',
 };
 
 /** Simplified Chinese dictionary for the 插件配置 card. */
@@ -293,11 +278,14 @@ function InfoRow({ label, value }) {
 function StatusBlock({ status, t }) {
   const [info, setInfo] = useState(null);
   const [failed, setFailed] = useState(false);
+  // The reason rides on the element's title: the visible line stays short, but
+  // a hover (or devtools) shows the exact RPC error instead of a bare failure.
+  const [failReason, setFailReason] = useState('');
 
   const fetchInfo = () => {
     void Promise.resolve().then(() => status()).then(
-      (value) => { setInfo(value); setFailed(false) },
-      () => { setFailed(true) },
+      (value) => { setInfo(value); setFailed(false); setFailReason('') },
+      (error) => { setFailed(true); setFailReason(String(error?.message ?? error)) },
     )
   };
 
@@ -335,7 +323,7 @@ function StatusBlock({ status, t }) {
       ? jsx('span', { className: 'so-status', children: t('loading') }, 'loading')
       : null,
     failed
-      ? jsx('span', { className: 'so-status', 'data-tone': 'error', children: t('infoError') }, 'failed')
+      ? jsx('span', { className: 'so-status', 'data-tone': 'error', title: failReason, children: t('infoError') }, 'failed')
       : null,
     info !== null
       ? jsx('div', { className: 'so-info', children: rows.map((row) => jsx(InfoRow, { label: row[1], value: row[2] }, row[0])) }, 'info')
@@ -348,11 +336,10 @@ function StatusBlock({ status, t }) {
  *   idle -> confirm (modal) -> calling -> scheduled | error
  *   idle -> busy (sessions running) -> waiting (poll until idle) | calling(force)
  */
-function OtherSection({ restart, status, reloadPlugins, installShortcut, stopService, t }) {
+function OtherSection({ restart, status, installShortcut, t }) {
   const [phase, setPhase] = useState('idle');
   const [busyInfo, setBusyInfo] = useState(null);
   const [waitTimer, setWaitTimer] = useState(null);
-  const [reloadState, setReloadState] = useState(null); // null | 'calling' | 'requested' | 'failed'
 
   useEffect(() => () => {
     if (waitTimer !== null) clearInterval(waitTimer);
@@ -395,14 +382,6 @@ function OtherSection({ restart, status, reloadPlugins, installShortcut, stopSer
     setPhase('idle')
   };
 
-  const doReload = () => {
-    setReloadState('calling')
-    void Promise.resolve().then(() => reloadPlugins()).then(
-      () => setReloadState('requested'),
-      () => setReloadState('failed'),
-    )
-  };
-
   const [shortcutState, setShortcutState] = useState(null); // null | 'busy' | 'done' | 'failed'
   const [shortcutOutput, setShortcutOutput] = useState('');
   const doShortcut = () => {
@@ -413,23 +392,6 @@ function OtherSection({ restart, status, reloadPlugins, installShortcut, stopSer
     )
   };
 
-  const [stopPhase, setStopPhase] = useState('idle'); // idle | confirm | calling | busy | stopped | error
-  const [stopBusy, setStopBusy] = useState(null);
-  const doStop = (force) => {
-    setStopPhase('calling')
-    void Promise.resolve().then(() => stopService(force)).then(
-      () => setStopPhase('stopped'),
-      (err) => {
-        if (err && err.code === 'sessions-running') {
-          setStopBusy(err.details || { running: 0 });
-          setStopPhase('busy');
-        } else {
-          setStopPhase('error');
-        }
-      },
-    )
-  };
-
   const tone = phase === 'error' ? 'error' : phase === 'scheduled' ? 'ok' : undefined;
 
   return jsx('div', { className: 'so-section', children: [
@@ -437,21 +399,6 @@ function OtherSection({ restart, status, reloadPlugins, installShortcut, stopSer
       jsx('h3', { children: t('serviceTitle') }, 'title'),
       jsx('p', { children: t('serviceDesc') }, 'desc'),
       jsx(StatusBlock, { status, t }, 'status-block'),
-      jsx('div', { className: 'so-row', children: [
-        jsx('button', {
-          type: 'button',
-          className: 'so-btn',
-          disabled: reloadState === 'calling' ? true : undefined,
-          onClick: doReload,
-          children: reloadState === 'calling' ? t('reloading') : t('reloadPlugins'),
-        }, 'reload-plugins'),
-        reloadState === 'requested'
-          ? jsx('span', { className: 'so-status so-flow-status', 'data-tone': 'ok', children: t('reloadRequested') }, 'reload-ok')
-          : null,
-        reloadState === 'failed'
-          ? jsx('span', { className: 'so-status so-flow-status', 'data-tone': 'error', children: t('reloadFailed') }, 'reload-fail')
-          : null,
-      ] }, 'reload-row'),
       jsx('div', { className: 'so-row', children: [
         jsx('button', {
           type: 'button',
@@ -480,21 +427,6 @@ function OtherSection({ restart, status, reloadPlugins, installShortcut, stopSer
           onClick: () => { if (phase === 'idle') setPhase('confirm') },
           children: phase === 'calling' ? t('restarting') : t('restart'),
         }, 'restart'),
-        // Stop service — same row as restart; separate confirm state.
-        jsx('button', {
-          type: 'button',
-          className: 'so-btn so-danger',
-          disabled: stopPhase === 'calling' ? true : undefined,
-          onClick: () => { if (stopPhase === 'idle') setStopPhase('confirm') },
-          children: stopPhase === 'calling' ? t('stopBusy') : t('stopService'),
-        }, 'stop'),
-        stopPhase === 'busy'
-          ? jsxs(React.Fragment, { children: [
-              jsx('span', { className: 'so-status so-flow-status', 'data-tone': 'error', children: t('stopBusyPrompt', { n: stopBusy?.running ?? 0 }) }, 'stop-busy-status'),
-              jsx('button', { type: 'button', className: 'so-btn so-danger', onClick: () => { doStop(true) }, children: t('busyActionForce') }, 'stop-force'),
-              jsx('button', { type: 'button', className: 'so-btn', onClick: () => { setStopPhase('idle') }, children: t('cancel') }, 'stop-busy-cancel'),
-            ] }, 'stop-busy-row')
-          : null,
         phase === 'busy' || phase === 'waiting'
           ? jsxs(React.Fragment, { children: [
               jsx('span', { className: 'so-status so-flow-status', 'data-tone': 'error', children: phase === 'waiting'
@@ -516,12 +448,6 @@ function OtherSection({ restart, status, reloadPlugins, installShortcut, stopSer
       phase === 'error'
         ? jsx('button', { type: 'button', className: 'so-btn', onClick: () => { setPhase('idle') }, children: t('retry') }, 'retry')
         : null,
-      stopPhase === 'stopped' || stopPhase === 'error'
-        ? jsx('p', { className: 'so-status so-flow-status', 'data-tone': stopPhase === 'stopped' ? 'ok' : 'error', children: stopPhase === 'stopped' ? t('stopped') : t('stopFailed') }, 'stop-status')
-        : null,
-      stopPhase === 'error'
-        ? jsx('button', { type: 'button', className: 'so-btn', onClick: () => { setStopPhase('idle') }, children: t('retry') }, 'stop-retry')
-        : null,
     ] }, 'card'),
     // Restart confirm dialog (modal replaces the inline confirm row).
     jsx(Modal, {
@@ -535,18 +461,6 @@ function OtherSection({ restart, status, reloadPlugins, installShortcut, stopSer
         jsx('button', { type: 'button', className: 'so-btn so-danger', onClick: () => { trigger(false) }, children: t('confirm') }, 'confirm'),
       ] }),
     }, 'restart-modal'),
-    // Stop confirm dialog — same modal pattern, separate state.
-    jsx(Modal, {
-      open: stopPhase === 'confirm',
-      onClose: () => { if (stopPhase === 'confirm') setStopPhase('idle') },
-      title: t('stopService'),
-      closeLabel: t('cancel'),
-      description: t('stopConfirmPrompt'),
-      footer: jsxs(React.Fragment, { children: [
-        jsx('button', { type: 'button', className: 'so-btn', onClick: () => { setStopPhase('idle') }, children: t('cancel') }, 'stop-cancel'),
-        jsx('button', { type: 'button', className: 'so-btn so-danger', onClick: () => { doStop() }, children: t('confirmStop') }, 'stop-confirm'),
-      ] }),
-    }, 'stop-modal'),
   ] });
 }
 
@@ -707,6 +621,43 @@ function ServiceSettingsCard({ t, getConfig, setConfig, resetConfig }) {
   ] });
 }
 
+/**
+ * One call to the host half over its `/app` prefix route.
+ *
+ * This used to be `ctx.connection.rpc.call('/app', …)`, which cannot work in
+ * dsh 0.1.5-rc.1: the Connection registry throws `cannot get property
+ * "webServer" without inject` for every plugin outside the connection package,
+ * so the channel never exists and the request would land on the SPA fallback.
+ * The host half registers that route itself (see `createRpcRoute` there) and
+ * answers the same `{ ok, value }` / `{ ok, error }` envelope.
+ *
+ * Same-origin by construction, JSON in and out — the host's fence requires it.
+ */
+const call = async (endpoint, args) => {
+  let response
+  try {
+    response = await fetch('/app/' + endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ args: args ?? {} }),
+    })
+  } catch (error) {
+    throw new Error('rpc ' + endpoint + ' failed: ' + String(error?.message ?? error))
+  }
+  if (!response.ok) throw new Error('rpc ' + endpoint + ' failed: HTTP ' + String(response.status))
+  const envelope = await response.json()
+  if (envelope === null || typeof envelope !== 'object' || envelope.ok !== true) {
+    const error = new Error(
+      'rpc ' + endpoint + ' failed: ' +
+      String(envelope?.error?.code ?? 'malformed') + ': ' + String(envelope?.error?.message ?? 'malformed envelope'),
+    )
+    error.code = envelope?.error?.code
+    error.details = envelope?.error?.details
+    throw error
+  }
+  return envelope.value
+}
+
 /** Contribute the Other settings section + the idle auto-stop configuration card. */
 function apply(ctx) {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-settings-other: section dictionaries')
@@ -714,39 +665,17 @@ function apply(ctx) {
 
   const t = ctx.locale.bind(NS)
   const restart = async (force) => {
-    const result = await ctx.connection.rpc.call('/app', 'restart', { args: force ? { force: true } : {} })
-    if (result.ok) return { scheduled: true }
-    if (result.error.code === 'sessions-running') {
-      return { busy: { running: result.error.details.running } }
+    try {
+      await call('restart', force ? { force: true } : {})
+      return { scheduled: true }
+    } catch (error) {
+      if (error.code === 'sessions-running') return { busy: { running: error.details?.running ?? 0 } }
+      throw error
     }
-    throw new Error('restart failed: ' + result.error.code + ': ' + result.error.message)
   }
-  const status = async () => {
-    const result = await ctx.connection.rpc.call('/app', 'status', { args: {} })
-    if (!result.ok) throw new Error('status failed: ' + result.error.code + ': ' + result.error.message)
-    return result.value
-  }
-  const reloadPlugins = async () => {
-    const result = await ctx.connection.rpc.call('/app', 'reloadPlugins', { args: {} })
-    if (!result.ok) throw new Error('reloadPlugins failed: ' + result.error.code + ': ' + result.error.message)
-    return result.value
-  }
-  const installShortcut = async () => {
-    const result = await ctx.connection.rpc.call('/app', 'installShortcut', { args: {} })
-    if (!result.ok) throw new Error('installShortcut failed: ' + result.error.code + ': ' + result.error.message)
-    return result.value
-  }
-  const stopService = async (force) => {
-    const result = await ctx.connection.rpc.call('/app', 'stop', { args: { force: !!force } })
-    if (!result.ok) {
-      const err = new Error('stop failed: ' + result.error.code + ': ' + result.error.message)
-      err.code = result.error.code
-      err.details = result.error.details
-      throw err
-    }
-    return result.value
-  }
-  const injected = () => ({ restart, status, reloadPlugins, installShortcut, stopService })
+  const status = () => call('status', {})
+  const installShortcut = () => call('installShortcut', {})
+  const injected = () => ({ restart, status, installShortcut })
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
@@ -758,21 +687,9 @@ function apply(ctx) {
   }, OtherSection))
 
   const cardApi = () => ({
-    getConfig: async () => {
-      const result = await ctx.connection.rpc.call('/app', 'getSettings', { args: {} })
-      if (!result.ok) throw new Error(result.error.code + ': ' + result.error.message)
-      return result.value
-    },
-    setConfig: async (fields) => {
-      const result = await ctx.connection.rpc.call('/app', 'setSettings', { args: { fields } })
-      if (!result.ok) throw new Error(result.error.code + ': ' + result.error.message)
-      return result.value
-    },
-    resetConfig: async () => {
-      const result = await ctx.connection.rpc.call('/app', 'resetSettings', { args: {} })
-      if (!result.ok) throw new Error(result.error.code + ': ' + result.error.message)
-      return result.value
-    },
+    getConfig: () => call('getSettings', {}),
+    setConfig: (fields) => call('setSettings', { fields }),
+    resetConfig: () => call('resetSettings', {}),
   })
 
   // The shipped 插件配置 page (settings.plugin.item). Config cards live only

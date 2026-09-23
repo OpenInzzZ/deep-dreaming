@@ -57,7 +57,7 @@ const GUIDANCE_SECTION = `\
 <project_memory>
 本项目通过 Memorix (MCP) 维护一份跨会话的项目记忆库。Memorix 工具以 mcp__memorix__ 前缀暴露:
 
-- 会话开始阶段(memory search):会收到一条「项目记忆召回」提示,先调用 mcp__memorix__memorix_search 检索与本任务相关的既有记忆(项目约定、关键决策、踩坑经验、接口与数据结构事实等),遵循既有约定,避免重复探索。
+- 会话开始阶段(memory search):会收到一条「项目记忆召回」提示,先调用 mcp__memorix__memorix_session_start 绑定项目根目录,再调用 mcp__memorix__memorix_search 检索与本任务相关的既有记忆(项目约定、关键决策、踩坑经验、接口与数据结构事实等),遵循既有约定,避免重复探索。
 - 会话结束阶段(memory save/update):完成产生确定性知识的工作后,调用 mcp__memorix__memorix_store 保存;同一主题已有记录时更新而非重复新建;不确定时倾向记录,保持短小、准确、可脱离上下文独立理解。
 - 只记录事实与结论,不记录过程性对话。
 - 需要查看记忆详情时使用 mcp__memorix__memorix_detail,需要任务上下文摘要时使用 mcp__memorix__memorix_project_context。
@@ -65,7 +65,7 @@ const GUIDANCE_SECTION = `\
 
 /** The session-start memory recall followup: load relevant memories first. */
 const RECALL_PROMPT = `\
-[项目记忆召回 · memory search] 会话开始,请先调用 mcp__memorix__memorix_search 检索与本任务/本项目相关的既有记忆(项目约定、关键决策、踩坑经验、接口或数据结构事实等),遵循既有约定、避免重复探索;完成检索后再开始工作。若无相关记忆,检索结果为空,直接开始即可。`;
+[项目记忆召回 · memory search] 会话开始,请先调用 mcp__memorix__memorix_session_start 绑定当前工作目录为项目根目录(projectRoot 参数),然后调用 mcp__memorix__memorix_search 检索与本任务/本项目相关的既有记忆(项目约定、关键决策、踩坑经验、接口或数据结构事实等),遵循既有约定、避免重复探索;完成检索后再开始工作。若无相关记忆,检索结果为空,直接开始即可。`;
 
 /** The auto-review followup message text (session-end memory save/update).
  * Deliberately terse and reply-guiding: the review prompt is folded into a
@@ -85,6 +85,14 @@ function reviewable(agent) {
   if (header === void 0) return false;
   if (header.origin === "subagent") return false;
   return typeof header.cwd === "string" && header.cwd.length > 0;
+}
+
+/** Whether a user/message is one of this plugin's own context notices. The
+ * canonical source shape is `{kind: "plugin", plugin, form: "notice", summary}`
+ * — a custom `kind` is not among the session-format migrator's known source
+ * kinds, so an old log containing it fails to migrate. */
+function isOwnNotice(message) {
+  return message?.source?.kind === "plugin" && message.source.plugin === name;
 }
 
 /** Install the session-end memory review: after a completed user turn, the
@@ -108,10 +116,10 @@ function installReview(ctx, autoReview) {
     if (agent === void 0 || agent.session !== session) return;
     const state = stateFor(agent);
     if (event.type === "user/message") {
-      // The review followup itself is a user/message with kind "memory";
-      // it must not arm another review. The event data IS the message
-      // object (source sits on `data.source`, not `data.message.source`).
-      if (event.data.source?.kind !== "memory") state.pending = true;
+      // Our own notices (recall/review) must not arm another review. The
+      // event data IS the message object (source sits on `data.source`, not
+      // `data.message.source`).
+      if (!isOwnNotice(event.data)) state.pending = true;
     } else if (event.type === "turn/end") {
       state.reviewing = false;
       // Only review work that finished cleanly; aborted/error/max-tokens
@@ -128,7 +136,7 @@ function installReview(ctx, autoReview) {
     try {
       agent.followup(createUserMessage({
         content: [{ type: "text", text: REVIEW_PROMPT }],
-        source: { kind: "memory", review: true, form: "notice", summary: "项目记忆回顾 · memory save/update" }
+        source: { kind: "plugin", plugin: name, form: "notice", summary: "项目记忆回顾 · memory save/update" }
       }));
     } catch (error) {
       ctx.logger.warn(`project-memory: could not queue the memory review for agent "${agent.id}": ${String(error)}`);
@@ -152,15 +160,15 @@ function installRecall(ctx, autoRecall) {
     if (agent === void 0 || agent.session !== session) return;
     if (recalled.has(agent)) return;
     if (event.type !== "user/message") return;
-    // Our own followups (recall/review) are user/message with kind "memory";
-    // they must not arm the recall. The event data IS the message object.
-    if (event.data.source?.kind === "memory") return;
+    // Our own notices (recall/review) must not arm the recall. The event data
+    // IS the message object.
+    if (isOwnNotice(event.data)) return;
     if (!reviewable(agent)) return;
     recalled.add(agent);
     try {
       agent.followup(createUserMessage({
         content: [{ type: "text", text: RECALL_PROMPT }],
-        source: { kind: "memory", recall: true, form: "notice", summary: "项目记忆召回 · memory search" }
+        source: { kind: "plugin", plugin: name, form: "notice", summary: "项目记忆召回 · memory search" }
       }));
     } catch (error) {
       ctx.logger.warn(`project-memory: could not queue the memory recall for agent "${agent.id}": ${String(error)}`);

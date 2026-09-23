@@ -2,13 +2,20 @@
  * Browser half of the session-cleanup patch: a configuration card inside
  * 设置 → 插件 → 插件配置 (the `settings.plugin.item` slot).
  *
- * The card binds the Host-registered settings namespace `session-cleanup`
- * through `ctx.settingsScope` (the shipped settings surface exposes the
- * namespace because the Host plugin registered it). It renders the same
- * fields the plugin consumes — enabled, maxAgeDays, maxTotalMB, keepSessions,
- * intervalMinutes, dryRun, sessionsRoot — with staged edits, per-field
- * reset-to-base, and a save that writes each field through the scope (the
- * Host applies changes live and rebuilds its cleanup timer).
+ * The card reads and writes the Host-registered settings namespace
+ * `session-cleanup` through the Host's fenced prefix route
+ * (`POST /session-cleanup/getConfig|setConfig|resetConfig`, see the `call`
+ * helper below). It renders the same fields the plugin consumes — enabled,
+ * maxAgeDays, maxTotalMB, keepSessions, intervalMinutes, dryRun, sessionsRoot
+ * — with staged edits validated per field against the Host schema before save,
+ * and a save that writes each field through the scope (the Host applies
+ * changes live and rebuilds its cleanup timer).
+ *
+ * There is deliberately NO per-field reset-to-base: the Host RPC exposes the
+ * resolved config only, never which layer (schema default / composition entry
+ * / user document) supplied each value, so a per-field "重置" cannot know the
+ * base to return to. 恢复默认 (reset-all, backed by the resetConfig endpoint)
+ * is the honest equivalent; a permanently disabled button is not.
  *
  * The card renders nothing while the namespace is unavailable (a deployment
  * without the Host plugin shows no trace), mirroring the shipped cards.
@@ -40,22 +47,18 @@ const CSS = [
   '.sc-field+.sc-field{border-top:1px solid var(--dsw-alias-border-l2)}',
   '.sc-field-head{align-items:center;gap:8px;display:flex}',
   '.sc-label{min-width:0;color:var(--dsw-alias-label-primary);flex:1;font-size:13px;font-weight:500;line-height:1.5}',
-  '.sc-overridden{white-space:nowrap;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:1px 8px;font-size:11px;font-weight:500;line-height:17px}',
-  '.sc-reset{font:inherit;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;padding:0;font-size:12px;line-height:1.5}',
-  '.sc-reset:hover:not(:disabled){color:var(--dsw-alias-label-primary)}',
-  '.sc-reset:disabled{cursor:default}',
   '.sc-input{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}',
   '.sc-input:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:none}',
   '.sc-input:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}',
-  '.sc-invalid{border-color:var(--dsw-alias-label-error)}',
-  '.sc-invalid-text{color:var(--dsw-alias-label-error);margin:0;font-size:12px;line-height:1.5}',
+  '.sc-invalid{border-color:var(--dsw-alias-state-error-primary)}',
+  '.sc-invalid-text{color:var(--dsw-alias-state-error-primary);margin:0;font-size:12px;line-height:1.5}',
   '.sc-hint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:1.5}',
   '.sc-toggle{accent-color:var(--dsw-alias-brand-primary);width:16px;height:16px}',
   '.sc-footer{border-top:1px solid var(--dsw-alias-border-l2);justify-content:flex-end;align-items:center;gap:8px;padding:12px 0 4px;display:flex}',
-  '.sc-failed{min-width:0;color:var(--dsw-alias-label-error);flex:1;margin:0;font-size:12px;line-height:1.5}',
+  '.sc-failed{min-width:0;color:var(--dsw-alias-state-error-primary);flex:1;margin:0;font-size:12px;line-height:1.5}',
   '.sc-discard,.sc-save{appearance:none;font:inherit;cursor:pointer;border:1px solid transparent;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5}',
   '.sc-discard{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);background:0 0}',
-  '.sc-save{background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-on-brand)}',
+  '.sc-save{background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-foreground)}',
   '.sc-save:disabled,.sc-discard:disabled{opacity:.5;cursor:default}',
 ].join('\n');
 (function () {
@@ -81,8 +84,8 @@ const zh = {
   discard: '放弃',
   saveFailed: '保存失败,请重试。',
   invalidNumber: '请输入有效数字',
-  overridden: '已覆盖',
-  reset: '重置',
+  invalidNonNegative: '请输入不小于 0 的数字',
+  invalidInterval: '清理间隔至少为 1 分钟',
   resetAll: '恢复默认',
   enabled: '启用',
   enabledHint: '关闭后停止定期清理。',
@@ -112,8 +115,8 @@ const en = {
   discard: 'Discard',
   saveFailed: 'Save failed. Try again.',
   invalidNumber: 'Enter a valid number',
-  overridden: 'Overridden',
-  reset: 'Reset',
+  invalidNonNegative: 'Enter a number of 0 or more',
+  invalidInterval: 'Interval must be at least 1 minute',
   resetAll: 'Restore defaults',
   enabled: 'Enabled',
   enabledHint: 'Turn off to stop periodic cleanup.',
@@ -135,32 +138,50 @@ const en = {
 const NS = 'session-cleanup.card';
 
 /** Services required by the card registration. */
-const inject = ['slots', 'locale', 'connection'];
+const inject = ['slots', 'locale'];
 
-/** Field descriptors: which knob the card renders and how to parse it. */
+/**
+ * Field descriptors: which knob the card renders and how to validate it.
+ *
+ * `min` mirrors the Host `Config` schema (session-cleanup.mjs) field by field:
+ * `intervalMinutes` is the only number there with a lower bound
+ * (`z.number().min(1)` — 0 would spin setInterval at ~1ms); the other three are
+ * plain `z.number()`. The card is therefore never looser than the Host, so a
+ * value it accepts can no longer come back as a generic "保存失败" after the
+ * fact: 0 is the documented "off" sentinel for maxAgeDays/maxTotalMB and a
+ * negative count is meaningless, so those three keep the `min: 0` floor the
+ * Host itself does not enforce.
+ *
+ * `invalid` names the dictionary key shown under that field when its bound is
+ * violated; a missing/unparsable number always reports `invalidNumber`.
+ */
 const FIELDS = [
   { key: 'enabled', type: 'boolean' },
-  { key: 'maxAgeDays', type: 'number' },
-  { key: 'maxTotalMB', type: 'number' },
-  { key: 'keepSessions', type: 'number' },
-  { key: 'intervalMinutes', type: 'number' },
+  { key: 'maxAgeDays', type: 'number', min: 0, invalid: 'invalidNonNegative' },
+  { key: 'maxTotalMB', type: 'number', min: 0, invalid: 'invalidNonNegative' },
+  { key: 'keepSessions', type: 'number', min: 0, invalid: 'invalidNonNegative' },
+  { key: 'intervalMinutes', type: 'number', min: 1, invalid: 'invalidInterval' },
   { key: 'dryRun', type: 'boolean' },
   { key: 'sessionsRoot', type: 'text' },
 ];
 
-/** One labelled field row with staged text, override badge, and reset. */
-function Field({ field, label, hint, text, overridden, invalid, disabled, onChange, onReset, t }) {
+/**
+ * Validate one staged field against its Host-schema constraint.
+ * @returns the dictionary key of the message to show, or null when valid.
+ */
+function fieldErrorKey(field, text) {
+  if (field === undefined || field.type !== 'number') return null
+  const parsed = Number(text)
+  if (text.trim() === '' || !Number.isFinite(parsed)) return 'invalidNumber'
+  if (field.min !== undefined && parsed < field.min) return field.invalid
+  return null
+}
+
+/** One labelled field row with staged text and its own validation message. */
+function Field({ field, label, hint, text, error, disabled, onChange }) {
   return jsxs('div', { className: 'sc-field', children: [
     jsxs('div', { className: 'sc-field-head', children: [
       jsx('label', { className: 'sc-label', htmlFor: 'sc-' + field.key, children: label }, 'label'),
-      overridden ? jsx('span', { className: 'sc-overridden', children: t('overridden') }, 'overridden') : null,
-      jsx('button', {
-        type: 'button',
-        className: 'sc-reset',
-        disabled: disabled || !overridden,
-        onClick: onReset,
-        children: t('reset'),
-      }, 'reset'),
     ] }, 'head'),
     field.type === 'boolean'
       ? jsx('input', {
@@ -174,17 +195,17 @@ function Field({ field, label, hint, text, overridden, invalid, disabled, onChan
       : jsx('input', {
           id: 'sc-' + field.key,
           type: field.type === 'number' ? 'number' : 'text',
-          className: 'sc-input' + (invalid ? ' sc-invalid' : ''),
+          className: 'sc-input' + (error ? ' sc-invalid' : ''),
           value: text,
           disabled,
           onChange: (event) => { onChange(event.currentTarget.value) },
         }, 'control'),
-    invalid ? jsx('p', { className: 'sc-invalid-text', children: t('invalidNumber') }, 'invalid') : null,
+    error ? jsx('p', { className: 'sc-invalid-text', children: error }, 'invalid') : null,
     jsx('p', { className: 'sc-hint', children: hint }, 'hint'),
   ] });
 }
 
-/** The configuration card shown in 插件配置 / 插件管理. */
+/** The configuration card shown in 设置 → 插件 → 插件配置 (settings.plugin.item). */
 function SessionCleanupCard({ t, getConfig, setConfig, resetConfig }) {
   const [config, setConfigState] = useState({ status: 'loading' });
   const [open, setOpen] = useState(false);
@@ -205,12 +226,14 @@ function SessionCleanupCard({ t, getConfig, setConfig, resetConfig }) {
   if (config.status !== 'ready') return null;
   const value = config.value ?? {};
   const dirty = staged !== null && Object.keys(staged).length > 0;
-  const invalid = staged !== null && Object.entries(staged).some(([key, text]) => {
-    const field = FIELDS.find((candidate) => candidate.key === key)
-    if (field === undefined || field.type !== 'number') return false
-    const parsed = Number(text)
-    return text.trim() === '' || !Number.isFinite(parsed) || parsed < 0
-  });
+  // Each staged field is checked against its Host-schema bound before save, so
+  // an out-of-range value (e.g. intervalMinutes 0) is reported under that very
+  // field instead of surfacing afterwards as a generic "保存失败".
+  const errorKeyOf = (field) => {
+    if (staged === null || !(field.key in staged)) return null
+    return fieldErrorKey(field, staged[field.key])
+  };
+  const invalid = FIELDS.some((field) => errorKeyOf(field) !== null);
   const blocked = !dirty || invalid || saving;
 
   const textOf = (key) => {
@@ -228,6 +251,9 @@ function SessionCleanupCard({ t, getConfig, setConfig, resetConfig }) {
   const discard = () => { setStaged(null); setFailed(false) };
   const save = async () => {
     if (staged === null) return
+    // Belt and braces: the messages are already on screen, so never send a
+    // value the Host schema would reject.
+    if (invalid) return
     setSaving(true); setFailed(false)
     try {
       const parsed = {}
@@ -274,20 +300,18 @@ function SessionCleanupCard({ t, getConfig, setConfig, resetConfig }) {
       ],
     }, 'header'),
     open ? jsxs('div', { className: 'sc-body', children: [
-      FIELDS.map((field) => jsx(Field, {
-        field,
-        label: t(field.key),
-        hint: t(field.key + 'Hint'),
-        text: textOf(field.key),
-        overridden: false,
-        invalid: staged !== null && field.key in staged && field.type === 'number'
-          ? !(Number.isFinite(Number(staged[field.key])) && Number(staged[field.key]) >= 0)
-          : false,
-        disabled: saving,
-        onChange: (text) => { edit(field.key, text) },
-        onReset: () => {},
-        t,
-      }, field.key)),
+      FIELDS.map((field) => {
+        const errorKey = errorKeyOf(field)
+        return jsx(Field, {
+          field,
+          label: t(field.key),
+          hint: t(field.key + 'Hint'),
+          text: textOf(field.key),
+          error: errorKey === null ? null : t(errorKey),
+          disabled: saving,
+          onChange: (text) => { edit(field.key, text) },
+        }, field.key)
+      }),
       jsxs('div', { className: 'sc-footer', children: [
         failed ? jsx('p', { className: 'sc-failed', role: 'status', children: t('saveFailed') }, 'failed') : null,
         jsx('button', { type: 'button', className: 'sc-discard', disabled: !dirty || saving, onClick: discard, children: t('discard') }, 'discard'),
@@ -298,25 +322,51 @@ function SessionCleanupCard({ t, getConfig, setConfig, resetConfig }) {
   ] });
 }
 
+/**
+ * One call to the host half over its `/session-cleanup` prefix route.
+ *
+ * This used to go through the Connection RPC registry (`rpc.call` on the
+ * `connection` service), which cannot work in dsh 0.1.5-rc.1: that registry
+ * throws `cannot get property "webServer" without inject` for every plugin
+ * outside the connection package, so the channel never exists and the request
+ * would land on the SPA fallback. The host half registers the prefix route
+ * itself (see `createRpcRoute` there) and answers the same `{ ok, value }` /
+ * `{ ok, error }` envelope.
+ *
+ * Same-origin by construction, JSON in and out — the host's fence requires it.
+ */
+const call = async (endpoint, args) => {
+  let response
+  try {
+    response = await fetch('/session-cleanup/' + endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ args: args ?? {} }),
+    })
+  } catch (error) {
+    throw new Error('rpc ' + endpoint + ' failed: ' + String(error?.message ?? error))
+  }
+  if (!response.ok) throw new Error('rpc ' + endpoint + ' failed: HTTP ' + String(response.status))
+  const envelope = await response.json()
+  if (envelope === null || typeof envelope !== 'object' || envelope.ok !== true) {
+    const error = new Error(
+      'rpc ' + endpoint + ' failed: ' +
+      String(envelope?.error?.code ?? 'malformed') + ': ' + String(envelope?.error?.message ?? 'malformed envelope'),
+    )
+    error.code = envelope?.error?.code
+    error.details = envelope?.error?.details
+    throw error
+  }
+  return envelope.value
+}
+
 /** Contribute the cleanup configuration card into 插件配置 + 插件管理. */
 function apply(ctx) {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'session-cleanup: card dictionaries')
 
-  const getConfig = async () => {
-    const result = await ctx.connection.rpc.call('/session-cleanup', 'getConfig', { args: {} })
-    if (!result.ok) throw new Error(result.error.code + ': ' + result.error.message)
-    return result.value
-  }
-  const setConfig = async (fields) => {
-    const result = await ctx.connection.rpc.call('/session-cleanup', 'setConfig', { args: { fields } })
-    if (!result.ok) throw new Error(result.error.code + ': ' + result.error.message)
-    return result.value
-  }
-  const resetConfig = async () => {
-    const result = await ctx.connection.rpc.call('/session-cleanup', 'resetConfig', { args: {} })
-    if (!result.ok) throw new Error(result.error.code + ': ' + result.error.message)
-    return result.value
-  }
+  const getConfig = () => call('getConfig', {})
+  const setConfig = (fields) => call('setConfig', { fields })
+  const resetConfig = () => call('resetConfig', {})
   const cardApi = () => ({ getConfig, setConfig, resetConfig })
 
   // The shipped 插件配置 page (settings.plugin.item). Config cards live only

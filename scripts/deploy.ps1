@@ -2,6 +2,14 @@
 # Usage: powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 $ErrorActionPreference = 'Stop'
 
+# Explicit UTF-8 IO: under Windows PowerShell 5.1 a no-BOM UTF-8 file read with
+# Get-Content (no -Encoding) is decoded with the ANSI code page, which corrupts
+# every Chinese comment on a read-modify-write round trip. See AGENTS.md.
+function Read-Utf8([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return '' }
+    return [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
+}
+
 $dev = Split-Path -Parent $PSScriptRoot          # D:\GitHub\deep-dreaming
 $dshHome = Join-Path $env:USERPROFILE '.dsh'     # ~/.dsh
 
@@ -15,6 +23,15 @@ foreach ($name in @('restart-dsh.ps1', 'stop-dsh.ps1', 'start-dsh.ps1', 'install
         Copy-Item $src (Join-Path $scriptsDir $name) -Force
         Write-Host "  [OK] script: $name -> ~/.dsh/scripts/"
     }
+}
+
+# 0.1. The canonical DSH-CLI patcher is shared with start-dsh.ps1/restart-dsh.ps1
+#      so the injection logic lives in exactly one file. Those scripts call
+#      ~/.dsh/scripts/patch-dsh-cli.ps1 when it is present.
+$cliPatcher = Join-Path $dev 'scripts\patch-cli.ps1'
+if (Test-Path $cliPatcher) {
+    Copy-Item $cliPatcher (Join-Path $scriptsDir 'patch-dsh-cli.ps1') -Force
+    Write-Host '  [OK] script: patch-cli.ps1 -> ~/.dsh/scripts/patch-dsh-cli.ps1'
 }
 
 # 0.5. Sync brand assets (whale-girl icons) to ~/.dsh/assets/ — the desktop
@@ -38,7 +55,7 @@ $modulesBase = Join-Path $dshHome 'profiles\node_modules'
 $checked = 0
 $failed = 0
 if (Test-Path $profilePatch) {
-    $content = Get-Content $profilePatch -Raw
+    $content = Read-Utf8 $profilePatch
     $matches = [regex]::Matches($content, "name:\s*'?(@local/[A-Za-z0-9._/-]+)'?")
     if ($matches.Count -eq 0) { Write-Host '  [!] no @local plugin references found in profile patch' }
     foreach ($m in $matches) {
@@ -57,10 +74,48 @@ if (Test-Path $profilePatch) {
     Write-Host '  [!] profile patch not found' -ForegroundColor Yellow
 }
 
+# 1.5. Loader-row uniqueness. A package that declares `dsh.bundle` ships its own
+#      cordis.patch.yml row, so inserting that same row from the profile layer
+#      composes TWO entries with the same id, and the boot aborts fail-loud with
+#      `TypeError: duplicate loader entry id: <id>` (cordis-plugin-loader).
+$profilePkgPath = Join-Path $dshHome 'profiles\web\package.json'
+$profileNodeModules = Join-Path $dshHome 'profiles\web\node_modules'
+if ((Test-Path $profilePatch) -and (Test-Path $profilePkgPath)) {
+    $manifest = Read-Utf8 $profilePkgPath | ConvertFrom-Json
+    $bundles = @($manifest.dsh.profile.bundles)
+    $layer = Read-Utf8 $profilePatch
+    foreach ($m in [regex]::Matches($layer, '(?ms)^- insert:[ \t]*\r?\n((?:[ \t]+[^\r\n]*\r?\n?)*)')) {
+        $block = $m.Groups[1].Value
+        $idMatch = [regex]::Match($block, '- id:\s*[''"]?([A-Za-z0-9@/:_\-.]+)[''"]?')
+        if (-not $idMatch.Success) { continue }
+        $id = $idMatch.Groups[1].Value
+        $nameMatch = [regex]::Match($block, "name:\s*'?([^'\r\n]+?)'?\s*(?:\r?\n|$)")
+        if (-not $nameMatch.Success) { continue }
+        $name = $nameMatch.Groups[1].Value.Trim()
+        if ($bundles -contains $name) {
+            Write-Host "  [FAIL] profile layer inserts row '$id' for '$name', which is also in dsh.profile.bundles -> the boot aborts with duplicate loader entry id" -ForegroundColor Red
+            $failed++
+            continue
+        }
+        # @local packages live in the shared profiles\node_modules; a profile
+        # dependency (like dsh-project-memory) resolves from the profile's own
+        # node_modules. Check both before deciding whether a dsh.bundle package
+        # is one `dsh plugin add` away from joining dsh.profile.bundles.
+        $depManifest = $null
+        foreach ($base in @($modulesBase, $profileNodeModules)) {
+            $candidate = Join-Path $base (($name -replace '/', '\') + '\package.json')
+            if (Test-Path $candidate) { $depManifest = $candidate; break }
+        }
+        if ($null -ne $depManifest -and ((Read-Utf8 $depManifest) -match '"bundle"')) {
+            Write-Host "  [WARN] profile layer inserts row '$id' for '$name', which declares dsh.bundle: the next 'dsh plugin add/update' moves it into bundles and the boot then aborts. Run scripts/install.ps1 to converge on a single owner." -ForegroundColor Yellow
+        }
+    }
+}
+
 # 2. Legacy home-layer file:// plugin references (no longer used; warn only).
 $homePatch = Join-Path $dshHome 'cordis.patch.yml'
 if (Test-Path $homePatch) {
-    $content = Get-Content $homePatch -Raw
+    $content = Read-Utf8 $homePatch
     if ($content -match 'name:\s*(file://[^\s]+)') {
         Write-Host "  [WARN] legacy file:// plugin ref in ~/.dsh/cordis.patch.yml: $($Matches[1])" -ForegroundColor Yellow
     }
@@ -72,7 +127,7 @@ if (Test-Path $homePatch) {
 #    repo-side real path, so the repo tree must expose the host node_modules.
 #    Missing/dangling/empty-dir links are (re)created; real dirs that already
 #    provide @deepseek-ai are kept as-is.
-$depPlugins = @('dsh-project-memory', 'session-cleanup', 'ui-settings-other', 'temp-session', 'whale-background')
+$depPlugins = @('dsh-project-memory', 'session-cleanup', 'ui-settings-other', 'ui-settings-model-reasoning', 'temp-session', 'whale-background')
 if (-not (Test-Path $modulesBase)) {
     Write-Host '  [!] ~/.dsh/profiles/node_modules not found; run `dsh plugin --profile web add` first' -ForegroundColor Yellow
 } else {

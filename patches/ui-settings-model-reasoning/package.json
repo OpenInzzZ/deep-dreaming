@@ -1,0 +1,24 @@
+{
+  "name": "@local/dsh-client-ui-settings-model-reasoning",
+  "version": "0.1.0",
+  "private": true,
+  "description": "User-level plugin: per-model thinking switch and effort levels for custom llm-pi-ai routes",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-settings-models",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-api-remotes"
+      ],
+      "platform": "web"
+    }
+  }
+}
