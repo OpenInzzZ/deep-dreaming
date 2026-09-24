@@ -6,25 +6,20 @@
  *   - the plugin fiber activates without TypeError('Invalid effect') — the P0
  *     regression guard (apply must not return the ctx.inject() thenable);
  *   - the `Config` export is really the schema the loader validates the entry
- *     config with: defaults are filled in, an out-of-range value is rejected;
+ *     config with: defaults are filled in, a wrong type is rejected;
  *   - the transport is one `{ kind: 'prefix', path: '/app' }` route on the
  *     `webServer` service — NOT a `ctx.connection.rpc` channel. In dsh
  *     0.1.5-rc.1 that registry throws `cannot get property "webServer" without
  *     inject` for every plugin outside the connection package, and because the
  *     throw happens inside the inject callback it also rolls back every effect
  *     that callback had already registered;
- *   - the /app route registers even when `ctx.get('connection')` is undefined,
- *     i.e. the host half never READS the connection service any more;
+ *   - no `connection` service is needed at all: the host half never reads it,
+ *     so the context here provides only `agents` and `webServer`;
  *   - the registered route really answers (`POST /app/status` → 200 + ok:true)
  *     and keeps its fence (GET → 405);
- *   - with idleEnabled: false no idle monitor is created (no real intervals —
- *     a live one would also keep this process from exiting).
- *
- * Fidelity note: the plugin still NAMES `connection` in its inner
- * `ctx.inject(['connection', 'agents'], …)` gate, so the service has to be
- * PROVIDED (any value, including `undefined`) for that callback to run at all.
- * This test proves its value is never read; removing the name from that list is
- * a lib/index.js change, not a test change.
+ *   - the `status` envelope carries no `idle` key — the idle auto-stop is gone
+ *     from the host half, settings namespace included;
+ *   - the host half arms no interval at all (the idle monitor was its only one).
  *
  * Run from the repo root:
  *   node patches/ui-settings-other/tests/load-smoke.mjs
@@ -47,17 +42,17 @@ if (typeof mod.Config !== 'function') {
   throw new Error('Config export missing: the loader validates the entry config through it')
 }
 const defaults = mod.Config({})
-if (defaults.idleEnabled !== true || defaults.idleMinutes !== 120 || defaults.script !== '') {
+if (defaults.script !== '') {
   throw new Error(`Config defaults: ${JSON.stringify(defaults)}`)
 }
-const normalized = mod.Config({ idleEnabled: false })
-if (normalized.idleEnabled !== false || normalized.idleMinutes !== 120) {
-  throw new Error(`Config must fill the missing keys with their defaults: ${JSON.stringify(normalized)}`)
+const normalized = mod.Config({ script: 'C:\\x\\restart-dsh.ps1' })
+if (normalized.script !== 'C:\\x\\restart-dsh.ps1') {
+  throw new Error(`Config must keep the configured script: ${JSON.stringify(normalized)}`)
 }
 let rejected = null
-try { mod.Config({ idleMinutes: 0 }) } catch (error) { rejected = error }
-if (rejected === null) throw new Error('Config must reject idleMinutes below its floor of 1')
-console.log(`Config OK: defaults ${JSON.stringify(defaults)}; idleMinutes 0 rejected`)
+try { mod.Config({ script: 42 }) } catch (error) { rejected = error }
+if (rejected === null) throw new Error('Config must reject a non-string script')
+console.log(`Config OK: defaults ${JSON.stringify(defaults)}; a non-string script is rejected`)
 
 /** `webServer` service double: records every register() as { kind, path, handler }. */
 const makeWebServerStub = () => {
@@ -133,13 +128,14 @@ const request = async (route, { method = 'POST', url = route.path, headers = {},
 // --- load into a real Context ------------------------------------------------
 const webServer = makeWebServerStub()
 const ctx = new Context()
-// The connection service is PROVIDED (the inject gate waits for the name) but
-// its value is `undefined`: the transport must not need it any more.
-ctx.provide('connection', undefined)
+// Only the two declared dependencies: the transport is a route on `webServer`,
+// and `agents` answers the session queries. No `connection` service exists here
+// (or in the plugin) any more.
 ctx.provide('agents', { list: () => [], get: () => undefined })
 ctx.provide('webServer', webServer)
 
-// idleEnabled: false keeps the idle monitor from creating a real interval.
+// The host half arms no timer: this counts them to prove the idle monitor (the
+// only interval it ever owned) is really gone.
 const realSetInterval = globalThis.setInterval
 let createdIntervals = 0
 globalThis.setInterval = (fn, ms) => {
@@ -149,13 +145,10 @@ globalThis.setInterval = (fn, ms) => {
 try {
   // Config validation happens here: `resolveConfig` runs the module's `Config`
   // schema over the entry config before the plugin starts.
-  const fiber = ctx.plugin(mod, { idleEnabled: false })
+  const fiber = ctx.plugin(mod, { script: '' })
   await fiber // throws TypeError('Invalid effect') on the P0 regression
 
-  if (ctx.get('connection') !== undefined) {
-    throw new Error(`premise failed: ctx.get('connection') must be undefined here, got ${String(ctx.get('connection'))}`)
-  }
-  if (fiber.config.idleEnabled !== false || fiber.config.idleMinutes !== 120) {
+  if (fiber.config.script !== '') {
     throw new Error(`the loader must resolve the entry config through Config: ${JSON.stringify(fiber.config)}`)
   }
 
@@ -181,14 +174,18 @@ try {
   if (envelope.ok !== true || typeof envelope.value?.running !== 'number') {
     throw new Error(`status envelope: ${status.body}`)
   }
+  if (envelope.value.idle !== undefined) throw new Error(`status must not carry idle any more: ${status.body}`)
+  if (typeof envelope.value.service?.pid !== 'number') {
+    throw new Error(`status must still carry the process snapshot (the progress driver reads service.pid): ${status.body}`)
+  }
   const refused = await request(app, { method: 'GET', url: `${APP_PATH}/status` })
   if (refused.status !== 405) throw new Error(`GET ${APP_PATH}/status must be refused, got ${refused.status}`)
 
-  if (createdIntervals !== 0) throw new Error(`idleEnabled:false must arm no monitor, created ${createdIntervals}`)
+  if (createdIntervals !== 0) throw new Error(`the host half must arm no interval, created ${createdIntervals}`)
 
   await ctx.fiber.dispose()
 } finally {
   globalThis.setInterval = realSetInterval
 }
 
-console.log('load-smoke OK: prefix /app route registered with ctx.get("connection") === undefined, Config validated, no Invalid effect, no idle monitor with idleEnabled=false')
+console.log('load-smoke OK: prefix /app route registered without a connection service, Config validated, no Invalid effect, status(idle gone) + no interval')

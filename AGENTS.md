@@ -11,6 +11,17 @@
 
 ---
 
+## Communication Language / 沟通语言
+
+**Always reply in Simplified Chinese (中文).** This applies to every agent working in this repo, regardless of the language the request arrives in:
+
+- Chat replies, progress updates, end-of-turn summaries, and questions asked back to the user.
+- User-facing copy inside this project's deliverables (README files, UI labels/dictionaries, script output, comments in the patch sources that explain intent).
+- Numbers, identifiers, file paths, command lines, code identifiers and log/keyword names stay as-is — translate the prose around them, not the tokens.
+- Technical terms with no settled Chinese form (e.g. `junction`, `Cordis`, `fenced route`) may stay in English, optionally with a short Chinese gloss on first use.
+
+---
+
 ## Directory Structure
 
 ```
@@ -25,7 +36,7 @@ deep-dreaming/
 │   ├── dsh-project-memory/        # Memorix bridge: auto-recall / auto-review prompt injection
 │   ├── session-cleanup/           # Auto-clean archived sessions by age/size
 │   ├── ui-settings-plugin-manager/ # Plugin manager tab: enable/disable toggles
-│   ├── ui-settings-other/         # Service status, restart, idle auto-stop, branding
+│   ├── ui-settings-other/         # Service status, restart (with a staged progress bar), branding
 │   ├── ui-settings-model-reasoning/ # Thinking switch + effort levels per custom llm-pi-ai model
 │   ├── ui-queue-tools/            # Queue message preview + reorder
 │   ├── temp-session/              # Sidebar button for ad-hoc temp sessions
@@ -95,7 +106,7 @@ Every patch is a Cordis plugin with a host half and optionally a client (browser
 
 ### Pure Functions and Testability
 - Export pure logic functions alongside `apply` so tests can verify them without a full Cordis runtime.
-- Example: `resolveRestartScript(config)`, `idleDecision({...})`, `reorderQueueItem(agent, itemId, toIndex)` are all exported and independently testable.
+- Example: `resolveRestartScript(config)`, `buildRestartSpawn(scriptPath, extraArgs)`, `reorderQueueItem(agent, itemId, toIndex)` are all exported and independently testable.
 
 ### Lifecycle
 - Every side effect MUST be wrapped in `ctx.effect(() => disposer, 'label')`.
@@ -215,11 +226,12 @@ The bridge owns no storage, no tools and no settings namespace — Memorix's own
 6. **One owner per loader row** — `dsh-project-memory` is a *bundle* (pnpm-installed + `dsh.profile.bundles`); every other patch is a directory patch (junction + `cordis.patch.yml` row). A bundle that is also inserted by the profile layer aborts the boot with `duplicate loader entry id`. `dsh plugin add/update` re-adds a `dsh.bundle`-declaring dependency to `dsh.profile.bundles` on its own, so never "fix" things by writing both. Details in "Junction Links".
 7. **Source changes need restart** — editing patch code under `patches/` does NOT hot-reload. Only `cordis.patch.yml` edits hot-reload. Restart via `restart-dsh.ps1`.
 8. **Live settings rebuild resources** — when a settings change (or `applies: live`) rebuilds a timer, monitor or route, dispose the old one before creating the new one, and let the disposer survive an unload in progress. Cordis disposes effects in **reverse** registration order, so a "disposed" flag set by a later-registered effect is still `false` while an earlier one runs.
-9. **Never read or write these files with a bare `Get-Content` / `Set-Content`** — Windows PowerShell 5.1 decodes a no-BOM UTF-8 file with the ANSI code page, so every Chinese comment comes back as mojibake (and a full read-modify-write rewrites it that way permanently; this already happened once to the live `cordis.patch.yml`). Use `-Encoding UTF8` on reads, and `[System.IO.File]::WriteAllText($path, $text, [System.Text.UTF8Encoding]::new($false))` for writes. `scripts/install.ps1` and `scripts/deploy.ps1` define `Read-Utf8` / `Write-Utf8` helpers for exactly this.
+9. **Never read or write these files with a bare `Get-Content` / `Set-Content`** — Windows PowerShell 5.1 decodes a no-BOM UTF-8 file with the ANSI code page, so every Chinese comment comes back as mojibake (and a full read-modify-write rewrites it that way permanently; this already happened once to the live `cordis.patch.yml`). Use `-Encoding UTF8` on reads, and `[System.IO.File]::WriteAllText($path, $text, [System.Text.UTF8Encoding]::new($false))` for writes. `scripts/install.ps1` and `scripts/deploy.ps1` define `Read-Utf8` / `Write-Utf8` helpers for exactly this. **The same decoding applies to a `.ps1` file's own source**, so pick one of two shapes: a script that prints non-ASCII (e.g. `start-dsh.ps1`'s Chinese console lines) **must carry a UTF-8 BOM** — `restart-dsh.ps1`, `start-dsh.ps1` and `install-desktop-shortcut.ps1` all do — while a no-BOM script must stay **pure ASCII**, because PS 5.1 otherwise decodes it as ANSI and even a string literal reaches the console as mojibake (one em dash in a `Log "..."` line was enough; measured). `update-dsh.ps1` is ASCII-only for that reason. Also note `"$A-$B"` parses as a drive-qualified variable: write `"${A}-${B}"`.
 10. **Never recurse into `patches/*/node_modules`** — the host-dependency junctions form a cycle and a recursive scan never terminates.
 11. **A `.Replace()` chain without a hit check is a silent no-op** — this is how `--clean` was "installed" for weeks without existing. Scripts that rewrite upstream build artifacts must assert every edit matched, and verify the result.
-12. **A throw inside an `ctx.inject` callback is not local** — the child fiber fails and Cordis disposes every effect that callback registered *before* the throw. That is how one broken call at the end of `ui-settings-other`'s callback silently removed its favicon route, its idle monitor and its diagnostics route together with the transport. Register what must survive (diagnostics, liveness routes) first, and isolate each optional step in its own `try`/`catch`.
+12. **A throw inside an `ctx.inject` callback is not local** — the child fiber fails and Cordis disposes every effect that callback registered *before* the throw. That is how one broken call at the end of `ui-settings-other`'s callback silently removed its favicon route, its diagnostics route and its transport together. Register what must survive (diagnostics, liveness routes) first, and isolate each optional step in its own `try`/`catch`.
 13. **`ctx.get('x')` is the optional read; `ctx.x` needs `inject`** — property access on an undeclared service throws `cannot get property "x" without inject`. Use `ctx.get(name)` for optional services; declare only real hard dependencies in `inject`.
+14. **Never `spawn` PowerShell with `detached: true` from a plugin** — Windows PowerShell 5.1 exits 0 immediately and runs *none* of the script, so the effect silently disappears (measured; `stdio: 'ignore'`/`'pipe'` and `-File`/`-Command` make no difference, and the CLI never shows it because a shell gives the child a console). Instead spawn a wrapper that starts the real script via `Start-Process -WindowStyle Hidden -PassThru` + `$p.WaitForExit(); exit $p.ExitCode`, so the child is genuinely independent *and* its exit code still reaches the host. Two more traps inside that wrapper, both measured: `-FilePath` needs an absolute path (`Join-Path $PSHOME 'powershell.exe'` — the bare name silently starts something else and returns 0), and paths in `-ArgumentList` must be **double**-quoted (single-quoted ones make the child exit −196608 without running). `patches/ui-settings-other/verify-settings-other.mjs`'s "spawn smoke" is the regression guard for all three.
 
 ---
 
@@ -247,7 +259,7 @@ The bridge owns no storage, no tools and no settings namespace — Memorix's own
 | dsh-project-memory | `lib/index.js` | `client.js` | (none) | (none) |
 | session-cleanup | `session-cleanup.mjs` | `client.js` | (none) | `session-cleanup` |
 | ui-settings-plugin-manager | `lib/index.js` | `lib/client.js` | `/plugin-toggle` | (none) |
-| ui-settings-other | `lib/index.js` | `lib/client.js` | `/app` | `ui-settings-other` |
+| ui-settings-other | `lib/index.js` | `lib/client.js` | `/app` | (none — no settings namespace since the idle auto-stop was removed) |
 | ui-settings-model-reasoning | `lib/index.js` | `lib/client.js` | (none — bound `settingsScope`, namespace `llm-pi-ai`) | `llm-pi-ai` (bound scope) |
 | ui-queue-tools | `lib/index.js` | `lib/client.js` | `/queue` | (none) |
 | temp-session | `lib/index.js` | `lib/client.js` | `/temp-session` | (none) |

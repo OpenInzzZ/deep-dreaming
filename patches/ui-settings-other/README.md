@@ -1,25 +1,32 @@
-# 设置「其他」页 —— 服务管理(重启 / 运行状态 / 空闲自动停止 / 桌面快捷方式)+ 启动脚本
+# 设置「其他」页 —— 服务管理(重启 / 运行状态 / 桌面快捷方式)+ 启动脚本
 
-在 dsh Web 设置中新增一个 **其他(Other)** 页面,提供四块能力:
+在 dsh Web 设置中新增一个 **其他(Other)** 页面,提供三块能力:
 
 1. **运行状态**:实时展示服务进程快照 —— 进程 ID、监听端口、运行时长、
-   内存占用、Node 版本、dsh 版本、运行中会话数、空闲自动停止倒计时
-   (每 10 秒自动轮询,也可手动刷新)。
+   内存占用、Node 版本、dsh 版本、运行中会话数(每 10 秒自动轮询,也可手动
+   刷新;这个 10 秒**只在页面可见时成立** —— 后台标签页的定时器会被浏览器
+   节流到分钟级,所以**切回前台会立即补读一次**,重启流程走到「已就绪」时
+   也会立即补读一次,免得那行还挂着已经消失的旧 pid)。
 2. **创建桌面快捷方式**:在桌面生成 `dsh-web.lnk`(鲸鱼娘图标),双击后**新开一个
    控制台窗口**启动服务(该窗口会打印端口并等待按键,`start-dsh.ps1 -OpenBrowser
    -Pause`);重复点击幂等,已带 `-Pause` 的快捷方式不会被覆盖。
 3. **重启服务**:点击后 dsh 服务进程自行重启(以相同命令行重新拉起一个后台
    进程,当前进程退出)。**会中断所有运行中的会话**,仅用于升级 dsh、
    修改核心插件或状态异常等必须整进程重启的场景;这是页面上**唯一的危险
-   按钮**。有会话正在运行时,确认流程会给出「等待空闲后重启」与
-   「强制重启」两条路径(见下文)。
-4. **空闲自动停止**:持续没有**运行中的会话**超过 `idleMinutes`(默认 120,
-   即 2 小时)后,服务自动优雅退出;配合桌面快捷方式可随时重新拉起。
+   按钮**。**三条会真正断开服务的路径都必须先过确认弹窗**(普通重启、
+   强制重启、等待空闲后重启),确认后页面用**三阶段进度条**报告重启进度
+   (见下文)。
 
 > 页面**不再提供「中断服务」按钮**:危险操作只保留「重启服务」一个。需要停机
 > 维护时用命令行 `~/.dsh/scripts/stop-dsh.ps1`
 > (`powershell -ExecutionPolicy Bypass -File .\scripts\stop-dsh.ps1`),之后用
 > 桌面快捷方式或 `start-dsh.ps1` 重新拉起。
+>
+> **空闲自动停止已删除**(2026-09):该特性原本在无运行中会话超过 `idleMinutes`
+> 后自动停止服务,配套的 settings 命名空间 `ui-settings-other` 与
+> 「设置 → 插件 → 插件配置」卡片一并移除 —— 本补丁现在不拥有任何 settings
+> 命名空间,也不注册 `settings.plugin.item` 卡片。旧的 `idleEnabled` /
+> `idleMinutes` 条目键留着无害(`Config` 容忍未知键),但不再有任何作用。
 
 ## 品牌图标(鲸鱼娘)
 
@@ -30,13 +37,14 @@
   `/favicon.svg`,用补丁内置的 128px PNG(经 base64 嵌入 SVG)覆盖 dsh 默认
   favicon,标题栏/标签页图标与 DeepSeek 开放平台区分开。
 - **诊断路由** `GET /ui-settings-other/health`(只读、`no-store`、本机可达):
-  返回 `{ ok, namespace, channel, settings, branding, warnings }`,用来区分
-  「`/app` 通道根本没注册」和「某个端点报错」——这两种情况在页面上都表现为
-  「运行状态获取失败」。`channel/settings/branding` 是三个阶段是否成功,
+  返回 `{ ok, namespace, channel, branding, warnings }`,用来区分
+  「`/app` 路由根本没注册」和「某个端点报错」——这两种情况在页面上都表现为
+  「运行状态获取失败」。`channel/branding` 是两个阶段是否成功
+  (`namespace` 只是本插件的身份标签,不再对应任何 settings 命名空间),
   `warnings` 是各阶段失败的原文。排查顺序:先 curl 这条路由。
-  同时 host 半的可选步骤(settings 接线、空闲监控、favicon)各自 try/catch 并
-  写 warning,**任何一步失败都不会再拖垮 `/app` 通道**——早先它们是顺序执行且
-  没有保护,一步抛错就会让「其他」页整页按钮失效。
+  同时 host 半的可选步骤(favicon 品牌覆盖)单独 try/catch 并写 warning,
+  **它失败不会再拖垮 `/app` 通道**——早先这些步骤是顺序执行且没有保护,
+  一步抛错就会让「其他」页整页按钮失效。
 - 素材来源:[fornarwhal/deepseek-whale-girl-icon](https://github.com/fornarwhal/deepseek-whale-girl-icon)
   (CC BY-NC-SA 4.0,须署名、非商用),角色形象「溟月」(上善无形)、DeepSeek
   元素二创(ZipZipPipe)、改进修复(QYQCAMIAO)。个人使用请保留署名。
@@ -55,38 +63,101 @@
   返回的 `created` 取自脚本输出(报告「already exists」时为 `false`),不再恒为
   `true`。生成的快捷方式**双击会新开控制台窗口启动服务并打开默认浏览器**,
   窗口会打印端口并等待按键后才关闭。
-- **重启服务**(危险,页面上唯一的危险按钮):**二次确认弹窗**后才真正执行
-  (点击弹出确认对话框,含说明文案与「取消 / 确认重启」,点遮罩或按 Esc 也可
-  取消);请求发出后按钮进入「正在重启…」禁用态;成功后显示「已请求重启,
-  服务即将断开,请稍后刷新页面」;失败显示错误并提供重试。
+- **重启服务**(危险,页面上唯一的危险按钮):**三条会真正断开服务的路径
+  统一先过确认弹窗** —— 普通重启、忙碌时的**强制重启**、以及「等待空闲后
+  重启」等到会话归零的那一刻,都会弹出确认对话框(含说明文案与
+  「取消 / 确认重启」,点遮罩或按 Esc 也可取消;强制重启的弹窗带会话数量)。
+  取消强制重启会**回到忙碌视图**保留「等待空闲 / 强制重启」的选择。
+  请求发出后按钮进入「正在重启…」禁用态;失败显示错误并提供重试。
+- **重启进度条**:确认后页面进入**三阶段进度条**(①已请求重启 ②旧服务已
+  停止 ③新服务已就绪)。阶段判定只用页面**还能观察到的事实**:发起重启后
+  第一次 `/app/status` 读到的 `service.pid` 是**旧进程**的基准;之后
+  ① 轮询连不上 = 旧服务已停,② 轮询应答且 **pid 变化** = 新服务已接管。
+  两者都没观察到(超出预算 120 秒)→ 进度条降到 `unknown` 态并提示**端口
+  很可能已变化**,给出**重试检测**按钮(只重新探测、不重复请求重启)。
+  重试期间基准 pid 会被保留,所以换端口的服务一旦在本地址应答即可判为就绪。
+  预算是**墙上时钟 120 秒**(不是 120 次轮询),且**切回前台会立即补探一次** ——
+  后台标签页的 1 秒轮询会被浏览器节流,按轮询次数计预算会让它变成几分钟;
+  判定为「已就绪」的那一次会**同时把运行状态块刷新一遍**。
 - **防重复**:host 侧有锁(spawn 失败 / 脚本非零退出 / 90 秒看门狗都会
-  释放),重复请求直接返回"已排定";看门狗定时器与空闲监控同属插件生命周期
+  释放),重复请求直接返回"已排定";看门狗定时器属插件生命周期
   (`ctx.effect`),插件卸载时会被清除。
+- **dsh 版本卡片**(只读):显示**当前版本**与**最新版本(dist-tag `latest`)**,
+  并给出「已是最新 / 有新版本可用」;有「检查更新」按钮可手动刷新(绕过 10 分钟
+  缓存)。检查源是**机器 npmrc 里配置的 registry**(本机为
+  `https://registry.npmmirror.com/`),没有配置时退回官方源;`~/.npmrc` 里同时
+  存着其它 scope 的 authToken,所以解析器**只取顶层 `registry=` 那一行**、绝不
+  把文件内容带进日志或响应。registry 拿不到时是 fail-soft:`ok:true` + `error`
+  字段说明原因(卡片显示「检查失败:<原因>」),不会变成红色报错。**只跟 `latest`**:
+  `alpha` 通道(现为 0.1.7-alpha.2)跑在 latest 前面,跟着它会把 RC 安装误判成
+  该升级。
+- **更新并重启**(有更新时才出现,危险色):点击**先弹确认框**(文案含目标版本),
+  取消不触碰任何东西;确认后调 `/app/update`(带上卡片刚读到的版本号,固定这次
+  运行的目标),然后**复用重启那条三阶段进度条** —— 只是标题变成「更新进度」、
+  第一阶段文案变成「已请求更新」,预算从 120 秒放宽到 **300 秒**(更新要下载、
+  打补丁、再启动),宿主侧的锁窗口同步放宽到 **10 分钟**(90 秒会让第二次更新在
+  第一次还在跑时插进来)。判定为「已就绪」时,运行状态块与版本卡片都会被刷新一遍。
 - **会话保护**:有会话正在运行时,`restart` 拒绝执行并返回
   `sessions-running`(含数量);页面提供两个选项:
-  - **等待空闲后重启**:每 2s 轮询 `/app/status`,归零后
-    自动发起重启;
+  - **等待空闲后重启**:每 2s 轮询 `/app/status`,归零后**弹确认框**
+    (不再自动发起);
   - **强制重启**:先对所有运行中会话执行
     `agent.cancel({ kind: 'user' }, { keepInbox: true })`,再执行。
 
-### 空闲自动停止(设置 → 插件 → 插件配置)
+## 更新(检测 + 按钮 + `update-dsh.ps1` 已接好;真正的切换仍未跑过)
 
-- 配置卡片「服务(空闲自动停止)」,两个字段:
-  - **启用空闲自动停止**(开关,默认开);
-  - **空闲时长(分钟)**(数字,默认 120)。
-- 保存即时生效(host 重新装配监控:开→建、关→停;`idleMinutes` 每次 tick 都
-  从当前配置读取,不需要为改数值重建定时器);也可直接编辑
-  `~/.dsh/settings.yaml` 的 `ui-settings-other:` 段(文件被监听)。
-- 配置卡片经插件自身的 `/app` RPC 通道读写(getSettings / setSettings /
-  resetSettings),不依赖 dsh 设置的暴露白名单(apiproxy),在
-  **设置 → 插件 → 插件配置** 页编辑(插件管理页仅负责插件启停,不承载
-  配置卡片);点 **恢复默认** 整体回退到组合层配置。
-- 判定规则:host 每分钟检查一次 `agents` 服务,只要有会话处于
-  `running` 状态就重置空闲时钟;超过阈值仍无运行会话则调用
-  launcher 提供的 `ctx.appExit(0)` 优雅关闭(该通道不可用时回退
-  `process.exit(0)`)。
-- 注意:空闲判定**只认运行中的会话**;排队中但未运行的会话不阻止停止。
-  服务停止后,用桌面快捷方式或 `start-dsh.ps1` 重新拉起即可。
+链路已完整:`其他` 页的版本卡片 → 确认框 → `/app/update` → `update-dsh.ps1` →
+进度条。**唯一没被执行过的是「停旧 → 起新」那一步本身**(预热与定位是实测的,
+见下;真升级会替换正在运行的服务,所以留给你在确认的时间点跑)。脚本设计成
+**薄编排**,不重复实现端口/PID/打补丁/等就绪:
+
+```
+update-dsh.ps1  = 解析目标版本(默认 npm 的 latest dist-tag)
+                → 预热: npx -y @deepseek-ai/dsh@<v> --version(断言打印出的就是 <v>)
+                → 断言「最新缓存条目 == 目标版本」(start-dsh.ps1 与 patch-cli.ps1
+                  都只认按写入时间最新的那一条,选错就会给旧构建打补丁还报成功)
+                → Start-Sleep 让在途 RPC 响应送达
+                → 委托 stop-dsh.ps1 -Port <旧端口>(它自己会校验 PID 确实是 dsh CLI)
+                → 委托 start-dsh.ps1 [-OpenBrowser](它自己会定位最新入口、重跑
+                  patch-cli.ps1、挑空闲端口、隐藏窗口启动、轮询就绪)
+```
+
+`-DryRun` 实测输出(只打印计划,不做任何改动):
+
+```
+registry: https://registry.npmmirror.com/
+target version: 0.1.5-rc.3
+running now: PID 41692 on port 3080
+running build: 0.1.5-rc.2  (..._npx\1e7f6d9597241db0)
+already cached: 0.1.5-rc.3  (..._npx\99cabb0ceac85b86\...\bin.js)
+newest entry: 0.1.5-rc.3  (..._npx\99cabb0ceac85b86)
+plan: 1. prime(skip) 2. assert 3. stop 4. start
+DRY-RUN: no changes made.
+```
+
+未缓存的分支也验过(`-Version 0.1.6-alpha.2` → 计划里 prime 步显示真实命令);
+非法版本号硬失败(`not a dsh version: 'banana'`)。**注意 `-DryRun` 之外尚未执行**
+—— 真正切换前请先跑 `-DryRun` 确认命令,并且确认没有运行中的会话(脚本本身没有
+会话检查,UI 侧接上时要复用 `sessions-running` 保护)。`scripts/deploy.ps1` 会把
+它同步到 `~/.dsh/scripts/`。
+
+此前实测清楚的机制细节:
+
+- **预热新版本的命令**(实测):`npx -y @deepseek-ai/dsh@<目标版本> --version`。
+  它会把新版本**新开**一个 npx 缓存目录(实测 rc.3 → `_npx/99cabb0ceac85b86`,内含
+  `lib/bin.js`),**不动**正在运行的那个目录 —— 所以「先备好、再切换」是可行的,
+  失败也不会污染当前进程。`--version` 是安全探针(打印版本即退出,不启服务);
+  注意 `-v` **不是**版本开关(它会要求 `--profile`)。
+- **切换步骤**:停旧进程 → 用**新缓存目录**的 `bin.js` 启动(定位新入口要用
+  `start-dsh.ps1` 那套「扫 npx 缓存里最新的 dsh 入口」逻辑,**不能**沿用
+  `restart-dsh.ps1` 的「恢复旧命令行」,否则会拉起旧目录)→ **必须重跑
+  `patch-cli.ps1`**(新缓存目录里没有 `--clean`)→ 轮询就绪 → 可选打开浏览器。
+- **失败兜底**:`dsh web --clean`(只加载 bundle 层)是升级把用户层搞坏时的逃生舱;
+  另外**有会话在跑时必须拒绝**更新(整进程会被换掉,复用现有 `sessions-running`
+  保护)。
+- 桌面快捷方式侧同样待接:计划是在服务就绪后回调 `/app/versionCheck` 拿结论打印
+  一行(那时它正好在等按键),拿不到就静默跳过 —— 这样 semver 比较只有一份实现,
+  不用在 PS 里再抄一遍。
 
 ## 启动脚本与桌面快捷方式
 
@@ -131,31 +202,43 @@
     注册表对任何外部插件都抛 `cannot get property "webServer" without inject`
     (`owner.effect(() => owner.webServer.register(route))` 里的 `owner` 从未声明
     `webServer`),通道根本注册不上,而且抛错发生在 inject 回调里会**回滚该回调
-    先前注册的所有 effect**(favicon、空闲监控、诊断路由会一起消失)。路由自带
+    先前注册的所有 effect**(favicon、诊断路由会一起消失)。路由自带
     同源栅栏(`Origin` 必须等于 `Host`)、只收 `POST`、只收 `application/json`
     —— 跨站 POST 会带自己的 `Origin`、JSON body 又会触发预检(我们不响应预检),
     因此等价于 Connection 原来的 Host/Origin 栅栏。
-  - 端点共六个:`getSettings` / `setSettings` /
-    `resetSettings` / `status` / `installShortcut` / `restart` ——
-    没有 `stop`,也没有 `reloadPlugins`(原因见「注意事项」)。端点处理函数仍是
+  - 端点共五个:`status` / `installShortcut` / `restart` / `versionCheck` / `update` ——
+    没有 `stop`,没有 `reloadPlugins`(原因见「注意事项」),随空闲自动停止一起
+    删掉的 `getSettings` / `setSettings` / `resetSettings` 现在只会返回
+    `bad-request`(未知端点)。端点处理函数仍是
     `async (endpoint, payload) => {ok,value}|{ok,error}`,与旧通道时代完全一致。
-  - `status` 端点返回 `{ running, sessions, service, idle }`:
+  - `status` 端点返回 `{ running, sessions, service }`:
     `service` 为进程快照(pid / startedAt / uptime / rss / node /
     execPath / dsh 版本(从入口脚本向上解析 package.json)/ 监听端口
-    (netstat 按本进程 PID 过滤,10s 缓存));`idle` 为空闲停止状态
-    (enabled / idleMinutes / lastBusyAt)。
-  - `restart` 端点只做一件事:detached 调起 `restart-dsh.ps1`(路径取自
-    补丁 config 的 `script`,默认 `~/.dsh/scripts/restart-dsh.ps1`)。
-  - 空闲监控:settings namespace `ui-settings-other` 由本插件**手写注册**
-    (`settings.register(ns, schema, { base: entry })` + `scope.watch(...)`,
-    并非 `settings.installSection`,也没有 `applies: live`):配置变更后由
-    `scope.watch` 回调按新值重新装配监控(开→建、关→停;`idleMinutes` 每次
-    tick 从当前来源读取)。settings 服务缺失时回退补丁 entry 配置(entry +
-    schema 默认值),provider 中途卸载时也会回退到该来源。所有定时器都在
-    `ctx.effect` 里注册:空载时按反序释放,Cordis 会**先**运行 settings 子
-    fiber 的 disposer,因此该 disposer 自己在卸载中关闭重建路径
-    (`isUnloading`),避免在卸载过程中重新建出监控器。
-  - `restart` 端点的 90 秒看门狗同属插件生命周期:由 `ctx.effect` 持有并在
+    (netstat 按本进程 PID 过滤,10s 缓存))。页面侧的重启进度条正是靠
+    `service.pid` 区分旧进程与替代进程。
+  - `restart` 端点只做一件事:调起 `restart-dsh.ps1`(路径取自补丁 config 的
+    `script`,默认 `~/.dsh/scripts/restart-dsh.ps1`)。**用 `Start-Process` 起,
+    而不是把 `detached: true` 交给 spawn**:Windows PowerShell 5.1 在被
+    `detached: true`(配 `stdio:'ignore'` + `windowsHide`)spawn 时会**秒退并返回
+    0,脚本体一行都不执行** —— 于是旧进程不被杀、没有日志、连
+    `code !== 0` 的告警分支都不触发,客户端只能空等到 120 秒降级 `unknown`
+    (2026-09-23 用 spawn 对照矩阵定位;命令行手动跑有控制台,所以这个 bug
+    只在 UI 路径暴露)。现在的形状是:spawn 一个 powershell 只做
+    `Start-Process -WindowStyle Hidden -PassThru`,再由它 `WaitForExit` 并把
+    子进程退出码作为自己的退出码 —— 与桌面快捷方式起脚本同为「真正独立
+    的进程」(`start-dsh.ps1` 起 node 也是这个模式),同时保留
+    「非零退出 → 释放重启锁」的原有语义。
+    两个实测细节别踩:`Start-Process` 的 `-FilePath` **必须用绝对路径**
+    (`Join-Path $PSHOME 'powershell.exe'`;裸名 `'powershell'` 会静默起成别的东西、
+    内层命令完全不生效且返回 0),内层命令行里**路径要用双引号**
+    (单引号那版实测子进程以 -196608 退出、什么都不执行)。
+    `verify-settings-other.mjs` 里的 **spawn 冒烟**就是这几条的回归守卫:
+    用宿主原样调用起一个写标记文件的 stub,断言标记出现、`-OpenBrowser` 传到位、
+    且非零退出码能透传到外层。
+  - 本 half **不注册任何 settings 命名空间,也不注入 `settings` 服务**;
+    `lib/index.js` 与 `lib/client.js` 都不再持有任何定时器(唯一的前端计时器
+    是进度条轮询,属浏览器侧组件)。
+  - `restart` 端点的 90 秒看门狗属插件生命周期:由 `ctx.effect` 持有并在
     卸载时 `clearTimeout`。
 - **脚本(`restart-dsh.ps1`)**:完整生命周期 —— 通过端口(默认扫描
   3080-3100 池)找到当前 dsh 进程,校验该 PID 确实是 dsh CLI(node.exe 且
@@ -181,12 +264,17 @@
   `Stop-Process -Force` → 等待端口释放(供后续 `start-dsh.ps1` 安全
   重拉)。支持 `-DryRun`、`-Port`;没有任何会话检查,请在运行前确认
   没有进行中的会话。
-- **Client 半(`lib/client.js`)**:注册 `settings.section` slot
-  (`id: 'other'`, `order: 30`)与 `settings.plugin.item` 配置卡片
-  (`key: 'ui-settings-other'`);状态块、**创建桌面快捷方式**与
+- **Client 半(`lib/client.js`)**:只注册 `settings.section` slot
+  (`id: 'other'`, `order: 30`);状态块、**创建桌面快捷方式**与
   **重启服务**按钮经模块级 `call(endpoint, args)` 用 `fetch` 调
   `POST /app/<endpoint>`(`content-type: application/json`,body `{args}`,
-  解 `{ok,value}` 信封),注入面为 `restart` / `status` / `installShortcut`。
+  解 `{ok,value}` 信封),注入面为 `restart` / `status` / `installShortcut` /
+  `versionCheck` / `update`。
+  重启流程的状态机:`idle → confirm(restart) → calling → progress | busy | error`,
+  其中 `busy → confirm(force)`(取消回 busy)与
+  `busy → waiting → confirm(auto)` 都先过确认;`progress` 三阶段由 1s 轮询
+  `/app/status` 驱动(基准 pid → 连接失败 → pid 变化),预算用尽则进
+  `unknown` 态。
 
 ## 部署(加载到 dsh)
 
@@ -218,8 +306,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
     - id: ui-settings-other
       name: '@local/dsh-client-ui-settings-other'
       config:
-        # script: 'D:\path\to\restart-dsh.ps1'   # 可选:自定义重启脚本路径
-        # idleMinutes: 120                        # 可选:空闲停止阈值(分钟),默认 120
+        # script: 'D:\path\to\restart-dsh.ps1'        # 可选:自定义重启脚本路径
+        # updateScript: 'D:\path\to\update-dsh.ps1'   # 可选:自定义更新脚本路径
 ```
 
 条目增删 / 配置修改保存后**数秒热生效**(host + client 均热装载,无需
@@ -235,15 +323,15 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
      需要最新快照时点 **刷新**;
    - 修改了 `cordis.patch.yml` 的**条目内容**(增删行、改 `config`)后,
      热重载会在数秒内自动生效(不中断会话);只改注释不会触发重挂;
-   - 仅当升级 dsh / 修改核心插件时,才使用 **重启服务** → 确认 →
-     等待约 10~20 秒后刷新页面(会中断所有运行中会话);有会话正在运行时
-     可选择「等待空闲后重启」或「强制重启」;
+   - 仅当升级 dsh / 修改核心插件时,才使用 **重启服务** → 确认 → 看进度条
+     走完三阶段(会中断所有运行中会话);有会话正在运行时可选择
+     「等待空闲后重启」(会话归零后仍会先弹确认框)或「强制重启」;
+   - 进度条停在 `unknown` 态说明本地址没等到应答:多半已换端口,重启脚本会
+     自动打开新地址,也可以点 **重试检测** 再探一次;
    - 需要停机维护时改用命令行停机(会中断所有运行中会话),之后用桌面
      快捷方式或 `start-dsh.ps1` 重新拉起:
      `powershell -ExecutionPolicy Bypass -File .\scripts\stop-dsh.ps1`。
-2. 设置 → **插件** → **插件配置** → 展开「服务(空闲自动停止)」:
-   调整开关与空闲分钟数,点「保存」即时生效。
-3. 桌面双击 **dsh-web** 快捷方式:打开控制台窗口启动服务(打印端口后等待
+2. 桌面双击 **dsh-web** 快捷方式:打开控制台窗口启动服务(打印端口后等待
    按键关闭),并自动打开默认浏览器;
    首次安装快捷方式:
    `powershell -ExecutionPolicy Bypass -File .\scripts\install-desktop-shortcut.ps1`
@@ -252,8 +340,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 ## 卸载
 
 1. 删除 `~/.dsh/profiles/web/cordis.patch.yml` 中的 `ui-settings-other`
-   条目(**热生效**:数秒后「其他」页与配置卡片消失,`/app` 通道注销,
-   空闲监控随 fiber 卸载停止);
+   条目(**热生效**:数秒后「其他」页消失,`/app` 通道注销,重启看门狗随
+   fiber 卸载清理);
 2. 删除 `~/.dsh/profiles/node_modules/@local/dsh-client-ui-settings-other`
    链接;
 3. 可选:删除桌面 `dsh-web.lnk` 与 `~/.dsh/scripts/` 下本补丁的脚本
@@ -267,8 +355,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
   真实变化(增删行、改 `config`),数秒内即热生效。
 - 重启后新进程**脱离原终端独立运行**(detached);再次重启需在 Web 中
   操作、运行脚本或结束进程后重新启动。
-- 空闲自动停止会**结束整个 dsh web 进程**(包括正在浏览页面的人),请在
-  无人使用或接受中断时开启;需要保活可把空闲分钟数调大或关闭开关。
+- 进度条只能证明页面**在本地址**看到的现象:重启脚本优先复用原端口,只有
+  原端口不可用(TIME_WAIT / 被占)时才改选 3080-3100 池内的下一个端口,此时
+  旧页面永远等不到应答(这是 `unknown` 态的正常来源,不是失败)。
 - 手动运行 `restart-dsh.ps1` / `stop-dsh.ps1` 没有会话检查(脚本无法访问
   会话状态),请在运行前确认没有进行中的会话;两者都会先校验目标 PID 确实是
   dsh CLI,遇到无关监听进程时报错退出而不是强杀。
@@ -277,31 +366,43 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
   (源码链路:`hmr.registerConfig` 监听 → `watchUserPatches` 回调重读该文件 →
   `Entry.update` 对 options 做深比较后提前返回),因此它从不生效;后者被去掉,
   危险操作只保留「重启服务」一个。停止服务请走命令行 `stop-dsh.ps1`。
-  补丁的 `config` 也不再接受 `patchFile` 键(只剩 `idleEnabled` /
-  `idleMinutes` / `script`)。
+  补丁的 `config` 也不再接受 `patchFile` 键(现在只剩 `script`;
+  `idleEnabled` / `idleMinutes` 随空闲自动停止一并失效,写在新条目里也不会
+  被 `Config` 拒绝,但不会有任何作用)。
 - 若某个补丁加载失败,该次候选更新整体回滚并广播 `hmr/config-update-failed`,
   上一次成功的条目树继续运行;让该文件再发生一次真实改动即可再次触发重载
   (只改注释不会触发);修改补丁源码后则需重启 dsh web 才生效。
 
 ## 测试
 
+在仓库根执行(`# 在本补丁目录下运行` 的那条除外):
+
 ```powershell
-# 在仓库根执行:\$repo = (Resolve-Path .).Path
-node verify-settings-other.mjs          # 在本补丁目录下运行
+node patches/ui-settings-other/tests/load-smoke.mjs   # 真 Cordis Context 装载:只需 agents + webServer
+node patches/ui-settings-other/verify-settings-other.mjs
 ```
 
-覆盖:host 半 `/app` 通道注册与端点校验(不真正重启)、`restart` 端点的会话
+覆盖:host 半 `/app` 前缀路由注册与端点校验(不真正重启)、`restart` 端点的会话
 保护(非强制拒绝并返回 `sessions-running` / 强制先取消会话再执行)、
 apply 不返回 thenable 的 P0 回归守卫、
 RPC 失败信封完整性(`{ok:false,error:{code,message,details}}`)、
-运行状态快照(serviceInfo / listeningPorts / dshVersion)、空闲判定与监控器
-(假时钟:busy 重置 / 阈值等待 / 恰好一次停止)、settings namespace 注册与
-watch 重建、**生命周期回归守卫**(镜像 Cordis 的「子 fiber + 反序释放」语义:
-每次 apply 只装配一个监控器、卸载过程中不会新建 interval、卸载后不残留
-interval、provider 卸载时回退 entry 配置、重启看门狗随卸载清理)、
-`installShortcut` 的真实 created 状态、client 半契约(bundle handoff、
-section 与卡片 id/order、zh/en 字典一致、注入面 `restart` / `status` /
-`installShortcut`、Modal stub 契约)与 **主题 token 审计**(bundle 用到的
+运行状态快照(serviceInfo / listeningPorts / dshVersion)、
+**空闲自动停止的删除守卫**(`status` 不含 `idle` 键、settings 端点返回
+`bad-request`、有 settings 服务时也不注册命名空间/不注入 `settings`、
+host 半不挂任何 interval、旧的 `idleMinutes` 条目键不致命)、
+**生命周期回归守卫**(镜像 Cordis 的「子 fiber + 反序释放」语义:
+重启看门狗随卸载清理)、`installShortcut` 的真实 created 状态、
+client 半契约(bundle handoff、section id/order、不再贡献
+`settings.plugin.item` 卡片、zh/en 字典一致、注入面 `restart` / `status` /
+`installShortcut` / `versionCheck` / `update`、Modal stub 契约)、**版本检测与更新**
+(isNewerVersion 的 10 个 semver/prerelease 用例、npmrc 只取顶层 registry=
+且不泄漏 token、`/app/versionCheck` 真路由的 fail-soft 形状 + 缓存 + force、
+`/app/update` 真路由:版本号被钉住/垃圾版本被拒/有会话时拒绝并返回
+`sessions-running`/强制会先取消会话/与重启共用同一把锁/缺脚本时报
+`update script not found`、版本卡片的挂载读取与强制重查、更新流程的
+「确认 → POST /app/update {version} → 进度条(更新标题与首阶段文案)」)
+与 **主题 token 审计**(bundle 用到的
 每个 `--dsw-alias-*` 都必须在已安装主题里有定义)。
-DOM 交互段(状态块渲染、重启的确认弹窗/等待空闲/强制流程、配置卡片
-经 `/app` RPC 保存与重置)需要 jsdom;未安装时自动跳过并提示。
+DOM 交互段(状态块渲染 7 行、重启的确认弹窗/等待空闲/强制流程、
+**三阶段进度条与 unknown 降级 + 重试检测**)需要 jsdom;未安装时自动跳过
+并提示。

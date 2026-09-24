@@ -1,17 +1,19 @@
 /**
  * Host half of the ui-settings-other patch: a restart-service RPC endpoint,
- * a runtime-status snapshot, an idle auto-stop monitor, a desktop-shortcut
- * installer, and the Web title-bar icon (favicon) override.
+ * a runtime-status snapshot, a desktop-shortcut installer, and the Web
+ * title-bar icon (favicon) override.
  *
- * Exposes a dedicated Connection RPC channel `/app` (the shared `/api` channel
- * is exclusively owned by the Typert gateway, so a user-level plugin registers
- * its own channel through `ctx.connection.rpc.handle` with the loopback
- * authority — the web page only ever reaches this from 127.0.0.1).
+ * The page reaches this half over a self-registered fenced prefix route
+ * `/app` on the `webServer` service (the shared `/api` channel is exclusively
+ * owned by the Typert gateway, and `ctx.connection.rpc.handle` is broken in
+ * this dsh version — see `createRpcRoute`).
  *
  * Endpoints:
- * - `status`  → `{ running, sessions, service, idle }` where `service` is a
- *   live process snapshot (pid, startedAt, uptime, rss, node, execPath, dsh
- *   version, listening ports via netstat) and `idle` is the auto-stop state.
+ * - `status`  → `{ running, sessions, service }` where `service` is a live
+ *   process snapshot (pid, startedAt, uptime, rss, node, execPath, dsh
+ *   version, listening ports via netstat). The browser half uses `service.pid`
+ *   to tell the old process from its replacement while the restart progress
+ *   runs.
  * - `restart` → delegates the whole job to the standalone script
  *   `restart-dsh.ps1` (deployed to `~/.dsh/scripts/` by scripts/deploy.ps1):
  *   the script finds the process listening on the web port, recovers its exact
@@ -20,6 +22,18 @@
  *   until the service answers. Keeping the lifecycle in a script makes the
  *   restart independently testable (`-DryRun`) and keeps this host entry a
  *   thin, dependency-free trigger.
+ * - `versionCheck` → `{ current, latest, hasUpdate, registry, error }`: the
+ *   running version against the `latest` dist-tag of the npm registry the
+ *   machine is configured for (`~/.npmrc`, else the public one). Read-only,
+ *   fail-soft (an unreachable registry reports its reason in `error`), cached
+ *   for a few minutes, `force: true` to bypass that cache.
+ * - `update` → installs a newer dsh and switches the service to it, by spawning
+ *   `update-dsh.ps1` (path from the patch config `updateScript`, default
+ *   `~/.dsh/scripts/update-dsh.ps1`) with the caller's `version` (omitted lets
+ *   the script ask npm for `latest`). It ends in the same restart, so it shares
+ *   the restart lock, the session protection and the watchdog; the browser half
+ *   drives the same progress bar. Read-only until the confirm: the endpoint only
+ *   refuses (wrong shape, `already-current`) or schedules.
  * - `installShortcut` → creates the desktop shortcut that starts dsh web (via
  *   `install-desktop-shortcut.ps1`; the shortcut opens a console window and
  *   waits for a key press — `start-dsh.ps1 -Pause`), first ensuring the
@@ -39,17 +53,10 @@
  * first (`keepInbox` preserves pending queued work) so sessions are left in a
  * resumable state.
  *
- * Idle auto-stop: when no agent session has been running for `idleMinutes`
- * (settings namespace `ui-settings-other`, default 120 = 2 h, editable in
- * 设置 → 插件 → 插件配置), the service requests a graceful shutdown through
- * `ctx.appExit` — the launcher-provided exit request that disposes the app
- * fiber — falling back to `process.exit(0)` when absent. The namespace is
- * registered by hand (`settings.register` + `scope.watch`), NOT through
- * `settings.installSection`, and it is not `applies: live`: re-deriving the
- * idle monitor from a committed change is this plugin's own job.
- *
- * The script path comes from the patch config (`script`), defaulting to
- * `~/.dsh/scripts/restart-dsh.ps1`.
+ * This half owns no settings namespace: the idle auto-stop feature (the
+ * namespace's only consumer) was removed, so there is nothing left to
+ * configure here. The restart script path stays a patch-config key (`script`),
+ * defaulting to `~/.dsh/scripts/restart-dsh.ps1`.
  *
  * Branding: when the `webServer` service is present, this plugin registers an
  * exact `/favicon.svg` route that serves the whale-girl icon (SVG wrapper
@@ -64,27 +71,23 @@ import { statSync, readFileSync, copyFileSync, existsSync, mkdirSync } from 'nod
 import { fileURLToPath } from 'node:url'
 import z from '@deepseek-ai/schemastery'
 
-export const SETTINGS_NAMESPACE = 'ui-settings-other'
-
-/** Idle monitor cadence. */
-export const IDLE_CHECK_MS = 60_000
-
-/** Floor defaults; the composition entry and the settings document layer rise above. */
-export const DEFAULTS = { idleEnabled: true, idleMinutes: 120 }
+/**
+ * Identity label of this plugin in the diagnostics route. It used to be the
+ * settings namespace; the namespace is gone (its only consumer was the idle
+ * auto-stop) and the health route keeps the same field so its contract does
+ * not move.
+ */
+export const PLUGIN_NAMESPACE = 'ui-settings-other'
 
 /**
- * Settings schema for the namespace (defaults are the floor). Exported as
- * `Config` so the Loader validates the entry config at load time. Unknown keys
- * are tolerated (kept, not rejected), so dropping a key here never breaks an
- * existing entry config.
+ * Entry-config schema. Exported as `Config` so the Loader validates the entry
+ * config at load time. Unknown keys are tolerated (kept, not rejected), so
+ * dropping a key here never breaks an existing entry config.
  */
-export const ConfigSchema = z.object({
-  idleEnabled: z.boolean().default(true),
-  idleMinutes: z.number().default(120).min(1),
+export const Config = z.object({
   script: z.string().default(''),
+  updateScript: z.string().default(''),
 })
-
-export const Config = ConfigSchema
 
 /** Resolve the restart-script path: config > default under the dsh home. */
 export function resolveRestartScript(config = {}) {
@@ -93,6 +96,15 @@ export function resolveRestartScript(config = {}) {
     return isAbsolute(configured) ? configured : join(homedir(), '.dsh', configured)
   }
   return join(homedir(), '.dsh', 'scripts', 'restart-dsh.ps1')
+}
+
+/** Resolve the update-script path: config > default under the dsh home. */
+export function resolveUpdateScript(config = {}) {
+  const configured = config.updateScript
+  if (typeof configured === 'string' && configured.length > 0) {
+    return isAbsolute(configured) ? configured : join(homedir(), '.dsh', configured)
+  }
+  return join(homedir(), '.dsh', 'scripts', 'update-dsh.ps1')
 }
 
 /** Absolute path of one bundled brand asset inside this patch. */
@@ -117,6 +129,13 @@ export function ensureIconAsset() {
   copyFileSync(patchAssetPath('DeepSeekHarness-WhaleGirl.ico'), target)
   return target
 }
+
+/** How long a version-check answer is reused, and how long the registry may take. */
+const VERSION_CHECK_TTL_MS = 10 * 60_000
+const VERSION_CHECK_TIMEOUT_MS = 5000
+
+/** Lock window for an update: fetching, patching and booting a new build. */
+const UPDATE_WATCHDOG_MS = 10 * 60_000
 
 /** Absolute path of the deployed desktop-shortcut installer script. */
 export function shortcutScriptPath() {
@@ -167,11 +186,52 @@ export function faviconSvg(pngPath) {
     `</svg>\n`
 }
 
-/** Build the spawn invocation for the restart script (pure, testable). */
+/** Single-quote one value for the PowerShell command line (`'` → `''`). */
+function psQuote(value) {
+  return `'${String(value).replace(/'/g, "''")}'`
+}
+
+/**
+ * Quote one value for the INNER powershell command line. Double quotes: a path
+ * single-quoted inside the Start-Process argument string does not survive
+ * (measured: the child exits with -196608 and runs nothing), the same path in
+ * double quotes runs. A Windows file name cannot contain `"`, so no escaping is
+ * needed here.
+ */
+function cmdArg(value) {
+  const text = String(value)
+  return /[\s"]/.test(text) ? `"${text}"` : text
+}
+
+/**
+ * Build the spawn invocation for the restart script (pure, testable).
+ *
+ * The script is started through `Start-Process`, NOT by handing it to the
+ * powershell we spawn directly. Windows PowerShell 5.1 must not be spawned
+ * `detached`: with `detached: true` (plus `stdio: 'ignore'` and
+ * `windowsHide: true`) it exits 0 immediately and runs none of the script — no
+ * kill, no log, no warning, so the page sat on stage 1 for its whole budget
+ * while the service kept running. Verified by spawn matrix; the CLI path never
+ * showed it because a shell gives the child a console.
+ *
+ * `Start-Process` creates the same genuinely independent process the desktop
+ * shortcut gets (this is also how start-dsh.ps1 launches node), and the wrapper
+ * still forwards the script's exit code, so the endpoint keeps its
+ * spawn-failure / non-zero-exit paths for releasing the restart lock.
+ */
 export function buildRestartSpawn(scriptPath, extraArgs = []) {
+  const inner = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', cmdArg(scriptPath), ...extraArgs.map(cmdArg)].join(' ')
+  // The child is started by ABSOLUTE path (`$PSHOME\powershell.exe`): a bare
+  // `-FilePath 'powershell'` is resolved to something else entirely and the
+  // inner command silently never runs (measured: exit 0, no effect, no error).
   return {
     file: 'powershell',
-    args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, ...extraArgs],
+    args: [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+      `$exe = Join-Path $PSHOME 'powershell.exe'; ` +
+      `$p = Start-Process -FilePath $exe -ArgumentList ${psQuote(inner)} -WindowStyle Hidden -PassThru; ` +
+      `$p.WaitForExit(); exit $p.ExitCode`,
+    ],
   }
 }
 
@@ -334,126 +394,82 @@ export function serviceInfo() {
   }
 }
 
-/**
- * Pure idle decision. `busy` = any session is running right now.
- * @returns {{action:'busy'}} when busy (resets the idle clock),
- *          {{action:'stop'}} when idle longer than the threshold,
- *          {{action:'wait', remainingMs}} otherwise,
- *          {{action:'disabled'}} when idleMinutes is not positive.
- */
-export function idleDecision({ busy, lastBusyAt, now, idleMinutes }) {
-  if (busy) return { action: 'busy' }
-  const idleMs = idleMinutes * 60_000
-  if (!(idleMs > 0)) return { action: 'disabled' }
-  const elapsed = now - lastBusyAt
-  if (elapsed >= idleMs) return { action: 'stop', idleMs }
-  return { action: 'wait', remainingMs: idleMs - elapsed }
-}
-
-/**
- * Idle monitor: every IDLE_CHECK_MS asks `busy()`; busy resets the clock,
- * otherwise `onStop` fires once the idle threshold (from `idleMinutes()`)
- * is crossed. Clock and timers are injectable for tests.
- */
-export function createIdleMonitor({ busy, idleMinutes, onStop, now = Date.now, setInterval: setIntervalFn = setInterval, clearInterval: clearIntervalFn = clearInterval }) {
-  let lastBusyAt = now()
-  let stopped = false
-  const check = () => {
-    if (stopped) return null
-    const decision = idleDecision({ busy: busy(), lastBusyAt, now: now(), idleMinutes: idleMinutes() })
-    if (decision.action === 'busy') lastBusyAt = now()
-    else if (decision.action === 'stop') {
-      stopped = true
-      onStop(decision)
-    }
-    return decision
-  }
-  const timer = setIntervalFn(check, IDLE_CHECK_MS)
+/** Parse `major.minor.patch[-prerelease]`; null when the text is not semver. */
+function parseVersion(text) {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(String(text ?? '').trim())
+  if (match === null) return null
   return {
-    check,
-    lastBusyAt: () => lastBusyAt,
-    stop: () => {
-      stopped = true
-      clearIntervalFn(timer)
-    },
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    pre: match[4] === undefined ? null : match[4].split('.'),
   }
 }
 
-/** Only the settings-owned fields participate in the settings namespace. */
-function pickSettings(config) {
-  const out = {}
-  if (config.idleEnabled !== undefined) out.idleEnabled = config.idleEnabled
-  if (config.idleMinutes !== undefined) out.idleMinutes = config.idleMinutes
-  return out
+/**
+ * Semver ordering (spec §11), prerelease-aware: `0.1.5-rc.3` > `0.1.5-rc.2`,
+ * and a release beats its own prereleases (`0.1.5` > `0.1.5-rc.3`). Returns
+ * null when either side is unparseable, so callers never treat "cannot tell"
+ * as "newer".
+ */
+export function compareVersions(left, right) {
+  const a = parseVersion(left)
+  const b = parseVersion(right)
+  if (a === null || b === null) return null
+  for (const key of ['major', 'minor', 'patch']) {
+    if (a[key] !== b[key]) return a[key] < b[key] ? -1 : 1
+  }
+  if (a.pre === null && b.pre === null) return 0
+  if (a.pre === null) return 1
+  if (b.pre === null) return -1
+  for (let index = 0; index < Math.max(a.pre.length, b.pre.length); index++) {
+    const x = a.pre[index]
+    const y = b.pre[index]
+    if (x === undefined) return -1
+    if (y === undefined) return 1
+    const xNumeric = /^\d+$/.test(x)
+    const yNumeric = /^\d+$/.test(y)
+    if (xNumeric && yNumeric) {
+      if (Number(x) !== Number(y)) return Number(x) < Number(y) ? -1 : 1
+      continue
+    }
+    if (xNumeric !== yNumeric) return xNumeric ? -1 : 1
+    if (x !== y) return x < y ? -1 : 1
+  }
+  return 0
+}
+
+/** Whether `candidate` is strictly newer than `installed`. */
+export function isNewerVersion(installed, candidate) {
+  return compareVersions(candidate, installed) === 1
 }
 
 /**
- * Cordis `FiberState` members that mean "this fiber is going down". A const
- * enum has no runtime object, so the values are mirrored here — the same
- * mirror dsh's own settings provider keeps for its `isUnloading` guard.
+ * The registry the version check asks. Only the top-level `registry=` line is
+ * ever extracted from the npmrc — that file also carries auth tokens for other
+ * scopes, so its text must never reach a log or a response. npm itself would
+ * also consider a project npmrc and the global one; a check running inside the
+ * service cannot know those, hence the user file then the public registry.
  */
-const FIBER_DISPOSED = 4
-const FIBER_UNLOADING = 5
-
-/**
- * Whether a context's own fiber is unloading — as opposed to merely losing a
- * service it had injected. The two cases reach the same disposer and need
- * opposite reactions, so they must not be conflated.
- */
-function isUnloading(ctx) {
-  const state = ctx?.fiber?.state
-  return state === FIBER_UNLOADING || state === FIBER_DISPOSED
+export function parseRegistry(npmrcText) {
+  for (const line of String(npmrcText ?? '').split(/\r?\n/)) {
+    const match = /^\s*registry\s*=\s*(\S+)\s*$/.exec(line)
+    if (match !== null) return match[1].replace(/\/+$/, '')
+  }
+  return 'https://registry.npmjs.org'
 }
 
-/**
- * Register the settings namespace and hand the write scope to `onScope`.
- *
- * This is a hand-rolled `settings.installSection` (the namespace is registered
- * with `settings.register` + `scope.watch`, NOT with `applies: live`), and it
- * keeps that helper's `isUnloading` guard: the disposer below runs both when
- * the settings provider detaches (the plugin keeps running, so `entrySource` —
- * the entry config resolved exactly like `apply` resolves it — becomes the
- * source again) and when this plugin itself unloads (the entry value is
- * irrelevant and rebuilding resources would create a timer on a dying
- * context). `hooks.isUnloading()` reports WHICH of the two it is; it inspects
- * the plugin's own fiber, never the settings child fiber, because the child
- * unloads in both cases.
- *
- * The unloading branch closes the resource path itself, before it could notify
- * any change: Cordis releases a fiber's effects in reverse registration order
- * and this settings child fiber is registered after the monitor effect in
- * `apply`, so this disposer really does run first during an unload.
- */
-function registerConfigSection(ctx, ns, schema, entry, hooks, onScope) {
-  ctx.inject(['settings'], (sctx) => {
-    const scope = sctx.settings.register(ns, schema, { base: entry })
-    hooks.setSource(() => scope.get())
-    sctx.effect(() => () => {
-      if (hooks.isUnloading()) {
-        hooks.onClose()
-        return
-      }
-      hooks.setSource(hooks.entrySource)
-      hooks.onChange()
-    })
-    hooks.onChange()
-    scope.watch(() => {
-      if (hooks.isUnloading()) return
-      hooks.onChange()
-    })
-    onScope(scope)
-  })
+/** Registry from `~/.npmrc` (see parseRegistry), never throwing. */
+export function resolveRegistry(home = homedir()) {
+  try {
+    return parseRegistry(readFileSync(join(home, '.npmrc'), 'utf8'))
+  } catch {
+    return 'https://registry.npmjs.org'
+  }
 }
 
-/** RPC failure envelope for the config endpoints. */
-function settingsError(code, message, details = {}) {
-  return { ok: false, error: { code, message, details } }
-}
-
-/** Cordis plugin entry: register the `/app` RPC channel + the idle monitor. */
+/** Cordis plugin entry: register the `/app` RPC route. */
 export function apply(ctx, config = {}) {
-  const settingsEntry = pickSettings(config)
-
   // State is per-instance: module-level mutable state would leak across HMR
   // reloads (a stale `restarting` flag would permanently block restarts).
   //
@@ -465,23 +481,16 @@ export function apply(ctx, config = {}) {
   // the first restart. Waiting on it here makes the registration unconditional.
   ctx.inject(['webServer', 'agents'], (ctx) => {
     const logger = ctx.logger
-    // The plugin's own context: its fiber state, not the settings child's,
-    // tells "the settings provider went away" from "this plugin is unloading".
-    const ownerCtx = ctx
-    /** Entry-config source, resolved with the schema defaults as the floor. */
-    const entrySource = () => ({ ...DEFAULTS, ...settingsEntry })
-    let source = entrySource
-    let configScope = null
-    let monitorApi = null
     let restarting = false
     let restartWatchdog = null
-    let closed = false
+    /** Last version-check answer, so repeated page polls do not hammer the registry. */
+    let versionCache = null
 
     // Diagnostics: this host half's state, directly observable on loopback at
-    // /ui-settings-other/health. Without it, "the /app channel never
-    // registered" and "the status endpoint threw" are indistinguishable from
-    // the page — both render 运行状态获取失败. Read-only, no-store, exact route.
-    const diagnostics = { channel: false, settings: false, branding: false, warnings: [] }
+    // /ui-settings-other/health. Without it, "the /app route never registered"
+    // and "the status endpoint threw" are indistinguishable from the page —
+    // both render 运行状态获取失败. Read-only, no-store, exact route.
+    const diagnostics = { channel: false, branding: false, warnings: [] }
     const webServer = ctx.get('webServer')
     try {
       if (webServer !== undefined) {
@@ -490,7 +499,7 @@ export function apply(ctx, config = {}) {
           path: '/ui-settings-other/health',
           handler: (req, res) => {
             res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
-            res.end(JSON.stringify({ ok: true, namespace: SETTINGS_NAMESPACE, ...diagnostics }))
+            res.end(JSON.stringify({ ok: true, namespace: PLUGIN_NAMESPACE, ...diagnostics }))
           },
         }), 'ui-settings-other: health route')
       }
@@ -507,75 +516,50 @@ export function apply(ctx, config = {}) {
       },
     })
 
-    /** Graceful shutdown request through the launcher's exit hook. */
-    const stopService = () => {
-      const current = source()
-      logger.info(`[ui-settings-other] idle auto-stop: no running session for ${current.idleMinutes} minutes; stopping dsh web`)
+    /**
+     * Compare the running dsh against the `latest` dist-tag. Read-only and
+     * fail-soft: an unreachable registry yields `latest: null` plus the reason
+     * in `error` (never an ok:false envelope — "no update information" is not
+     * a failed request). Cached for a few minutes; `force` skips the cache.
+     */
+    const versionCheck = async (force) => {
+      const now = Date.now()
+      if (!force && versionCache !== null && now - versionCache.at < VERSION_CHECK_TTL_MS) return versionCache.value
+      const current = dshVersion()
+      const registry = resolveRegistry()
+      let latest = null
+      let error = null
       try {
-        const exit = ctx.get('appExit')
-        if (typeof exit === 'function') {
-          exit(0)
-          return
+        const response = await fetch(`${registry}/@deepseek-ai%2Fdsh`, {
+          headers: { accept: 'application/json' },
+          signal: AbortSignal.timeout(VERSION_CHECK_TIMEOUT_MS),
+        })
+        if (!response.ok) {
+          error = `registry answered HTTP ${response.status}`
+        } else {
+          const body = await response.json()
+          const tag = body?.['dist-tags']?.latest
+          if (typeof tag !== 'string' || tag.length === 0) error = 'registry has no latest dist-tag'
+          else latest = tag
         }
-      } catch {
-        /* fall through to a hard exit */
+      } catch (cause) {
+        error = String(cause?.message ?? cause)
       }
-      process.exit(0)
-    }
-
-    /** Stop the idle monitor, if one is live (idempotent). */
-    const stopMonitor = () => {
-      if (monitorApi !== null) {
-        monitorApi.stop()
-        monitorApi = null
+      const value = {
+        current,
+        latest,
+        // `latest` only: the alpha channel runs ahead of it and would otherwise
+        // read as an available update on a release-candidate install.
+        hasUpdate: latest !== null && current !== null && isNewerVersion(current, latest),
+        registry,
+        error,
       }
+      versionCache = { at: now, value }
+      return value
     }
 
-    /**
-     * Single assembly path for the idle monitor: make it match the current
-     * source (settings > entry) instead of unconditionally rebuilding it.
-     * `idleMinutes` is read through `source()` on every tick, so only the
-     * enabled/disabled decision needs assembling at all; calling this twice for
-     * the same configuration — the settings section attaching after the entry
-     * fallback below, or a no-op settings write — must not build a second
-     * monitor and stop the first.
-     */
-    const syncMonitor = () => {
-      if (closed) return
-      const current = source()
-      const wanted = current.idleEnabled === true && current.idleMinutes > 0
-      if (!wanted) {
-        stopMonitor()
-        return
-      }
-      if (monitorApi !== null) return
-      monitorApi = createIdleMonitor({
-        busy: () => runningSessionIds(ctx.agents).length > 0,
-        idleMinutes: () => source().idleMinutes,
-        onStop: stopService,
-      })
-    }
-
-    /**
-     * Close the rebuild path and stop whatever timer is live. BOTH disposers
-     * call it, because Cordis releases a fiber's effects in reverse
-     * registration order: the monitor effect below is registered before the
-     * settings child fiber (`ctx.inject`), so during an unload the settings
-     * section's disposer runs FIRST — while a flag owned by this effect is
-     * still false. The section therefore closes the path itself (see
-     * `registerConfigSection`) before it can notify a change, and this effect
-     * closes it again as the outer safety net. In either order, no monitor can
-     * be created during the unload and none survives it.
-     */
-    const closeMonitor = () => {
-      closed = true
-      stopMonitor()
-    }
-
-    ctx.effect(() => () => closeMonitor(), 'ui-settings-other: idle monitor')
-
-    // The restart watchdog is a plugin-owned timer too: unloading must cancel
-    // a pending 90 s release instead of letting it fire on a disposed fiber
+    // The restart watchdog is a plugin-owned timer: unloading must cancel a
+    // pending 90 s release instead of letting it fire on a disposed fiber
     // (and hold the process's event loop open).
     ctx.effect(() => () => {
       if (restartWatchdog !== null) {
@@ -584,42 +568,11 @@ export function apply(ctx, config = {}) {
       }
     }, 'ui-settings-other: restart watchdog')
 
-    // Everything between here and the `/app` registration below is optional
-    // setup, and the RPC channel is the section's only lifeline: a throw in
-    // the settings wiring or in the favicon branding used to skip the
-    // registration entirely, which leaves the whole page showing
-    // "运行状态获取失败" with every button dead. Each step is therefore
-    // isolated and reports its own failure instead of taking the channel down.
-    try {
-      registerConfigSection(ctx, SETTINGS_NAMESPACE, ConfigSchema, settingsEntry, {
-        setSource: (current) => { source = current },
-        entrySource,
-        onChange: syncMonitor,
-        onClose: closeMonitor,
-        isUnloading: () => isUnloading(ownerCtx),
-      }, (scope) => { configScope = scope; diagnostics.settings = true })
-    } catch (error) {
-      const message = `settings wiring failed (${String(error?.message ?? error)}); the page runs on the entry-config defaults`
-      diagnostics.warnings.push(message)
-      logger.warn(`[ui-settings-other] ${message}`)
-    }
-
-    // Entry-config fallback: the section above assembles the monitor as soon
-    // as it attaches (its `ctx.inject` callback runs on a later microtask), so
-    // this only covers a boot without a settings service — and because
-    // `syncMonitor` is idempotent it stays a single assembly either way.
-    try {
-      syncMonitor()
-    } catch (error) {
-      const message = `idle monitor not armed: ${String(error?.message ?? error)}`
-      diagnostics.warnings.push(message)
-      logger.warn(`[ui-settings-other] ${message}`)
-    }
-
-    // Branding: override the shipped favicon with the whale-girl icon. The
-    // exact route wins over the SPA dist fallback; the icon is bundled in
-    // this patch and served as an SVG wrapper around the 128px PNG. A missing
-    // or unreadable asset only skips the branding.
+    // Branding is optional setup and the `/app` route below is this section's
+    // only lifeline: a throw here used to skip the registration entirely,
+    // which leaves the whole page showing "运行状态获取失败" with every button
+    // dead. It is therefore isolated and reports its own failure instead of
+    // taking the route down.
     if (webServer !== undefined) {
       try {
         const svg = faviconSvg(patchAssetPath('favicon-128.png'))
@@ -642,47 +595,12 @@ export function apply(ctx, config = {}) {
       }
     }
     const handleEndpoint = async (endpoint, payload) => {
-      if (endpoint === 'getSettings') {
-        return { ok: true, value: source() }
-      }
-      if (endpoint === 'setSettings') {
-        if (configScope === null) {
-          return settingsError('settings-unavailable', 'settings service is not ready yet', { namespace: SETTINGS_NAMESPACE })
-        }
-        const fields = payload?.args?.fields
-        if (typeof fields !== 'object' || fields === null || Array.isArray(fields)) {
-          return settingsError('bad-request', 'fields must be a plain object', {
-            namespace: SETTINGS_NAMESPACE,
-            received: Array.isArray(fields) ? 'array' : typeof fields,
-          })
-        }
-        try {
-          await configScope.update(fields)
-          return { ok: true, value: source() }
-        } catch (error) {
-          return settingsError('settings-rejected', String(error?.message ?? error), { namespace: SETTINGS_NAMESPACE })
-        }
-      }
-      if (endpoint === 'resetSettings') {
-        if (configScope === null) {
-          return settingsError('settings-unavailable', 'settings service is not ready yet', { namespace: SETTINGS_NAMESPACE })
-        }
-        try {
-          await configScope.replace({})
-          return { ok: true, value: source() }
-        } catch (error) {
-          return settingsError('settings-rejected', String(error?.message ?? error), { namespace: SETTINGS_NAMESPACE })
-        }
-      }
       if (endpoint === 'status') {
         const sessions = runningSessionIds(ctx.agents)
-        const current = source()
-        const idle = {
-          enabled: current.idleEnabled === true && current.idleMinutes > 0,
-          idleMinutes: current.idleMinutes,
-        }
-        if (idle.enabled && monitorApi !== null) idle.lastBusyAt = monitorApi.lastBusyAt()
-        return { ok: true, value: { running: sessions.length, sessions, service: serviceInfo(), idle } }
+        return { ok: true, value: { running: sessions.length, sessions, service: serviceInfo() } }
+      }
+      if (endpoint === 'versionCheck') {
+        return { ok: true, value: await versionCheck(payload?.args?.force === true) }
       }
       if (endpoint === 'installShortcut') {
         // Create the desktop shortcut (console window + whale-girl icon). The
@@ -697,14 +615,43 @@ export function apply(ctx, config = {}) {
         }
         return { ok: true, value: { created: result.created, icon: result.icon, output: result.output } }
       }
-      if (endpoint !== 'restart') {
+      if (endpoint !== 'restart' && endpoint !== 'update') {
         return {
           ok: false,
           error: { code: 'bad-request', message: `unknown endpoint: ${endpoint}`, details: { channel: '/app', endpoint: String(endpoint) } },
         }
       }
+
+      // `update` installs a new dsh and ends in the same restart, so it shares
+      // this whole tail: the lock, the session protection, the script spawn and
+      // the watchdog. Only the script, its extra arguments and the payload's
+      // `version` differ.
+      const isUpdate = endpoint === 'update'
+      let version = null
+      if (isUpdate) {
+        const requested = payload?.args?.version
+        if (requested !== undefined && requested !== null) {
+          // Pinned by the caller (what the page read from the registry) so the
+          // run is deterministic; omitted lets the script ask npm for `latest`.
+          if (typeof requested !== 'string' || !/^\d+\.\d+\.\d+/.test(requested)) {
+            return {
+              ok: false,
+              error: { code: 'bad-request', message: `not a version: ${JSON.stringify(requested)}`, details: { version: String(requested) } },
+            }
+          }
+          version = requested
+        }
+        const current = dshVersion()
+        if (version !== null && current !== null && version === current) {
+          return {
+            ok: false,
+            error: { code: 'already-current', message: `already running ${version}`, details: { current } },
+          }
+        }
+      }
+      const scriptPath = isUpdate ? resolveUpdateScript(config) : resolveRestartScript(config)
       if (restarting) {
-        return { ok: true, value: { scheduled: true, already: true, script: resolveRestartScript(config) } }
+        return { ok: true, value: { scheduled: true, already: true, script: scriptPath } }
       }
 
       const force = payload?.args?.force === true
@@ -725,7 +672,6 @@ export function apply(ctx, config = {}) {
         }
       }
 
-      const scriptPath = resolveRestartScript(config)
       try {
         statSync(scriptPath)
       } catch {
@@ -734,16 +680,23 @@ export function apply(ctx, config = {}) {
           ok: false,
           error: {
             code: 'internal',
-            message: `restart script not found: ${scriptPath} (run scripts/deploy.ps1 to install it)`,
+            message: `${isUpdate ? 'update' : 'restart'} script not found: ${scriptPath} (run scripts/deploy.ps1 to install it)`,
             details: { script: scriptPath },
           },
         }
       }
 
-      const invocation = buildRestartSpawn(scriptPath, ['-OpenBrowser'])
+      const invocation = buildRestartSpawn(
+        scriptPath,
+        version === null ? ['-OpenBrowser'] : ['-Version', version, '-OpenBrowser'],
+      )
       try {
+        // NOT `detached: true`: PowerShell 5.1 spawned detached exits 0 without
+        // running the script at all (see buildRestartSpawn). This outer
+        // powershell only calls Start-Process, which is what makes the restart
+        // script an independent process — and `unref()` keeps this process from
+        // waiting on it.
         const child = spawn(invocation.file, invocation.args, {
-          detached: true,
           stdio: 'ignore',
           cwd: process.cwd(),
           env: process.env,
@@ -763,15 +716,18 @@ export function apply(ctx, config = {}) {
             restarting = false
           }
         })
-        // Watchdog: if the script neither restarts the service nor exits
-        // non-zero within 90s, release the lock anyway. It is owned by the
-        // plugin lifecycle (the effect registered in `apply`), so an unload
-        // cancels it instead of leaving it to fire on a disposed fiber.
+        // Watchdog: if the script neither swaps the service nor exits non-zero
+        // within its window, release the lock anyway. An update legitimately
+        // runs for minutes (fetch, patch the new build, boot it), so it gets a
+        // much longer one — 90 s there would let a second update in while the
+        // first is still mid-flight. It is owned by the plugin lifecycle (the
+        // effect registered in `apply`), so an unload cancels it instead of
+        // leaving it to fire on a disposed fiber.
         if (restartWatchdog !== null) clearTimeout(restartWatchdog)
         restartWatchdog = setTimeout(() => {
           restartWatchdog = null
           restarting = false
-        }, 90_000)
+        }, isUpdate ? UPDATE_WATCHDOG_MS : 90_000)
       } catch (error) {
         restarting = false
         return {
@@ -779,7 +735,7 @@ export function apply(ctx, config = {}) {
           error: { code: 'internal', message: String(error), details: { script: scriptPath } },
         }
       }
-      return { ok: true, value: { scheduled: true, script: scriptPath } }
+      return { ok: true, value: isUpdate ? { scheduled: true, script: scriptPath, version } : { scheduled: true, script: scriptPath } }
     }
 
     // The page reaches this half over one prefix route on the web carrier.

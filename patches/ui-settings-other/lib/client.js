@@ -1,38 +1,44 @@
 /**
  * Browser half of the ui-settings-other patch: an "Other" settings section
- * with a restart-service button and a live runtime-status block, plus a
- * configuration card inside 设置 → 插件 → 插件配置 for the idle auto-stop.
+ * with a restart-service button and a live runtime-status block.
  *
  * Hand-written in the client-bundle contract (no build step): the shell's
  * module loader receives this file through `window.__ModuleLoader__.load` and
  * answers every `require()` from the frozen module table. Only platform seed
- * words are used: `react`, `react/jsx-runtime`, and the icon set from
- * `@deepseek-ai/dsh-client-ui-primitives`. Everything else (slots, locale,
- * connection, settingsScope) arrives as services on the `apply(ctx)` context.
+ * words are used: `react`, `react/jsx-runtime`, and `Modal` from
+ * `@deepseek-ai/dsh-client-ui-primitives`. Everything else (slots, locale)
+ * arrives as services on the `apply(ctx)` context.
  *
  * The section registers into the `settings.section` slot (same seat as the
  * shipped General / Models / Plugins / Agent presets pages) under id `other`,
- * ordered last. The restart button calls the host half through the dedicated
- * `/app` RPC channel (`ctx.connection.rpc.call('/app', 'restart', …)`); the
- * host respawns the dsh process and exits the current one, so the page will
- * briefly disconnect — the copy tells the user to refresh afterwards.
+ * ordered last. Every host call goes through the `/app` prefix route as a
+ * fenced JSON `fetch` (the host half registers it — see `createRpcRoute`
+ * there); `ctx.connection.rpc.call` cannot work in this dsh version.
+ *
+ * The restart drops the page's own connection (the host process is the one
+ * being replaced), so the flow is built around that:
+ *   - every path that really disconnects the service asks for confirmation
+ *     first (plain restart, 强制重启, and 等待空闲后重启 — the latter two used
+ *     to fire with no prompt);
+ *   - after the request is accepted, a three-stage progress bar reports what
+ *     the page can still observe on its own origin (请求 → 旧服务停止 →
+ *     新服务就绪), degrading to an explicit "unknown" when the replacement is
+ *     not reachable from here (the script may have moved to another port).
  *
  * Deliberately absent: a "reload user plugins" button (rewriting the patch
  * layer's comments never re-mounts anything — `Entry.update` deep-compares
  * options and returns early on an unchanged patch list) and a "stop service"
  * button (stopping is a CLI/desktop action via `stop-dsh.ps1`; the single
  * destructive control here is the restart button). Do not re-add either one
- * without a mechanism that actually works.
+ * without a mechanism that actually works. The idle auto-stop configuration
+ * card is gone with the feature itself — this patch owns no settings anymore.
  *
  * The status block polls `/app/status` every 10 s and shows the live process
- * snapshot (pid, ports, uptime, memory, versions, running sessions, idle
- * auto-stop countdown) with a manual refresh button.
- *
- * The configuration card binds the Host-registered `/app` RPC channel
- * (getConfig/setConfig/resetConfig) and edits the idle auto-stop toggle +
- * idle-minutes threshold with staged edits (the Host applies changes live
- * and rebuilds its monitor). It renders nothing while the channel errors,
- * mirroring the shipped cards.
+ * snapshot (pid, ports, uptime, memory, versions, running sessions) with a
+ * manual refresh button. That cadence is only real while the page is visible —
+ * a background tab gets its timers throttled, so the block also re-reads when
+ * the tab becomes visible again and whenever the restart flow reports the
+ * replacement is up (see StatusBlock).
  */
 window.__ModuleLoader__.load({ id: '@local/dsh-client-ui-settings-other', factory: (require) => {
 var module = { exports: {} }; var exports = module.exports;
@@ -40,7 +46,7 @@ var module = { exports: {} }; var exports = module.exports;
 const React = require('react');
 const { useEffect, useState } = React;
 const { jsx, jsxs } = require('react/jsx-runtime');
-const { IconChevronDownOutline14, Modal } = require('@deepseek-ai/dsh-client-ui-primitives');
+const { Modal } = require('@deepseek-ai/dsh-client-ui-primitives');
 
 const PLUGIN_ID = '@local/dsh-client-ui-settings-other';
 
@@ -69,40 +75,15 @@ const CSS = [
   '.so-info-row{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px;line-height:20px}',
   '.so-info-label{color:var(--dsw-alias-label-tertiary);flex:none}',
   '.so-info-value{color:var(--dsw-alias-label-primary);font-family:ui-monospace,Consolas,monospace;text-align:right;word-break:break-all}',
-  /* configuration card (设置 → 插件 → 插件配置) */
-  '.soc-card{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:12px;list-style:none;transition:border-color .16s,background .16s}',
-  '.soc-card:hover{border-color:var(--dsw-alias-label-dimmed)}',
-  '.soc-card-open{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}',
-  '.soc-header{appearance:none;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;background:0 0;border:0;border-radius:12px;align-items:center;gap:12px;padding:14px 16px;display:flex}',
-  '.soc-header:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}',
-  '.soc-head-text{flex-direction:column;flex:1;gap:4px;min-width:0;display:flex}',
-  '.soc-name{color:var(--dsw-alias-label-primary);font-size:15px;font-weight:600;line-height:1.4}',
-  '.soc-description{color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1.5}',
-  '.soc-chevron{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .16s}',
-  '.soc-chevron-open{transform:rotate(180deg)}',
-  '.soc-body{border-top:1px solid var(--dsw-alias-border-l2);margin:0 16px;padding-bottom:8px}',
-  '.soc-pending{white-space:nowrap;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;flex:none;padding:1px 8px;font-size:11px;font-weight:500;line-height:17px}',
-  '.soc-field{flex-direction:column;gap:6px;padding:12px 0;display:flex}',
-  '.soc-field+.soc-field{border-top:1px solid var(--dsw-alias-border-l2)}',
-  '.soc-field-head{align-items:center;gap:8px;display:flex}',
-  '.soc-label{min-width:0;color:var(--dsw-alias-label-primary);flex:1;font-size:13px;font-weight:500;line-height:1.5}',
-  '.soc-overridden{white-space:nowrap;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:1px 8px;font-size:11px;font-weight:500;line-height:17px}',
-  '.soc-reset{font:inherit;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;padding:0;font-size:12px;line-height:1.5}',
-  '.soc-reset:hover:not(:disabled){color:var(--dsw-alias-label-primary)}',
-  '.soc-reset:disabled{cursor:default}',
-  '.soc-input{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}',
-  '.soc-input:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:none}',
-  '.soc-input:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}',
-  '.soc-invalid{border-color:var(--dsw-alias-state-error-primary)}',
-  '.soc-invalid-text{color:var(--dsw-alias-state-error-primary);margin:0;font-size:12px;line-height:1.5}',
-  '.soc-hint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:1.5}',
-  '.soc-toggle{accent-color:var(--dsw-alias-brand-primary);width:16px;height:16px}',
-  '.soc-footer{border-top:1px solid var(--dsw-alias-border-l2);justify-content:flex-end;align-items:center;gap:8px;padding:12px 0 4px;display:flex}',
-  '.soc-failed{min-width:0;color:var(--dsw-alias-state-error-primary);flex:1;margin:0;font-size:12px;line-height:1.5}',
-  '.soc-discard,.soc-save{appearance:none;font:inherit;cursor:pointer;border:1px solid transparent;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5}',
-  '.soc-discard{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);background:0 0}',
-  '.soc-save{background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-foreground)}',
-  '.soc-save:disabled,.soc-discard:disabled{opacity:.5;cursor:default}',
+  /* restart progress bar */
+  '.so-progress{border-top:1px solid var(--dsw-alias-border-l2);margin-top:2px;padding-top:12px;display:flex;flex-direction:column;gap:8px}',
+  '.so-progress-track{border:1px solid var(--dsw-alias-border-l2);border-radius:999px;background:var(--dsw-alias-bg-layer-1);height:6px;overflow:hidden}',
+  '.so-progress-fill{background:var(--dsw-alias-brand-primary);height:100%;transition:width .3s ease}',
+  '.so-progress-fill[data-state="unknown"]{background:var(--dsw-alias-state-error-primary)}',
+  '.so-progress-steps{display:flex;flex-wrap:wrap;gap:12px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}',
+  '.so-progress-step[data-stage-state="done"]{color:var(--dsw-alias-state-success-primary)}',
+  '.so-progress-step[data-stage-state="active"]{color:var(--dsw-alias-label-primary)}',
+  '.so-progress-step[data-stage-state="unknown"]{color:var(--dsw-alias-state-error-primary)}',
 ].join('\n');
 (function () {
   if (typeof document === 'undefined') return
@@ -121,17 +102,42 @@ const zh = {
   serviceTitle: '服务',
   serviceDesc: '重启 dsh 服务进程。当前连接会短暂断开,重启完成后刷新页面即可继续使用。',
   restart: '重启服务',
-  confirmPrompt: '确定要重启服务吗?当前会话将被中断。',
+  confirmPromptRestart: '确定要重启服务吗?当前服务进程会被停止并重新拉起,连接会短暂断开。',
+  confirmPromptForce: '有 {n} 个会话正在运行:强制重启会先取消它们(队列保留),随后停止服务进程。确定继续吗?',
+  confirmPromptAuto: '运行中的会话已全部结束,现在重启服务吗?重启期间连接会短暂断开。',
   confirm: '确认重启',
   cancel: '取消',
   restarting: '正在重启…',
-  scheduled: '已请求重启,服务即将断开;稍后会自动打开新地址(端口可能变化),也可直接刷新页面。',
   error: '重启请求失败,请重试。',
   retry: '重试',
   busy: '有 {n} 个会话正在运行,重启会中断它们。',
   busyActionWait: '等待空闲后重启',
   busyActionForce: '强制重启',
   waiting: '等待会话结束…(剩余 {n})',
+  progressTitle: '重启进度',
+  progressRunning: '重启中…',
+  progressReadyDone: '服务已就绪',
+  stageRequest: '已请求重启',
+  stageStop: '旧服务已停止',
+  stageReady: '新服务已就绪',
+  checkAgain: '重试检测',
+  readyCopy: '新服务已就绪:新地址会自动打开(端口可能变化);若端口没变,直接刷新本页即可继续使用。',
+  readyUnknown: '约 {n} 秒内未在本地址检测到服务恢复应答 —— 端口很可能已变化:重启脚本会自动打开新地址,也可刷新本页或查看日志目录。',
+  versionTitle: 'dsh 版本',
+  versionCurrent: '当前版本',
+  versionLatest: '最新版本(latest)',
+  versionCheck: '检查更新',
+  versionChecking: '检查中…',
+  versionUpToDate: '已是最新',
+  versionAvailable: '有新版本可用:{v}',
+  versionUnknown: '—',
+  versionFailed: '检查失败,请稍后重试',
+  versionError: '检查失败:{reason}',
+  update: '更新并重启',
+  confirmPromptUpdate: '将安装 dsh {v} 并重启服务:期间会下载新版本、替换当前进程,连接会短暂断开。确定继续吗?',
+  updateError: '更新请求失败,请重试。',
+  progressTitleUpdate: '更新进度',
+  stageRequestUpdate: '已请求更新',
   statusTitle: '运行状态',
   refresh: '刷新',
   loading: '获取中…',
@@ -143,9 +149,6 @@ const zh = {
   node: 'Node 版本',
   dshVersion: 'dsh 版本',
   running: '运行中会话',
-  idle: '空闲自动停止',
-  idleDisabled: '已禁用',
-  idleEnabledWith: '已启用 · 剩余 {n} 分钟自动停止',
   unitDay: '天',
   unitHour: '小时',
   unitMin: '分',
@@ -165,17 +168,42 @@ const en = {
   serviceTitle: 'Service',
   serviceDesc: 'Restart the dsh service process. The current connection drops briefly; refresh the page after the restart completes.',
   restart: 'Restart service',
-  confirmPrompt: 'Restart the service? The current session will be interrupted.',
+  confirmPromptRestart: 'Restart the service? The current process is stopped and started again, so the connection drops briefly.',
+  confirmPromptForce: '{n} session(s) are running: a force restart cancels them first (queued work is kept), then stops the service. Continue?',
+  confirmPromptAuto: 'No session is running any more. Restart the service now? The connection drops briefly.',
   confirm: 'Restart',
   cancel: 'Cancel',
   restarting: 'Restarting…',
-  scheduled: 'Restart requested. The service is disconnecting; the new address opens shortly (the port may change) — or just refresh the page.',
   error: 'The restart request failed. Please try again.',
   retry: 'Retry',
   busy: '{n} session(s) are running; restarting will interrupt them.',
   busyActionWait: 'Restart when idle',
   busyActionForce: 'Force restart',
   waiting: 'Waiting for sessions… ({n} remaining)',
+  progressTitle: 'Restart progress',
+  progressRunning: 'Restarting…',
+  progressReadyDone: 'Service is ready',
+  stageRequest: 'Restart requested',
+  stageStop: 'Old service stopped',
+  stageReady: 'New service ready',
+  checkAgain: 'Check again',
+  readyCopy: 'The new service is ready: its address opens automatically (the port may change); if the port stayed the same, just refresh this page.',
+  readyUnknown: 'No answer from this address within ~{n}s — the port most likely changed: the restart script opens the new address itself; you can also refresh this page or check the log directory.',
+  versionTitle: 'dsh version',
+  versionCurrent: 'Current',
+  versionLatest: 'Latest (dist-tag)',
+  versionCheck: 'Check for updates',
+  versionChecking: 'Checking…',
+  versionUpToDate: 'Up to date',
+  versionAvailable: 'Update available: {v}',
+  versionUnknown: '—',
+  versionFailed: 'Check failed, try again later',
+  versionError: 'Check failed: {reason}',
+  update: 'Update and restart',
+  confirmPromptUpdate: 'dsh {v} will be installed and the service restarted: the new version is downloaded, this process is replaced, and the connection drops briefly. Continue?',
+  updateError: 'The update request failed. Please try again.',
+  progressTitleUpdate: 'Update progress',
+  stageRequestUpdate: 'Update requested',
   statusTitle: 'Runtime',
   refresh: 'Refresh',
   loading: 'Loading…',
@@ -187,9 +215,6 @@ const en = {
   node: 'Node',
   dshVersion: 'dsh version',
   running: 'Running sessions',
-  idle: 'Idle auto-stop',
-  idleDisabled: 'Disabled',
-  idleEnabledWith: 'Enabled · stops in {n} min',
   unitDay: 'd',
   unitHour: 'h',
   unitMin: 'm',
@@ -203,51 +228,17 @@ const en = {
   shortcutHint: 'Creates a dsh-web desktop shortcut (whale-girl icon) that starts the service on double-click (the window shows the port and waits for a key).',
 };
 
-/** Simplified Chinese dictionary for the 插件配置 card. */
-const zhCard = {
-  title: '服务(空闲自动停止)',
-  description: 'dsh web 持续没有运行中的会话超过设定时长后自动停止服务,可通过桌面快捷方式重新启动。',
-  unsaved: '未保存',
-  collapse: '收起',
-  expand: '展开',
-  save: '保存',
-  saving: '保存中…',
-  discard: '放弃',
-  saveFailed: '保存失败,请重试。',
-  invalidNumber: '请输入有效数字',
-  overridden: '已覆盖',
-  reset: '重置',
-  resetAll: '恢复默认',
-  idleEnabled: '启用空闲自动停止',
-  idleEnabledHint: '关闭后服务不会自动停止。',
-  idleMinutes: '空闲时长 (分钟)',
-  idleMinutesHint: '无运行中会话超过该时长后自动停止服务;默认 120(2 小时)。',
-};
-
-/** English dictionary for the 插件配置 card. */
-const enCard = {
-  title: 'Service (idle auto-stop)',
-  description: 'Stop dsh web automatically after no session has been running for a while; restart it from the desktop shortcut.',
-  unsaved: 'Unsaved',
-  collapse: 'Collapse',
-  expand: 'Expand',
-  save: 'Save',
-  saving: 'Saving…',
-  discard: 'Discard',
-  saveFailed: 'Save failed. Try again.',
-  invalidNumber: 'Enter a valid number',
-  overridden: 'Overridden',
-  reset: 'Reset',
-  resetAll: 'Restore defaults',
-  idleEnabled: 'Idle auto-stop',
-  idleEnabledHint: 'When off, the service never stops automatically.',
-  idleMinutes: 'Idle minutes',
-  idleMinutesHint: 'Stop after this many minutes without a running session; default 120 (2 h).',
-};
-
-/** Dictionary namespaces owned by this plugin. */
+/** The one locale namespace owned by this plugin. */
 const NS = 'settings.other';
-const CARD_NS = 'settings.other.card';
+
+/** Restart stages, in order. Index = how many stages are complete. */
+const STAGES = ['stageRequest', 'stageStop', 'stageReady'];
+
+/** Progress polling cadence and the budget after which the last stage gives up. */
+const POLL_MS = 1000;
+const PROGRESS_BUDGET_MS = 120_000;
+/** An update fetches a build, patches it and boots it — minutes, not seconds. */
+const UPDATE_BUDGET_MS = 300_000;
 
 /** Services required by the registrations. */
 const inject = ['slots', 'locale', 'connection'];
@@ -274,8 +265,17 @@ function InfoRow({ label, value }) {
   ] });
 }
 
-/** Live runtime snapshot: polls /app/status every 10 s, manual refresh. */
-function StatusBlock({ status, t }) {
+/**
+ * Live runtime snapshot: polls /app/status every 10 s, manual refresh.
+ *
+ * A background tab has its timers throttled by the browser (Chrome: >=1 min,
+ * and slower still after a few minutes), so "every 10 s" only holds while this
+ * page is visible — the snapshot can otherwise sit on a pid that no longer
+ * exists. Two explicit re-reads make that invisible: returning to the tab
+ * refetches once, and `refreshToken` (bumped by the restart flow when the
+ * replacement is up) refetches without waiting for the next poll.
+ */
+function StatusBlock({ status, t, refreshToken }) {
   const [info, setInfo] = useState(null);
   const [failed, setFailed] = useState(false);
   // The reason rides on the element's title: the visible line stays short, but
@@ -292,17 +292,21 @@ function StatusBlock({ status, t }) {
   useEffect(() => {
     fetchInfo()
     const timer = setInterval(fetchInfo, 10_000)
-    return () => clearInterval(timer)
+    const onVisible = () => { if (document.visibilityState === 'visible') fetchInfo() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
   }, []);
 
+  // 0 = the mount read above, so a restart that finished before this section
+  // ever rendered does not fetch twice.
+  useEffect(() => {
+    if (refreshToken > 0) fetchInfo()
+  }, [refreshToken]);
+
   const svc = info?.service ?? {};
-  const idle = info?.idle;
-  const idleValue = () => {
-    if (idle === undefined) return '—'
-    if (!idle.enabled) return t('idleDisabled')
-    const remainingMs = idle.idleMinutes * 60_000 - (Date.now() - (idle.lastBusyAt ?? Date.now()))
-    return t('idleEnabledWith', { n: Math.max(0, Math.ceil(remainingMs / 60_000)) })
-  };
   const rows = [
     ['pid', t('pid'), svc.pid !== undefined ? String(svc.pid) : '—'],
     ['ports', t('ports'), svc.ports !== undefined ? (svc.ports.join(', ') || '—') : '—'],
@@ -311,7 +315,6 @@ function StatusBlock({ status, t }) {
     ['node', t('node'), svc.node ?? '—'],
     ['dshVersion', t('dshVersion'), svc.version ?? '—'],
     ['running', t('running'), info !== null ? String(info.running ?? 0) : '—'],
-    ['idle', t('idle'), idleValue()],
   ];
 
   return jsx('div', { className: 'so-status-block', children: [
@@ -332,25 +335,127 @@ function StatusBlock({ status, t }) {
 }
 
 /**
- * Phase state machine (confirm renders as a Modal dialog):
- *   idle -> confirm (modal) -> calling -> scheduled | error
- *   idle -> busy (sessions running) -> waiting (poll until idle) | calling(force)
+ * The running dsh against the `latest` dist-tag: one read on mount (served
+ * from the host's short-lived cache) plus a manual re-check that bypasses it.
+ *
+ * Read-only: an available update is reported, never applied. Swapping the
+ * install the whole patch layer sits on is its own explicit action.
  */
-function OtherSection({ restart, status, installShortcut, t }) {
+function VersionCard({ versionCheck, onUpdate, busy, refreshToken, t }) {
+  const [state, setState] = useState({ status: 'loading' });
+
+  const check = (force) => {
+    setState({ status: 'loading' });
+    void Promise.resolve().then(() => versionCheck(force)).then(
+      (value) => setState({ status: 'ready', value }),
+      (error) => setState({ status: 'failed', reason: String(error?.message ?? error) }),
+    );
+  };
+  useEffect(() => { check(false) }, []);
+  // The service was replaced (an update or a restart finished): the versions on
+  // screen belong to the old process, so re-read instead of waiting for the
+  // host's own cache window to expire.
+  useEffect(() => {
+    if (refreshToken > 0) check(true)
+  }, [refreshToken]);
+
+  const value = state.status === 'ready' ? state.value : null;
+  const checking = state.status === 'loading';
+  const infoRow = (key, label, text) => jsxs('div', { className: 'so-info-row', children: [
+    jsx('span', { className: 'so-info-label', children: label }, 'label'),
+    jsx('span', { className: 'so-info-value', children: text }, 'value'),
+  ] }, key);
+  // The host's `error` is a curated reason ("no latest dist-tag", "registry
+  // answered HTTP 503") and is shown; a broken transport is not — that message
+  // is a developer detail, so it gets the neutral copy.
+  const failure = state.status === 'failed'
+    ? t('versionFailed')
+    : (value !== null && value.error !== null ? t('versionError', { reason: value.error }) : null);
+
+  return jsxs('div', { className: 'so-card', children: [
+    jsx('h3', { children: t('versionTitle') }, 'title'),
+    jsxs('div', { className: 'so-info', children: [
+      infoRow('current', t('versionCurrent'), value?.current ?? (busy ? t('versionChecking') : t('versionUnknown'))),
+      infoRow('latest', t('versionLatest'), value?.latest ?? t('versionUnknown')),
+    ] }, 'rows'),
+    jsx('div', { className: 'so-row', children: [
+      jsx('button', {
+        type: 'button',
+        className: 'so-btn',
+        disabled: checking ? true : undefined,
+        onClick: () => { check(true) },
+        children: checking ? t('versionChecking') : t('versionCheck'),
+      }, 'version-check'),
+      value !== null && value.hasUpdate
+        ? jsx('button', {
+            type: 'button',
+            className: 'so-btn so-danger',
+            disabled: busy ? true : undefined,
+            onClick: () => { onUpdate(value.latest) },
+            children: t('update'),
+          }, 'version-update')
+        : null,
+      failure !== null
+        ? jsx('span', { className: 'so-status so-flow-status', 'data-tone': 'error', children: failure }, 'version-failure')
+        : null,
+      failure === null && value !== null
+        ? jsx('span', {
+            className: 'so-status so-flow-status',
+            'data-tone': value.hasUpdate ? 'ok' : undefined,
+            children: value.hasUpdate ? t('versionAvailable', { v: value.latest }) : t('versionUpToDate'),
+          }, 'version-state')
+        : null,
+    ] }, 'row'),
+  ] });
+}
+
+/**
+ * Phase state machine (the confirm step is a Modal dialog):
+ *
+ *   idle  -> confirm(restart) -> calling -> progress | busy | error
+ *   busy  -> confirm(force)   -> calling ...
+ *   busy  -> waiting (poll until the last session ends) -> confirm(auto) -> ...
+ *
+ * EVERY path that really disconnects the service passes through `confirm`
+ * first: 强制重启 and the wait flow's auto-restart used to fire with no prompt
+ * at all, which is exactly the moment the service dies.
+ */
+function OtherSection({ restart, status, installShortcut, versionCheck, update, t, progressBudgetMs = PROGRESS_BUDGET_MS }) {
   const [phase, setPhase] = useState('idle');
+  const [intent, setIntent] = useState('restart'); // 'restart' | 'force' | 'auto'
   const [busyInfo, setBusyInfo] = useState(null);
   const [waitTimer, setWaitTimer] = useState(null);
+  const [progress, setProgress] = useState(null); // { stage, state }
+  const [retryToken, setRetryToken] = useState(0);
+  const [updateVersion, setUpdateVersion] = useState(null);
+  // Bumped once the replacement is observed, so neither the runtime snapshot
+  // nor the version card keeps showing the replaced process (the old pid, the
+  // old dsh version) until their own throttled polls come round.
+  const [readyRefresh, setReadyRefresh] = useState(0);
+  // The pid of the process that was serving the page when the restart was
+  // requested. It survives a re-probe (see 重试检测) because a re-probe has no
+  // settle window to capture it in — it is cleared only by a new restart.
+  const baselinePid = React.useRef(null);
 
   useEffect(() => () => {
     if (waitTimer !== null) clearInterval(waitTimer);
   }, [waitTimer]);
 
-  const trigger = (force) => {
+  /** Ask before anything that stops the service; `intent` picks the copy. */
+  const ask = (next) => { setIntent(next); setPhase('confirm') };
+
+  const trigger = (next) => {
+    baselinePid.current = null // a new action: re-capture the pid it replaces
     setPhase('calling')
-    void Promise.resolve().then(() => restart(force)).then(
+    const act = next === 'update'
+      ? () => update(updateVersion)
+      : () => restart(next === 'force')
+    void Promise.resolve().then(act).then(
       (result) => {
-        if (result.scheduled) setPhase('scheduled')
-        else if (result.busy) { setBusyInfo(result.busy); setPhase('busy') }
+        if (result.scheduled) {
+          setProgress({ stage: 1, state: 'active' })
+          setPhase('progress')
+        } else if (result.busy) { setBusyInfo(result.busy); setPhase('busy') }
         else setPhase('error')
       },
       () => { setPhase('error') },
@@ -365,7 +470,7 @@ function OtherSection({ restart, status, installShortcut, t }) {
           if (value.running === 0) {
             clearInterval(timer)
             setWaitTimer(null)
-            trigger(false)
+            ask('auto')
           } else {
             setBusyInfo({ running: value.running })
           }
@@ -382,6 +487,77 @@ function OtherSection({ restart, status, installShortcut, t }) {
     setPhase('idle')
   };
 
+  /**
+   * Closing the confirm dialog. Cancel is the safe default, so it lands back on
+   * the state the prompt interrupted: the busy view keeps its 等待空闲/强制重启
+   * choice (the sessions are still running), everything else goes idle.
+   */
+  const dismiss = () => { setPhase(intent === 'force' ? 'busy' : 'idle') };
+
+  // Progress driver. The restart script runs in its own process, so the page
+  // cannot be told what it sees — the stages come from what this page can still
+  // observe on its own origin. During the script's settle window the process
+  // that serves this page is still the OLD one, which makes its pid the
+  // baseline: a poll that answers with a different pid — or any poll after one
+  // that could not connect at all — means the replacement is up. Observing
+  // neither within the budget degrades to 'unknown' instead of claiming a
+  // readiness the page cannot verify (the script can fall back to another port
+  // from the 3080-3100 pool, and the old origin never answers again).
+  useEffect(() => {
+    if (phase !== 'progress') return undefined
+    let cancelled = false
+    let timer = null
+    let sawDown = false
+    // Wall clock, not a tick count: a background tab has its timers throttled
+    // (a "1 s" interval can land minutes apart), so counting ticks made the
+    // budget mean "120 polls", which stretched to minutes of real time.
+    const budget = intent === 'update' ? UPDATE_BUDGET_MS : progressBudgetMs
+    const deadline = Date.now() + budget
+    const stopPolling = () => { if (timer !== null) { clearInterval(timer); timer = null } }
+    const observe = (value) => {
+      const pid = value?.service?.pid
+      if (sawDown || (baselinePid.current !== null && pid !== baselinePid.current)) {
+        stopPolling()
+        setProgress({ stage: 3, state: 'ready' })
+        setReadyRefresh((token) => token + 1) // show the new pid/version at once
+        return
+      }
+      if (baselinePid.current === null) baselinePid.current = pid
+      setProgress({ stage: 1, state: 'active' })
+    }
+    const probe = () => {
+      void Promise.resolve().then(() => status()).then(
+        (value) => { if (!cancelled) observe(value) },
+        () => {
+          if (cancelled) return
+          sawDown = true
+          setProgress({ stage: 2, state: 'active' })
+        },
+      )
+    }
+    const onVisible = () => {
+      if (cancelled || document.visibilityState !== 'visible') return
+      if (Date.now() > deadline) return
+      probe() // returning to the tab must not wait for a throttled tick
+    }
+    probe() // the baseline read: the old process still answers during the settle
+    document.addEventListener('visibilitychange', onVisible)
+    timer = setInterval(() => {
+      if (cancelled) return
+      if (Date.now() > deadline) {
+        stopPolling()
+        setProgress({ stage: 2, state: 'unknown' })
+        return
+      }
+      probe()
+    }, POLL_MS)
+    return () => {
+      cancelled = true
+      document.removeEventListener('visibilitychange', onVisible)
+      stopPolling()
+    }
+  }, [phase, retryToken, progressBudgetMs, intent]);
+
   const [shortcutState, setShortcutState] = useState(null); // null | 'busy' | 'done' | 'failed'
   const [shortcutOutput, setShortcutOutput] = useState('');
   const doShortcut = () => {
@@ -392,13 +568,31 @@ function OtherSection({ restart, status, installShortcut, t }) {
     )
   };
 
-  const tone = phase === 'error' ? 'error' : phase === 'scheduled' ? 'ok' : undefined;
+  const progressStage = progress?.stage ?? 1;
+  const progressState = progress?.state ?? 'active';
+  const isUpdate = intent === 'update';
+  const busy = phase === 'calling' || (phase === 'progress' && progressState === 'active');
+  const canRestart = phase === 'idle' || phase === 'progress';
+  const confirmPrompt = intent === 'force'
+    ? t('confirmPromptForce', { n: busyInfo?.running ?? 0 })
+    : intent === 'auto'
+      ? t('confirmPromptAuto')
+      : isUpdate
+        ? t('confirmPromptUpdate', { v: updateVersion ?? '' })
+        : t('confirmPromptRestart');
+
+  /** Marker state of stage `index`: done / active / pending, or the unknown tail. */
+  const stageState = (index) => {
+    if (index < progressStage) return 'done'
+    if (index > progressStage) return 'pending'
+    return progressState === 'ready' ? 'done' : progressState === 'unknown' ? 'unknown' : 'active'
+  };
 
   return jsx('div', { className: 'so-section', children: [
     jsx('div', { className: 'so-card', children: [
       jsx('h3', { children: t('serviceTitle') }, 'title'),
       jsx('p', { children: t('serviceDesc') }, 'desc'),
-      jsx(StatusBlock, { status, t }, 'status-block'),
+      jsx(StatusBlock, { status, t, refreshToken: readyRefresh }, 'status-block'),
       jsx('div', { className: 'so-row', children: [
         jsx('button', {
           type: 'button',
@@ -423,8 +617,8 @@ function OtherSection({ restart, status, installShortcut, t }) {
         jsx('button', {
           type: 'button',
           className: 'so-btn so-danger',
-          disabled: phase === 'calling' ? true : undefined,
-          onClick: () => { if (phase === 'idle') setPhase('confirm') },
+          disabled: busy ? true : undefined,
+          onClick: () => { if (canRestart) ask('restart') },
           children: phase === 'calling' ? t('restarting') : t('restart'),
         }, 'restart'),
         phase === 'busy' || phase === 'waiting'
@@ -436,188 +630,72 @@ function OtherSection({ restart, status, installShortcut, t }) {
                 ? jsx('button', { type: 'button', className: 'so-btn', onClick: startWaiting, children: t('busyActionWait') }, 'wait')
                 : null,
               phase === 'busy'
-                ? jsx('button', { type: 'button', className: 'so-btn so-danger', onClick: () => { trigger(true) }, children: t('busyActionForce') }, 'force')
+                ? jsx('button', { type: 'button', className: 'so-btn so-danger', onClick: () => { ask('force') }, children: t('busyActionForce') }, 'force')
                 : null,
               jsx('button', { type: 'button', className: 'so-btn', onClick: stopWaiting, children: t('cancel') }, 'busy-cancel'),
             ] }, 'busy-row')
           : null,
       ] }, 'row'),
-      phase === 'scheduled' || phase === 'error'
-        ? jsx('p', { className: 'so-status so-flow-status', 'data-tone': tone, children: phase === 'scheduled' ? t('scheduled') : t('error') }, 'status')
+      phase === 'progress'
+        ? jsxs('div', { className: 'so-progress', children: [
+            jsxs('div', { className: 'so-info-head', children: [
+              jsx('span', { className: 'so-status-title', children: t(isUpdate ? 'progressTitleUpdate' : 'progressTitle') }, 'progress-title'),
+              jsx('span', { className: 'so-status', children: progressState === 'ready' ? t('progressReadyDone') : t('progressRunning') }, 'progress-state'),
+            ] }, 'progress-head'),
+            jsx('div', { className: 'so-progress-track', children: jsx('div', {
+              className: 'so-progress-fill',
+              'data-stage': String(progressStage),
+              'data-state': progressState,
+              style: { width: (progressState === 'ready' ? 100 : Math.round((progressStage / STAGES.length) * 100)) + '%' },
+            }, 'progress-fill') }, 'progress-track'),
+            jsx('div', { className: 'so-progress-steps', children: STAGES.map((key, index) => jsx('span', {
+              className: 'so-progress-step',
+              'data-stage-state': stageState(index),
+              // An update requests an install first, not a restart.
+              children: (index + 1) + '. ' + t(index === 0 && isUpdate ? 'stageRequestUpdate' : key),
+            }, key)) }, 'progress-steps'),
+          ] }, 'progress')
+        : null,
+      phase === 'progress' && progressState === 'ready'
+        ? jsx('p', { className: 'so-status so-flow-status', 'data-tone': 'ok', children: t('readyCopy') }, 'progress-ready')
+        : null,
+      phase === 'progress' && progressState === 'unknown'
+        ? jsxs(React.Fragment, { children: [
+            jsx('p', { className: 'so-status so-flow-status', 'data-tone': 'error', children: t('readyUnknown', { n: Math.round(progressBudgetMs / 1000) }) }, 'progress-unknown'),
+            jsx('button', {
+              type: 'button',
+              className: 'so-btn',
+              onClick: () => { setProgress({ stage: 2, state: 'active' }); setRetryToken((token) => token + 1) },
+              children: t('checkAgain'),
+            }, 'progress-retry'),
+          ] }, 'progress-unknown-row')
+        : null,
+      phase === 'error'
+        ? jsx('p', { className: 'so-status so-flow-status', 'data-tone': 'error', children: t(isUpdate ? 'updateError' : 'error') }, 'status')
         : null,
       phase === 'error'
         ? jsx('button', { type: 'button', className: 'so-btn', onClick: () => { setPhase('idle') }, children: t('retry') }, 'retry')
         : null,
     ] }, 'card'),
-    // Restart confirm dialog (modal replaces the inline confirm row).
+    // Confirm dialog: the last stop before the service really goes down.
     jsx(Modal, {
       open: phase === 'confirm',
-      onClose: () => { if (phase === 'confirm') setPhase('idle') },
-      title: t('restart'),
+      onClose: () => { if (phase === 'confirm') dismiss() },
+      title: intent === 'force' ? t('busyActionForce') : isUpdate ? t('update') : t('restart'),
       closeLabel: t('cancel'),
-      description: t('confirmPrompt'),
+      description: confirmPrompt,
       footer: jsxs(React.Fragment, { children: [
-        jsx('button', { type: 'button', className: 'so-btn', onClick: () => { setPhase('idle') }, children: t('cancel') }, 'cancel'),
-        jsx('button', { type: 'button', className: 'so-btn so-danger', onClick: () => { trigger(false) }, children: t('confirm') }, 'confirm'),
+        jsx('button', { type: 'button', className: 'so-btn', onClick: dismiss, children: t('cancel') }, 'cancel'),
+        jsx('button', { type: 'button', className: 'so-btn so-danger', onClick: () => { trigger(intent) }, children: t('confirm') }, 'confirm'),
       ] }),
     }, 'restart-modal'),
-  ] });
-}
-
-/** Field descriptors of the idle auto-stop configuration card. */
-const CARD_FIELDS = [
-  { key: 'idleEnabled', type: 'boolean' },
-  { key: 'idleMinutes', type: 'number' },
-];
-
-/** One labelled field row with staged text, override badge, and reset. */
-function SettingsField({ field, label, hint, text, overridden, invalid, disabled, onChange, onReset, t }) {
-  return jsxs('div', { className: 'soc-field', children: [
-    jsxs('div', { className: 'soc-field-head', children: [
-      jsx('label', { className: 'soc-label', htmlFor: 'soc-' + field.key, children: label }, 'label'),
-      overridden ? jsx('span', { className: 'soc-overridden', children: t('overridden') }, 'overridden') : null,
-      jsx('button', {
-        type: 'button',
-        className: 'soc-reset',
-        disabled: disabled || !overridden,
-        onClick: onReset,
-        children: t('reset'),
-      }, 'reset'),
-    ] }, 'head'),
-    field.type === 'boolean'
-      ? jsx('input', {
-          id: 'soc-' + field.key,
-          type: 'checkbox',
-          className: 'soc-toggle',
-          checked: text === 'true',
-          disabled,
-          onChange: (event) => { onChange(event.currentTarget.checked ? 'true' : 'false') },
-        }, 'control')
-      : jsx('input', {
-          id: 'soc-' + field.key,
-          type: 'number',
-          className: 'soc-input' + (invalid ? ' soc-invalid' : ''),
-          value: text,
-          disabled,
-          min: 1,
-          onChange: (event) => { onChange(event.currentTarget.value) },
-        }, 'control'),
-    invalid ? jsx('p', { className: 'soc-invalid-text', children: t('invalidNumber') }, 'invalid') : null,
-    jsx('p', { className: 'soc-hint', children: hint }, 'hint'),
-  ] });
-}
-
-/** The configuration card shown in 插件配置 / 插件管理 (idle auto-stop settings). */
-function ServiceSettingsCard({ t, getConfig, setConfig, resetConfig }) {
-  const [config, setConfigState] = useState({ status: 'loading' });
-  const [open, setOpen] = useState(false);
-  const [staged, setStaged] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    let current = true
-    void Promise.resolve().then(() => getConfig()).then(
-      (value) => { if (current) setConfigState({ status: 'ready', value }) },
-      () => { if (current) setConfigState({ status: 'error' }) },
-    )
-    return () => { current = false }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  if (config.status !== 'ready') return null;
-  const value = config.value ?? {};
-  const dirty = staged !== null && Object.keys(staged).length > 0;
-  const invalid = staged !== null && Object.entries(staged).some(([key, text]) => {
-    const field = CARD_FIELDS.find((candidate) => candidate.key === key)
-    if (field === undefined || field.type !== 'number') return false
-    const parsed = Number(text)
-    return text.trim() === '' || !Number.isFinite(parsed) || parsed < 1
-  });
-  const blocked = !dirty || invalid || saving;
-
-  const textOf = (key) => {
-    const field = CARD_FIELDS.find((candidate) => candidate.key === key)
-    if (staged !== null && key in staged) return staged[key]
-    const current = value[key]
-    if (field?.type === 'boolean') return current === true ? 'true' : 'false'
-    if (current === undefined || current === null) return ''
-    return String(current)
-  };
-  const edit = (key, text) => {
-    setFailed(false)
-    setStaged((current) => ({ ...(current ?? {}), [key]: text }))
-  };
-  const discard = () => { setStaged(null); setFailed(false) };
-  const save = async () => {
-    if (staged === null) return
-    setSaving(true); setFailed(false)
-    try {
-      const parsed = {}
-      for (const [key, text] of Object.entries(staged)) {
-        const field = CARD_FIELDS.find((candidate) => candidate.key === key)
-        parsed[key] = field?.type === 'number' ? Number(text) : field?.type === 'boolean' ? text === 'true' : text
-      }
-      const next = await setConfig(parsed)
-      setConfigState({ status: 'ready', value: next })
-      setStaged(null)
-    } catch {
-      setFailed(true)
-    } finally {
-      setSaving(false)
-    }
-  };
-  const resetAll = async () => {
-    setSaving(true); setFailed(false)
-    try {
-      const next = await resetConfig()
-      setConfigState({ status: 'ready', value: next })
-      setStaged(null)
-    } catch {
-      setFailed(true)
-    } finally {
-      setSaving(false)
-    }
-  };
-
-  return jsxs('li', { className: 'soc-card' + (open ? ' soc-card-open' : ''), children: [
-    jsxs('button', {
-      type: 'button',
-      className: 'soc-header',
-      'aria-expanded': open,
-      'aria-label': (open ? t('collapse') : t('expand')) + ': ' + t('title'),
-      onClick: () => { setOpen(!open) },
-      children: [
-        jsxs('span', { className: 'soc-head-text', children: [
-          jsx('span', { className: 'soc-name', children: t('title') }, 'name'),
-          jsx('span', { className: 'soc-description', children: t('description') }, 'desc'),
-        ] }, 'head-text'),
-        dirty ? jsx('span', { className: 'soc-pending', children: t('unsaved') }, 'pending') : null,
-        jsx(IconChevronDownOutline14, { className: 'soc-chevron' + (open ? ' soc-chevron-open' : ''), 'aria-hidden': true }, 'chevron'),
-      ],
-    }, 'header'),
-    open ? jsxs('div', { className: 'soc-body', children: [
-      CARD_FIELDS.map((field) => jsx(SettingsField, {
-        field,
-        label: t(field.key),
-        hint: t(field.key + 'Hint'),
-        text: textOf(field.key),
-        overridden: false,
-        invalid: staged !== null && field.key in staged && field.type === 'number'
-          ? !(Number.isFinite(Number(staged[field.key])) && Number(staged[field.key]) >= 1)
-          : false,
-        disabled: saving,
-        onChange: (text) => { edit(field.key, text) },
-        onReset: () => {},
-        t,
-      }, field.key)),
-      jsxs('div', { className: 'soc-footer', children: [
-        failed ? jsx('p', { className: 'soc-failed', role: 'status', children: t('saveFailed') }, 'failed') : null,
-        jsx('button', { type: 'button', className: 'soc-discard', disabled: !dirty || saving, onClick: discard, children: t('discard') }, 'discard'),
-        jsx('button', { type: 'button', className: 'soc-discard', disabled: saving, onClick: () => { void resetAll() }, children: t('resetAll') }, 'reset-all'),
-        jsx('button', { type: 'button', className: 'soc-save', disabled: blocked, onClick: () => { void save() }, children: saving ? t('saving') : t('save') }, 'save'),
-      ] }, 'footer'),
-    ] }, 'body') : null,
+    jsx(VersionCard, {
+      versionCheck,
+      busy,
+      refreshToken: readyRefresh,
+      onUpdate: (v) => { setUpdateVersion(v); ask('update') },
+      t,
+    }, 'version-card'),
   ] });
 }
 
@@ -658,10 +736,9 @@ const call = async (endpoint, args) => {
   return envelope.value
 }
 
-/** Contribute the Other settings section + the idle auto-stop configuration card. */
+/** Contribute the Other settings section. */
 function apply(ctx) {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-settings-other: section dictionaries')
-  ctx.effect(() => ctx.locale.register(CARD_NS, { zh: zhCard, en: enCard }), 'ui-settings-other: card dictionaries')
 
   const t = ctx.locale.bind(NS)
   const restart = async (force) => {
@@ -675,7 +752,17 @@ function apply(ctx) {
   }
   const status = () => call('status', {})
   const installShortcut = () => call('installShortcut', {})
-  const injected = () => ({ restart, status, installShortcut })
+  const versionCheck = (force) => call('versionCheck', force ? { force: true } : {})
+  const update = async (version) => {
+    try {
+      await call('update', typeof version === 'string' && version.length > 0 ? { version } : {})
+      return { scheduled: true }
+    } catch (error) {
+      if (error.code === 'sessions-running') return { busy: { running: error.details?.running ?? 0 } }
+      throw error
+    }
+  }
+  const injected = () => ({ restart, status, installShortcut, versionCheck, update })
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
@@ -685,21 +772,6 @@ function apply(ctx) {
     locale: NS,
     inject: injected,
   }, OtherSection))
-
-  const cardApi = () => ({
-    getConfig: () => call('getSettings', {}),
-    setConfig: (fields) => call('setSettings', { fields }),
-    resetConfig: () => call('resetSettings', {}),
-  })
-
-  // The shipped 插件配置 page (settings.plugin.item). Config cards live only
-  // here; the plugin-manager page is enable/disable management only.
-  ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
-    name: 'settings.plugin.item',
-    key: 'ui-settings-other',
-    locale: CARD_NS,
-    inject: cardApi,
-  }, ServiceSettingsCard))
 }
 
 module.exports = { apply, inject, NS };

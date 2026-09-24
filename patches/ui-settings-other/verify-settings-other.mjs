@@ -16,11 +16,14 @@
  * context, and asserts the `/app` prefix route registration plus endpoint
  * validation (never invokes `restart` with a real script — that respawns the
  * process). Covers the runtime-status snapshot (serviceInfo / listeningPorts /
- * dshVersion), the idle auto-stop decision + monitor mechanics, the
- * settings-namespace wiring (entry base → registered namespace → watch
- * rebuild), and the restart endpoint's session protection (busy refusal /
+ * dshVersion) and the restart endpoint's session protection (busy refusal /
  * forced cancel). Also guards the P0 regression: `apply` must NOT return a
  * thenable (Cordis treats a returned Fiber as an invalid Effect).
+ *
+ * The idle auto-stop is gone (feature deleted, settings namespace included), so
+ * this harness pins that removal: `status` carries no `idle` key, no settings
+ * namespace is registered even when a settings service is present, and the host
+ * half arms no interval.
  *
  * The route's own fence is asserted through the real handler: a cross-origin
  * `Origin` is refused (403) without reaching the endpoint, non-POST is 405,
@@ -29,22 +32,22 @@
  *
  * Diagnostics: drives the real `/ui-settings-other/health` route through a
  * fake req/res (exact kind+path, application/json + no-store, channel /
- * settings / branding flags, warnings text) and pins the fail-soft contract —
- * a throwing settings register or an unreadable favicon asset degrades its own
- * flag and warning while the `/app` route, its status endpoint and the
- * entry-config fallback stay up. A missing `webServer` warns and registers
- * nothing instead of throwing.
+ * branding flags, warnings text) and pins the fail-soft contract — an
+ * unreadable favicon asset degrades its own flag and warning while the `/app`
+ * route and its status endpoint stay up. A missing `webServer` warns and
+ * registers nothing instead of throwing.
  *
  * Client half: loads the exact deployed `lib/client.js` the browser will
  * execute, feeds it a module table stubbed with the real platform words
  * (react, react/jsx-runtime, ui-primitives), asserts the registration
- * contracts (settings.section + settings.plugin.item + dictionaries, plus the
- * section's exact inject surface), then — when jsdom is available — renders
- * the section and exercises the status block, the create-shortcut flow, the
- * confirm-modal -> restart flow (cancel / confirm / busy / force / waiting /
- * error), and the configuration card's staged-edit -> save / reset flows
- * through the `/app` route (`fetch` double logs url/method/headers/body).
- * Without jsdom the DOM sections are skipped with a notice.
+ * contracts (settings.section + dictionaries, plus the section's exact inject
+ * surface), then — when jsdom is available — renders the section and exercises
+ * the status block, the create-shortcut flow, the confirm-modal -> restart
+ * flow (cancel / confirm / busy / force / waiting / error / progress), through
+ * the `/app` route (`fetch` double logs url/method/headers/body). The restart
+ * progress is driven against the pids the status double reports, including the
+ * 'unknown' tail a changed port produces. Without jsdom the DOM sections are
+ * skipped with a notice.
  */
 import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { readFileSync, writeFileSync, mkdtempSync, existsSync } from 'node:fs'
@@ -90,9 +93,19 @@ const host = await import(pathToFileURL(hostPath).href)
   const custom = host.resolveRestartScript({ script: 'C:\\Custom\\restart.ps1' })
   if (custom !== 'C:\\Custom\\restart.ps1') throw new Error(`custom script path: ${custom}`)
   const invocation = host.buildRestartSpawn(resolved)
-  if (invocation.file !== 'powershell' || invocation.args[3] !== '-File' || invocation.args[4] !== resolved) {
-    throw new Error(`spawn invocation: ${JSON.stringify(invocation)}`)
+  if (invocation.file !== 'powershell') throw new Error(`spawn file: ${invocation.file}`)
+  const outer = invocation.args.join(' ')
+  // The outer powershell gets no script of its own (`-File` may only appear
+  // inside the Start-Process argument string).
+  if (invocation.args.includes('-File')) throw new Error(`the outer powershell must only start a process, got: ${outer}`)
+  for (const fragment of ['-Command', 'Start-Process', "$PSHOME 'powershell.exe'", '-WindowStyle Hidden', '-PassThru', '$p.WaitForExit()', 'exit $p.ExitCode', resolved]) {
+    if (!outer.includes(fragment)) throw new Error(`spawn invocation must contain ${JSON.stringify(fragment)}: ${outer}`)
   }
+  // A path with spaces must reach the inner command line quoted with DOUBLE
+  // quotes (single quotes there run nothing at all).
+  const spacedInner = host.buildRestartSpawn('C:\\a b\\restart-dsh.ps1', ['-OpenBrowser']).args[4]
+  if (!spacedInner.includes('"C:\\a b\\restart-dsh.ps1"')) throw new Error(`a spaced path must be double-quoted: ${spacedInner}`)
+  if (spacedInner.includes("'C:\\a b")) throw new Error(`a spaced path must not be single-quoted: ${spacedInner}`)
   const cancelled = []
   const agents = {
     list: () => [
@@ -104,6 +117,95 @@ const host = await import(pathToFileURL(hostPath).href)
   const running = host.runningSessionIds(agents)
   if (running.join(',') !== 'sess-a') throw new Error(`runningSessionIds: ${running}`)
   console.log('host helpers OK: resolveRestartScript + buildRestartSpawn + runningSessionIds')
+}
+
+// Version helpers: the guard behind "有更新". Prerelease ordering is the trap
+// (`0.1.5-rc.10` > `0.1.5-rc.9`, a release beats its own prereleases, and an
+// unparseable side must never read as "newer").
+{
+  const cases = [
+    ['0.1.5-rc.2', '0.1.5-rc.3', true],
+    ['0.1.5-rc.3', '0.1.5-rc.2', false],
+    ['0.1.5-rc.3', '0.1.5-rc.3', false],
+    ['0.1.5', '0.1.5-rc.3', false],
+    ['0.1.5-rc.3', '0.1.5', true],
+    ['0.1.5-rc.3', '0.1.6-alpha.1', true],
+    ['0.1.5-rc.9', '0.1.5-rc.10', true],
+    ['0.1.7-alpha.2', '0.1.5-rc.3', false],
+    ['nonsense', '0.1.5', false],
+    ['0.1.5', 'nonsense', false],
+  ]
+  for (const [installed, candidate, expected] of cases) {
+    if (host.isNewerVersion(installed, candidate) !== expected) {
+      throw new Error(`isNewerVersion(${installed}, ${candidate}) must be ${expected}`)
+    }
+  }
+  // npmrc parsing: the top-level registry line only — the same file carries auth
+  // tokens for other scopes, and neither they nor the scoped registries may
+  // reach the answer.
+  const npmrc = [
+    '@swire:registry=https://jihulab.example/api/',
+    '//jihulab.example/:_authToken=SECRET',
+    'registry=https://registry.example/',
+    '',
+  ].join('\n')
+  const registry = host.parseRegistry(npmrc)
+  if (registry !== 'https://registry.example') throw new Error(`parseRegistry: ${registry}`)
+  if (registry.includes('SECRET') || registry.includes('jihulab')) throw new Error('parseRegistry leaked a scoped registry or its token')
+  if (host.parseRegistry('# registry=https://nope/\n') !== 'https://registry.npmjs.org') throw new Error('a commented registry line must be ignored')
+  if (host.parseRegistry('') !== 'https://registry.npmjs.org') throw new Error('an absent registry must fall back to the public one')
+  console.log(`version helpers OK: ${cases.length} semver cases + npmrc registry parsing (no token leakage)`)
+}
+
+// Spawn smoke: the invocation the restart endpoint uses must really EXECUTE the
+// script. Windows PowerShell 5.1 spawned `detached` exits 0 without running a
+// single line — which is how the restart button silently did nothing (no kill,
+// no log, no warning; the page just sat on stage 1 until its budget ran out).
+// This boots the REAL invocation against stubs and asserts both halves of the
+// contract: the script runs, and its exit code reaches the wrapper (the
+// endpoint clears its restart lock on a non-zero code).
+{
+  const smokeDir = mkdtempSync(join(tmpdir(), 'ui-settings-other-spawn-'))
+  const marker = join(smokeDir, 'marker.txt')
+  const stub = join(smokeDir, 'stub.ps1')
+  const failingStub = join(smokeDir, 'failing-stub.ps1')
+  writeFileSync(stub, [
+    'param([switch]$OpenBrowser)',
+    `Set-Content -Path '${marker}' -Value ("ran openBrowser=$OpenBrowser") -Encoding UTF8`,
+    'exit 0',
+    '',
+  ].join('\n'))
+  writeFileSync(failingStub, ['param([switch]$OpenBrowser)', 'exit 7', ''].join('\n'))
+
+  /** Exactly how `apply` boots the script (no `detached`, stdio ignored). */
+  const boot = (script, args) => {
+    const invocation = host.buildRestartSpawn(script, args)
+    const child = childProcess.spawn(invocation.file, invocation.args, {
+      stdio: 'ignore', cwd: process.cwd(), env: process.env, windowsHide: true,
+    })
+    child.unref()
+    return child
+  }
+  const waitFor = async (predicate, label, ms = 30_000) => {
+    const deadline = Date.now() + ms
+    while (Date.now() < deadline) {
+      if (predicate()) return
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    throw new Error(`${label} (waited ${ms}ms)`)
+  }
+
+  boot(stub, ['-OpenBrowser'])
+  await waitFor(() => existsSync(marker), 'the restart script was never executed by the host invocation')
+  const written = readFileSync(marker, 'utf8').trim()
+  if (written !== 'ran openBrowser=True') throw new Error(`stub marker: ${written}`)
+
+  let failingExit = null
+  const failing = boot(failingStub, [])
+  failing.on('exit', (code) => { failingExit = code })
+  await waitFor(() => failingExit !== null, 'the wrapper process never exited', 20_000)
+  if (failingExit !== 7) throw new Error(`the script's exit code must reach the wrapper, got ${failingExit}`)
+  console.log('spawn smoke OK: the host invocation really executes the script (marker written, openBrowser passed through) and forwards exit 7')
 }
 
 // Branding helpers: favicon SVG wrapper + icon asset (idempotent copy)
@@ -155,71 +257,36 @@ const host = await import(pathToFileURL(hostPath).href)
   }
 }
 
-// Idle decision + monitor mechanics (fake clock)
-{
-  const decision = host.idleDecision
-  if (decision({ busy: true, lastBusyAt: 0, now: 99_999_999, idleMinutes: 120 }).action !== 'busy') throw new Error('busy must win')
-  const wait = decision({ busy: false, lastBusyAt: 0, now: 60_000, idleMinutes: 2 })
-  if (wait.action !== 'wait' || wait.remainingMs !== 60_000) throw new Error(`wait decision: ${JSON.stringify(wait)}`)
-  const stop = decision({ busy: false, lastBusyAt: 0, now: 120_000, idleMinutes: 2 })
-  if (stop.action !== 'stop') throw new Error(`stop decision: ${JSON.stringify(stop)}`)
-  if (decision({ busy: false, lastBusyAt: 0, now: 9_999_999, idleMinutes: 0 }).action !== 'disabled') throw new Error('non-positive idleMinutes must disable')
-
-  // monitor: busy resets the clock; idle past the threshold stops exactly once
-  let t = 1_000_000
-  let intervalFn = null
-  const clock = {
-    now: () => t,
-    setInterval: (fn) => { intervalFn = fn; return { id: 1 } },
-    clearInterval: () => {},
-    advance: (ms) => { t += ms },
-  }
-  let stopped = 0
-  let sessionsBusy = true
-  const monitor = host.createIdleMonitor({
-    busy: () => sessionsBusy,
-    idleMinutes: () => 2,
-    onStop: () => { stopped += 1 },
-    now: clock.now,
-    setInterval: clock.setInterval,
-    clearInterval: clock.clearInterval,
-  })
-  clock.advance(10 * 60_000)
-  if (monitor.check().action !== 'busy') throw new Error('monitor must stay busy while sessions run')
-  if (monitor.lastBusyAt() !== t) throw new Error('busy must reset the idle clock')
-  sessionsBusy = false
-  clock.advance(119_999)
-  if (monitor.check().action !== 'wait') throw new Error('monitor must wait before the threshold')
-  clock.advance(2)
-  if (monitor.check().action !== 'stop') throw new Error('monitor must stop past the threshold')
-  if (stopped !== 1) throw new Error(`onStop fired ${stopped} times`)
-  if (monitor.check() !== null) throw new Error('stopped monitor must not act again')
-  monitor.stop()
-  if (monitor.check() !== null) throw new Error('explicit stop must silence the monitor')
-  console.log('host idle OK: decision + monitor (busy reset / wait / stop-once)')
-}
-
 let cancelled = []
 let innerCtx = null
-let settingsRegistered = null
-let settingsWatchCb = null
-let appExitCalls = []
 // Diagnostic-surface doubles, owned by the sections below:
 // - `hostWarns` collects the real logger.warn text (the health route's own
 //   `warnings` array is read back over the route itself);
-// - `settingsRegisterThrows` makes the settings provider explode on register;
-// - `settingsOverlay` is the user layer of the settings double: a write through
-//   `/app/setSettings` must be observable in the next `status` snapshot;
 // - `webServerStub` is the `webServer` service double (null = service absent);
 // - `routeEvents` is one ordered log of route registrations, which is how "the
 //   health route is registered at the START of the callback, before every
-//   optional step and before /app" is asserted.
+//   optional step and before /app" is asserted;
+// - `settingsInjectAttempts` counts `inject(['settings'])`: this plugin owns no
+//   settings namespace any more, so it must stay 0;
+// - `intervals` counts every setInterval the host half arms (it owns no timer
+//   now that the idle monitor is gone).
 let hostWarns = []
-let settingsRegisterThrows = false
-let settingsOverlay = {}
 let webServerStub = null
 let routeEvents = []
 let agentsListCalls = 0
+let settingsInjectAttempts = 0
+const intervals = new Set()
+const realSetInterval = globalThis.setInterval
+const realClearInterval = globalThis.clearInterval
+globalThis.setInterval = (fn, ms) => {
+  const handle = realSetInterval(fn, ms)
+  intervals.add(handle)
+  return handle
+}
+globalThis.clearInterval = (handle) => {
+  intervals.delete(handle)
+  return realClearInterval(handle)
+}
 const fakeAgents = {
   list: () => {
     // Counted so the fence assertions can prove that a refused request never
@@ -232,7 +299,6 @@ const fakeAgents = {
   },
   get: (id) => fakeAgents.list().find((a) => a.id === id),
 }
-let settingsAvailable = false
 /**
  * The transport moved off `connection` entirely (see the file header), so this
  * double keeps only a TRIPWIRE there: reading any property of it throws. A
@@ -259,7 +325,6 @@ const hostCtx = {
         agents: fakeAgents,
         logger: { info: () => {}, warn: (message) => { hostWarns.push(String(message)) } },
         get: (name) => {
-          if (name === 'appExit') return (code) => { appExitCalls.push(code) }
           if (name === 'webServer') return webServerStub ?? undefined
           return undefined
         },
@@ -269,35 +334,11 @@ const hostCtx = {
       }
       return callback(innerCtx)
     }
-    if (list === 'settings' && settingsAvailable) {
-      return callback({
-        ...innerCtx,
-        settings: {
-          register: (ns, schema, options) => {
-            if (settingsRegisterThrows) throw new Error('settings provider exploded during register (harness double)')
-            settingsRegistered = { ns, options }
-            settingsOverlay = {}
-            // Mirrors the real scope: `get()` resolves base over the user
-            // layer, and `update`/`replace` move that layer and notify watch.
-            const get = () => ({ ...host.DEFAULTS, ...(options.base ?? {}), ...settingsOverlay })
-            const notify = () => { if (settingsWatchCb !== null) settingsWatchCb() }
-            return {
-              get,
-              watch: (cb) => { settingsWatchCb = cb; return () => {} },
-              update: async (fields) => {
-                if (settingsRegistered === null) throw new Error('scope detached (harness double)')
-                settingsOverlay = { ...settingsOverlay, ...fields }
-                notify()
-              },
-              replace: async () => {
-                if (settingsRegistered === null) throw new Error('scope detached (harness double)')
-                settingsOverlay = {}
-                notify()
-              },
-            }
-          },
-        },
-      })
+    // A settings service may be present in the environment; this plugin owns no
+    // namespace any more, so an `inject(['settings'])` from it must never happen.
+    if (list === 'settings') {
+      settingsInjectAttempts += 1
+      return callback({ ...innerCtx, settings: { register: () => { throw new Error('this plugin must register no settings namespace') } } })
     }
     return undefined
   },
@@ -408,12 +449,13 @@ const makeRes = () => {
  * of hanging it).
  */
 const callRoute = async (route, options = {}) => {
-  const req = makeReq({ url: route.path, ...options })
+  const { guardMs = 2000, ...requestOptions } = options
+  const req = makeReq({ url: route.path, ...requestOptions })
   const res = makeRes()
   await route.handler(req, res)
   req.send()
   const guard = new Promise((_, reject) => {
-    setTimeout(() => reject(new Error(`route ${route.path} never answered (${req.method} ${req.url})`)), 2000).unref?.()
+    setTimeout(() => reject(new Error(`route ${route.path} never answered (${req.method} ${req.url})`)), guardMs).unref?.()
   })
   await Promise.race([res.settled, guard])
   return res
@@ -456,6 +498,9 @@ const callApp = async (stub, endpoint, args, overrides = {}) => {
     url: `${APP_PATH}/${endpoint}`,
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ args: args ?? {} }),
+    // The version check waits on a registry (up to 5 s), so it gets a longer
+    // guard than the local endpoints.
+    guardMs: endpoint === 'versionCheck' ? 15_000 : 2000,
     ...overrides,
   })
   if (res.status !== 200) throw new Error(`POST ${APP_PATH}/${endpoint} must answer 200, got ${res.status}: ${res.body}`)
@@ -535,9 +580,6 @@ const assertStatusUsable = async (stub, label) => {
 // 1) apply without a settings service -> entry fallback, status still rich
 {
   cancelled = []
-  appExitCalls = []
-  settingsRegistered = null
-  settingsAvailable = false
   hostWarns = []
   routeEvents = []
   webServerStub = makeWebServerStub()
@@ -552,32 +594,28 @@ const assertStatusUsable = async (stub, label) => {
   // `handled.channel === '/app'` + loopback-authority pair asserted).
   const app = appRouteOf(web)
   if (app.path !== APP_PATH) throw new Error(`host route path: ${app.path}`)
-  if (settingsRegistered !== null) throw new Error('no settings service must not register a namespace')
-  if (hostWarns.length !== 0) throw new Error(`apply without settings must not warn: ${JSON.stringify(hostWarns)}`)
+  if (hostWarns.length !== 0) throw new Error(`apply must not warn: ${JSON.stringify(hostWarns)}`)
 
   const status0 = await callApp(web, 'status')
   if (!status0.ok || status0.value.running !== 1 || status0.value.sessions.join(',') !== 'sess-a') {
     throw new Error(`status endpoint: ${JSON.stringify(status0)}`)
   }
   if (status0.value.service?.pid !== process.pid) throw new Error(`status service.pid: ${JSON.stringify(status0.value.service)}`)
-  if (!status0.value.idle?.enabled || status0.value.idle.idleMinutes !== 120) {
-    throw new Error(`status idle defaults: ${JSON.stringify(status0.value.idle)}`)
-  }
-  if (typeof status0.value.idle.lastBusyAt !== 'number') throw new Error('idle must expose lastBusyAt')
-  if (appExitCalls.length !== 0) throw new Error('status must never exit')
+  // The idle auto-stop is gone: the envelope must carry no `idle` key at all.
+  if (status0.value.idle !== undefined) throw new Error(`status must not carry idle any more: ${JSON.stringify(status0.value.idle)}`)
 
   const unknown = await callApp(web, 'nope')
   assertErrorEnvelope('unknown endpoint', unknown)
   if (unknown.ok !== false || unknown.error.code !== 'bad-request') throw new Error('unknown endpoint must be rejected')
   if (unknown.error.details.endpoint !== 'nope') throw new Error(`unknown endpoint details: ${JSON.stringify(unknown.error.details)}`)
 
-  const settingsUnavailable = await callApp(web, 'setSettings', { fields: { idleMinutes: 5 } })
-  assertErrorEnvelope('setSettings without settings', settingsUnavailable)
-  if (settingsUnavailable.error.code !== 'settings-unavailable') {
-    throw new Error(`settings-unavailable code: ${JSON.stringify(settingsUnavailable)}`)
-  }
-  if (settingsUnavailable.error.details.namespace !== 'ui-settings-other') {
-    throw new Error(`settings-unavailable details: ${JSON.stringify(settingsUnavailable.error.details)}`)
+  // The settings endpoints are gone with the namespace they served.
+  for (const endpoint of ['getSettings', 'setSettings', 'resetSettings']) {
+    const gone = await callApp(web, endpoint, { fields: { idleMinutes: 5 } })
+    assertErrorEnvelope(`${endpoint} after the settings removal`, gone)
+    if (gone.error.code !== 'bad-request') {
+      throw new Error(`${endpoint} must now be an unknown endpoint: ${JSON.stringify(gone)}`)
+    }
   }
 
   const busy = await callApp(web, 'restart', {})
@@ -592,70 +630,36 @@ const assertStatusUsable = async (stub, label) => {
   if (cancelled.length !== 1 || cancelled[0].id !== 'sess-a') throw new Error(`force must cancel running sessions: ${JSON.stringify(cancelled)}`)
   if (cancelled[0].opts?.keepInbox !== true) throw new Error('force cancel must keepInbox')
 
-  console.log('host OK: prefix /app route + status(running/service/idle) + restart session protection (busy/force)')
+  console.log('host OK: prefix /app route + status(running/service, no idle) + restart session protection (busy/force)')
 }
 
-// 2) apply WITH a settings service -> namespace registered, entry as base, watch wired
+// 2) the removed settings surface, pinned: a settings service may be present in
+//    the environment, but this plugin must neither register a namespace nor ask
+//    for one — the idle auto-stop was its only consumer.
 {
-  settingsRegistered = null
-  settingsWatchCb = null
-  settingsAvailable = true
   hostWarns = []
   routeEvents = []
   webServerStub = makeWebServerStub()
   const web = webServerStub
-  const ret = host.apply(hostCtx, { script: MISSING_SCRIPT, idleMinutes: 7 })
-  if (ret !== undefined && typeof ret.then === 'function') throw new Error('P0 regression: apply returned a thenable (with settings)')
-  appRouteOf(web)
-  if (settingsRegistered === null || settingsRegistered.ns !== 'ui-settings-other') {
-    throw new Error(`namespace not registered: ${JSON.stringify(settingsRegistered)}`)
-  }
-  if (JSON.stringify(settingsRegistered.options.base) !== '{"idleMinutes":7}') {
-    throw new Error(`entry base mismatch: ${JSON.stringify(settingsRegistered.options.base)}`)
-  }
-  if (settingsWatchCb === null) throw new Error('settings watch must be wired')
-  const status1 = await callApp(web, 'status')
-  if (status1.value.idle.idleMinutes !== 7) throw new Error(`entry idleMinutes must drive status: ${JSON.stringify(status1.value.idle)}`)
-  settingsWatchCb() // simulated settings change: monitor rebuild must not throw
-  if (status1.value.idle.enabled !== true) throw new Error('idle enabled default mismatch')
-  const badFields = await callApp(web, 'setSettings', { fields: [] })
-  assertErrorEnvelope('setSettings with bad fields', badFields)
-  if (badFields.error.code !== 'bad-request' || badFields.error.details.received !== 'array') {
-    throw new Error(`bad fields envelope: ${JSON.stringify(badFields)}`)
-  }
+  settingsInjectAttempts = 0
 
-  // The remaining settings endpoints through the real route: `getSettings`
-  // returns the resolved source, a valid `setSettings` write moves it (and the
-  // next `status` snapshot proves the write reached the plugin, not just the
-  // scope double), `resetSettings` drops the user layer back to the entry base.
-  const read = await callApp(web, 'getSettings')
-  if (!read.ok || read.value.idleMinutes !== 7 || read.value.idleEnabled !== true) {
-    throw new Error(`getSettings envelope: ${JSON.stringify(read)}`)
+  const ret = host.apply(hostCtx, { script: MISSING_SCRIPT, idleMinutes: 7 })
+  if (ret !== undefined && typeof ret.then === 'function') throw new Error('P0 regression: apply returned a thenable (with a settings service present)')
+  appRouteOf(web)
+  if (settingsInjectAttempts !== 0) {
+    throw new Error(`the host half must not inject the settings service any more, asked ${settingsInjectAttempts} time(s)`)
   }
-  const write = await callApp(web, 'setSettings', { fields: { idleMinutes: 30 } })
-  if (!write.ok || write.value.idleMinutes !== 30) throw new Error(`setSettings must answer the new source: ${JSON.stringify(write)}`)
-  const statusWritten = await callApp(web, 'status')
-  if (statusWritten.value.idle.idleMinutes !== 30) {
-    throw new Error(`a committed write must drive status: ${JSON.stringify(statusWritten.value.idle)}`)
-  }
-  const reset = await callApp(web, 'resetSettings')
-  if (!reset.ok || reset.value.idleMinutes !== 7) {
-    throw new Error(`resetSettings must fall back to the entry base: ${JSON.stringify(reset)}`)
-  }
-  const statusReset = await callApp(web, 'status')
-  if (statusReset.value.idle.idleMinutes !== 7) {
-    throw new Error(`reset must drive status back to the entry base: ${JSON.stringify(statusReset.value.idle)}`)
-  }
-  console.log('host OK: settings namespace ui-settings-other (base=entry) + watch rebuild + get/set/reset Settings over /app')
+  if (intervals.size !== 0) throw new Error(`the host half must arm no interval, got ${intervals.size}`)
+  const status = await callApp(web, 'status')
+  if (status.value.idle !== undefined) throw new Error(`status must not carry idle: ${JSON.stringify(status.value)}`)
+  // An entry-config key from the deleted feature is inert, not fatal: `Config`
+  // keeps unknown keys, so an existing profile entry still boots.
+  console.log('host OK: no settings namespace, no interval, and a legacy idleMinutes entry key is tolerated')
 }
 
 // 2b) diagnostics route: with a `webServer` service, every apply() publishes an
 //     exact `/ui-settings-other/health` that reports what actually attached.
 {
-  settingsRegistered = null
-  settingsWatchCb = null
-  settingsAvailable = true
-  settingsRegisterThrows = false
   hostWarns = []
   routeEvents = []
   webServerStub = makeWebServerStub()
@@ -664,7 +668,7 @@ const assertStatusUsable = async (stub, label) => {
   host.apply(hostCtx, { script: MISSING_SCRIPT })
 
   appRouteOf(web)
-  const health = await readHealth(web, { channel: true, settings: true, branding: true }, 'health (healthy apply)')
+  const health = await readHealth(web, { channel: true, branding: true }, 'health (healthy apply)')
   if (health.warnings.length !== 0) throw new Error(`a healthy apply must report no warnings: ${JSON.stringify(health.warnings)}`)
   if (hostWarns.length !== 0) throw new Error(`a healthy apply must log no warnings: ${JSON.stringify(hostWarns)}`)
 
@@ -689,59 +693,7 @@ const assertStatusUsable = async (stub, label) => {
   if (routeEvents.join('|') !== expectedOrder) {
     throw new Error(`registration order must be ${expectedOrder}, got ${routeEvents.join('|')}`)
   }
-  console.log(`host health OK: exact ${HEALTH_PATH} (json + no-store) reports channel/settings/branding, registered first`)
-}
-
-// 2c) fail-soft, core regression: a throwing settings wiring must NOT take the
-//     /app route down. Unguarded, that throw skipped the route registration
-//     below it — no route existed and the whole page read 运行状态获取失败.
-//
-//     Fidelity note: this shared hostCtx double calls `inject` callbacks
-//     SYNCHRONOUSLY (sections 1/2 already depend on that), so the settings
-//     throw below really lands in apply's catch. A real Cordis Context
-//     schedules that callback in the settings child fiber instead, where the
-//     throw is contained and never reaches apply — verified against
-//     @deepseek-ai/cordis, which is why the favicon/monitor guards (2d) are the
-//     ones that protect the transport in production.
-{
-  settingsRegistered = null
-  settingsWatchCb = null
-  settingsAvailable = true
-  settingsRegisterThrows = true
-  hostWarns = []
-  routeEvents = []
-  webServerStub = makeWebServerStub()
-  const web = webServerStub
-
-  let applyFailure = null
-  try { host.apply(hostCtx, { script: MISSING_SCRIPT }) } catch (error) { applyFailure = error }
-  if (applyFailure !== null) {
-    throw new Error(`fail-soft regression: a throwing settings wiring must not escape apply (threw: ${applyFailure.message})`)
-  }
-  // appRouteOf throws the same way the old channel assertion did: the route
-  // must exist even though the settings wiring above it exploded.
-  appRouteOf(web)
-  if (settingsRegistered !== null) throw new Error('a throwing register must not be recorded as registered')
-
-  const health = await readHealth(web, { channel: true, settings: false, branding: true }, 'health (settings wiring failed)')
-  if (health.warnings.length !== 1 || !/^settings wiring failed/.test(health.warnings[0])) {
-    throw new Error(`the settings failure must be reported once in warnings: ${JSON.stringify(health.warnings)}`)
-  }
-  if (hostWarns.length !== 1 || !hostWarns[0].includes(health.warnings[0])) {
-    throw new Error(`the same reason must reach logger.warn: ${JSON.stringify(hostWarns)}`)
-  }
-
-  // The route is fully usable, not merely registered.
-  const status = await assertStatusUsable(web, 'degraded status (settings wiring failed)')
-  if (status.value.idle?.enabled !== true || status.value.idle.idleMinutes !== 120) {
-    throw new Error(`the entry-config fallback must still drive idle: ${JSON.stringify(status.value.idle)}`)
-  }
-  const write = await callApp(web, 'setSettings', { fields: { idleMinutes: 5 } })
-  assertErrorEnvelope('setSettings without a scope', write)
-  if (write.error.code !== 'settings-unavailable') {
-    throw new Error(`setSettings must degrade with settings-unavailable: ${JSON.stringify(write)}`)
-  }
-  console.log('host fail-soft OK: a throwing settings register still leaves /app + status + settings-unavailable')
+  console.log(`host health OK: exact ${HEALTH_PATH} (json + no-store) reports channel/branding, registered first`)
 }
 
 // 2d) fail-soft: an unreadable favicon asset must only skip the branding. The
@@ -754,10 +706,6 @@ const assertStatusUsable = async (stub, label) => {
 {
   const faviconAsset = host.patchAssetPath('favicon-128.png')
 
-  settingsRegistered = null
-  settingsWatchCb = null
-  settingsAvailable = true
-  settingsRegisterThrows = false
   hostWarns = []
   routeEvents = []
   webServerStub = makeWebServerStub()
@@ -792,7 +740,7 @@ const assertStatusUsable = async (stub, label) => {
   const png = readFileSync(faviconAsset)
   if (png.subarray(0, 4).toString('hex') !== '89504e47') throw new Error('the favicon asset must read as PNG after the probe')
 
-  const health = await readHealth(web, { channel: true, settings: true, branding: false }, 'health (favicon unreadable)')
+  const health = await readHealth(web, { channel: true, branding: false }, 'health (favicon unreadable)')
   if (health.warnings.length !== 1 || !/^favicon override skipped/.test(health.warnings[0]) || !health.warnings[0].includes('ENOENT')) {
     throw new Error(`the favicon failure must be reported once, with its cause: ${JSON.stringify(health.warnings)}`)
   }
@@ -801,8 +749,7 @@ const assertStatusUsable = async (stub, label) => {
   if (JSON.stringify(routeSurface) !== JSON.stringify(expectedSurface)) {
     throw new Error(`a skipped branding must register no favicon route, got ${JSON.stringify(routeSurface)}`)
   }
-  const status = await assertStatusUsable(web, 'degraded status (favicon unreadable)')
-  if (status.value.idle?.idleMinutes !== 120) throw new Error(`status idle after a skipped branding: ${JSON.stringify(status.value.idle)}`)
+  await assertStatusUsable(web, 'degraded status (favicon unreadable)')
   console.log('host fail-soft OK: an unreadable favicon asset skips branding only; /app + status stay up')
 }
 
@@ -814,10 +761,6 @@ const assertStatusUsable = async (stub, label) => {
 //     trailing-slash or multi-segment path; the query string is not part of the
 //     endpoint).
 {
-  settingsRegistered = null
-  settingsWatchCb = null
-  settingsAvailable = true
-  settingsRegisterThrows = false
   hostWarns = []
   routeEvents = []
   webServerStub = makeWebServerStub()
@@ -918,10 +861,6 @@ const assertStatusUsable = async (stub, label) => {
 //     endpoint, its argument vector and its envelope stay real, but no process
 //     starts and no desktop shortcut is ever created.
 {
-  settingsRegistered = null
-  settingsWatchCb = null
-  settingsAvailable = true
-  settingsRegisterThrows = false
   hostWarns = []
   routeEvents = []
   webServerStub = makeWebServerStub()
@@ -990,14 +929,114 @@ const assertStatusUsable = async (stub, label) => {
   }
 }
 
+// 2h) versionCheck through the real route. Shape is asserted unconditionally —
+//     an unreachable registry must still answer ok:true with the reason in
+//     `error` — and the comparison runs against whatever `latest` really is,
+//     so this test cannot pass by hardcoding a version.
+{
+  hostWarns = []
+  routeEvents = []
+  webServerStub = makeWebServerStub()
+  const web = webServerStub
+  host.apply(hostCtx, { script: MISSING_SCRIPT })
+
+  const first = await callApp(web, 'versionCheck')
+  if (first.ok !== true) throw new Error(`versionCheck must answer ok:true even without a registry answer: ${JSON.stringify(first)}`)
+  const value = first.value
+  // `current` comes from dshVersion(), which walks up from `process.argv[1]` —
+  // the dsh bin.js in the service, but THIS harness file when run from the repo,
+  // so null is the expected shape here (and `hasUpdate` must then stay false).
+  if (value.current !== null && (typeof value.current !== 'string' || value.current.length === 0)) {
+    throw new Error(`versionCheck.current: ${JSON.stringify(value)}`)
+  }
+  if (value.current === null && value.hasUpdate !== false) {
+    throw new Error(`an unresolved current version can never be "an update available": ${JSON.stringify(value)}`)
+  }
+  if (value.latest !== null && typeof value.latest !== 'string') throw new Error(`versionCheck.latest: ${JSON.stringify(value)}`)
+  if (typeof value.hasUpdate !== 'boolean') throw new Error(`versionCheck.hasUpdate: ${JSON.stringify(value)}`)
+  if (typeof value.registry !== 'string' || !/^https?:\/\//.test(value.registry)) throw new Error(`versionCheck.registry: ${JSON.stringify(value)}`)
+  if (value.error !== null && typeof value.error !== 'string') throw new Error(`versionCheck.error: ${JSON.stringify(value)}`)
+  if (value.registry !== host.resolveRegistry()) {
+    throw new Error(`the check must use the configured registry (${host.resolveRegistry()}), got ${value.registry}`)
+  }
+
+  if (value.latest === null) {
+    console.log(`versionCheck OK: registry unreachable, shape holds (error: ${value.error})`)
+  } else {
+    if (value.error !== null) throw new Error(`a parsed latest must not carry an error: ${JSON.stringify(value)}`)
+    if (value.hasUpdate !== host.isNewerVersion(value.current, value.latest)) {
+      throw new Error(`hasUpdate must be isNewerVersion(current, latest): ${JSON.stringify(value)}`)
+    }
+    // The answer is cached, and `force` is the only way past it.
+    const cached = await callApp(web, 'versionCheck')
+    if (JSON.stringify(cached.value) !== JSON.stringify(value)) throw new Error(`the cached answer must be reused: ${JSON.stringify(cached.value)}`)
+    const forced = await callApp(web, 'versionCheck', { force: true })
+    if (!forced.ok || typeof forced.value.latest !== 'string') throw new Error(`a forced check must still answer: ${JSON.stringify(forced)}`)
+    console.log(`versionCheck OK: current=${value.current} latest=${value.latest} hasUpdate=${value.hasUpdate} registry=${value.registry} (cached + forced reads)`)
+  }
+}
+
+// 2i) the update endpoint: it shares the restart machinery (lock, session
+//     protection, spawn, watchdog) and only adds the target version. Drives the
+//     real route; the script is a TEMP stub that exits 0.
+{
+  const stubScript = join(harnessTmpDir, 'update-stub.ps1')
+  writeFileSync(stubScript, [
+    '# verify-harness stub for update-dsh.ps1: exits without updating anything',
+    'param([string]$Version = "", [switch]$OpenBrowser)',
+    'exit 0',
+    '',
+  ].join('\n'))
+
+  hostWarns = []
+  routeEvents = []
+  webServerStub = makeWebServerStub()
+  const web = webServerStub
+  cancelled = []
+  host.apply(hostCtx, { script: MISSING_SCRIPT, updateScript: stubScript })
+
+  // A version is what the page read from the registry: it must be pinned onto
+  // the script's command line, and junk must be refused before anything spawns.
+  const junk = await callApp(web, 'update', { version: 'banana' })
+  assertErrorEnvelope('update with a junk version', junk)
+  if (junk.error.code !== 'bad-request' || junk.error.details.version !== 'banana') {
+    throw new Error(`junk version envelope: ${JSON.stringify(junk)}`)
+  }
+
+  // Sessions running: same refusal as a restart (fakeAgents always has one).
+  const refused = await callApp(web, 'update', { version: '0.1.5-rc.3' })
+  assertErrorEnvelope('update while sessions run', refused)
+  if (refused.error.code !== 'sessions-running') throw new Error(`update must refuse: ${JSON.stringify(refused)}`)
+  if (cancelled.length !== 0) throw new Error('a refused update must not cancel sessions')
+
+  const scheduled = await callApp(web, 'update', { version: '0.1.5-rc.3', force: true })
+  if (!scheduled.ok || scheduled.value?.scheduled !== true || scheduled.value.version !== '0.1.5-rc.3') {
+    throw new Error(`update envelope: ${JSON.stringify(scheduled)}`)
+  }
+  if (scheduled.value.script !== stubScript) throw new Error(`update must use the configured script: ${JSON.stringify(scheduled.value)}`)
+  if (cancelled.length !== 1 || cancelled[0].id !== 'sess-a') throw new Error(`forced update must cancel running sessions: ${JSON.stringify(cancelled)}`)
+  const again = await callApp(web, 'update', { version: '0.1.5-rc.3', force: true })
+  if (!again.ok || again.value?.already !== true) {
+    throw new Error(`the restart lock must also cover updates: ${JSON.stringify(again)}`)
+  }
+
+  // A missing update script is reported as such (deploy hint), like the restart one.
+  hostWarns = []
+  webServerStub = makeWebServerStub()
+  const bare = webServerStub
+  host.apply(hostCtx, { script: MISSING_SCRIPT, updateScript: MISSING_SCRIPT })
+  const missing = await callApp(bare, 'update', { version: '0.1.5-rc.3', force: true })
+  assertErrorEnvelope('update without a script', missing)
+  if (missing.error.code !== 'internal' || !/update script not found/.test(missing.error.message)) {
+    throw new Error(`missing update script envelope: ${JSON.stringify(missing)}`)
+  }
+  console.log('host OK: /app/update pins the version, refuses junk + running sessions, shares the restart lock, reports a missing script')
+}
+
 // 2g) without a `webServer` service the transport cannot exist: apply must warn
 //     once and register nothing, NOT throw (the page then shows its own
 //     fallback copy instead of the plugin taking the boot down).
 {
-  settingsRegistered = null
-  settingsWatchCb = null
-  settingsAvailable = true
-  settingsRegisterThrows = false
   hostWarns = []
   routeEvents = []
   webServerStub = null // no webServer service at all
@@ -1017,14 +1056,12 @@ const assertStatusUsable = async (stub, label) => {
 // Hand the shared hostCtx double back in its default shape (no webServer).
 webServerStub = null
 
-// 3) lifecycle: one monitor per apply, none created during an unload, none
-//    leaked by it, and no restart watchdog outliving the plugin.
+// 3) lifecycle: no restart watchdog outliving the plugin.
 //
-//    The mock mirrors the two Cordis semantics these guarantees rest on:
-//    `ctx.inject` registers a CHILD fiber on the parent (and settles on a later
-//    microtask, so the settings section attaches after `apply` returns), and a
-//    fiber releases its effects in REVERSE registration order — which is why
-//    the settings section's disposer runs before the monitor-owning effect.
+//    The mock mirrors the Cordis semantics this guarantee rests on: `ctx.inject`
+//    registers a CHILD fiber on the parent (and settles on a later microtask), so
+//    the transport route is registered after `apply` returns, and a fiber
+//    releases its effects in REVERSE registration order.
 {
   const FIBER_ACTIVE = 2
   const FIBER_UNLOADING = 5
@@ -1071,130 +1108,21 @@ webServerStub = null
     return self
   }
 
-  /** Settings provider double: `get()` resolves base over the user layer. */
-  const makeSettings = (initial) => {
-    let value = { ...initial }
-    const watchers = new Set()
-    return {
-      set: (fields) => {
-        value = { ...value, ...fields }
-        for (const cb of watchers) cb()
-      },
-      service: {
-        register: (ns, schema, options) => ({
-          get: () => ({ ...options.base, ...value }),
-          watch: (cb) => { watchers.add(cb); return () => watchers.delete(cb) },
-          update: async (fields) => { value = { ...value, ...fields } },
-          replace: async () => { value = {} },
-        }),
-      },
-    }
-  }
-
   /**
    * The service set one lifecycle case runs against: the transport service is
-   * `webServer` now, and `connection` is deliberately a bare `{}` — the plugin's
-   * inject gate still names it, but nothing may read from it any more.
+   * `webServer`, and `connection` is deliberately a bare `{}` — nothing may read
+   * from it any more.
    */
-  const makeServices = (settingsService) => ({
+  const makeServices = () => ({
     webServer: makeWebServerStub(),
     connection: {},
     agents: { list: () => [], get: () => undefined },
-    ...settingsService === undefined ? {} : { settings: settingsService },
   })
 
-  const realSetInterval = globalThis.setInterval
-  const realClearInterval = globalThis.clearInterval
-  const liveIntervals = new Set()
-  let createdIntervals = 0
-  globalThis.setInterval = (fn, ms) => {
-    const handle = realSetInterval(fn, ms)
-    liveIntervals.add(handle)
-    createdIntervals += 1
-    return handle
-  }
-  globalThis.clearInterval = (handle) => {
-    liveIntervals.delete(handle)
-    return realClearInterval(handle)
-  }
-  try {
-    // (a) settings present, idle auto-stop on: ONE assembly, no churn.
-    {
-      const settings = makeSettings({ idleEnabled: true, idleMinutes: 120 })
-      const app = makeFiber({ services: makeServices(settings.service) })
-      host.apply(app.ctx, { idleMinutes: 120 })
-      await flush() // let the settings section attach
-      if (createdIntervals !== 1) throw new Error(`apply must assemble exactly one monitor, created ${createdIntervals}`)
-      if (liveIntervals.size !== 1) throw new Error(`expected one live interval, got ${liveIntervals.size}`)
-
-      // Unload: the settings section's disposer runs FIRST (reverse order).
-      const beforeUnload = createdIntervals
-      await app.dispose()
-      if (createdIntervals !== beforeUnload) {
-        throw new Error(`unload created ${createdIntervals - beforeUnload} monitor(s); it must create none`)
-      }
-      if (liveIntervals.size !== 0) throw new Error(`unload left ${liveIntervals.size} interval(s) running`)
-      console.log('lifecycle OK: one monitor per apply; an unload rebuilds nothing and leaks nothing')
-    }
-
-    // (b) settings disable idle auto-stop; when the PROVIDER detaches the
-    //     plugin keeps running, so the entry config must take over again.
-    {
-      const settings = makeSettings({ idleEnabled: false, idleMinutes: 120 })
-      const app = makeFiber({ services: makeServices(settings.service) })
-      const before = createdIntervals
-      host.apply(app.ctx, { idleMinutes: 120 })
-      await flush()
-      if (createdIntervals - before !== 1) {
-        throw new Error(`the attached settings scope must not assemble a second monitor, created ${createdIntervals - before}`)
-      }
-      if (liveIntervals.size !== 0) throw new Error('the attached settings scope must stop the entry-config monitor')
-
-      const settingsChild = app.ctx.children[0].ctx.children[0]
-      if (settingsChild === undefined) throw new Error('settings child fiber missing')
-      await settingsChild.dispose() // provider detach: the plugin is NOT unloading
-      if (createdIntervals - before !== 2) {
-        throw new Error(`provider detach must rebuild from the entry config, created ${createdIntervals - before}`)
-      }
-      if (liveIntervals.size !== 1) throw new Error(`fallback monitor must be live, got ${liveIntervals.size}`)
-
-      const beforeUnload = createdIntervals
-      await app.dispose()
-      if (createdIntervals !== beforeUnload) throw new Error('plugin unload must not rebuild the fallback monitor')
-      if (liveIntervals.size !== 0) throw new Error(`unload left ${liveIntervals.size} interval(s) running`)
-      console.log('lifecycle OK: provider detach falls back to the entry config; a later unload stays silent')
-    }
-
-    // (c) settings DISABLE idle auto-stop while the entry config enables it:
-    //     unloading must not resurrect the monitor. The settings section's
-    //     disposer runs BEFORE the monitor-owning effect, so without the
-    //     unload guard it would restore the entry source and rebuild here.
-    {
-      const settings = makeSettings({ idleEnabled: false, idleMinutes: 120 })
-      const app = makeFiber({ services: makeServices(settings.service) })
-      const before = createdIntervals
-      host.apply(app.ctx, { idleMinutes: 120 })
-      await flush()
-      if (createdIntervals - before !== 1) throw new Error(`single assembly expected, created ${createdIntervals - before}`)
-      if (liveIntervals.size !== 0) throw new Error('the attached settings scope must have stopped the entry-config monitor')
-      const beforeUnload = createdIntervals
-      await app.dispose()
-      if (createdIntervals !== beforeUnload) {
-        throw new Error(`unload created ${createdIntervals - beforeUnload} monitor(s); it must create none`)
-      }
-      if (liveIntervals.size !== 0) throw new Error(`unload left ${liveIntervals.size} interval(s) running`)
-      console.log('lifecycle OK: an unload never resurrects the monitor the settings layer disabled')
-    }
-  } finally {
-    globalThis.setInterval = realSetInterval
-    globalThis.clearInterval = realClearInterval
-    for (const handle of liveIntervals) realClearInterval(handle)
-  }
-
-  // (c) the restart watchdog is armed once and released by the unload. The
-  //     restart script is a TEMP stub that exits 0: it stands in for a script
-  //     whose process never brings the service back (the lock must still be
-  //     released by the watchdog, and the timer must not outlive the plugin).
+  // The restart watchdog is armed once and released by the unload. The
+  // restart script is a TEMP stub that exits 0: it stands in for a script
+  // whose process never brings the service back (the lock must still be
+  // released by the watchdog, and the timer must not outlive the plugin).
   {
     const stubScript = join(harnessTmpDir, 'restart-stub.ps1')
     writeFileSync(stubScript, [
@@ -1203,7 +1131,7 @@ webServerStub = null
       'exit 0',
       '',
     ].join('\n'))
-    const services = makeServices(makeSettings({ idleEnabled: true, idleMinutes: 120 }).service)
+    const services = makeServices()
     const app = makeFiber({ services })
     host.apply(app.ctx, { script: stubScript })
     await flush()
@@ -1294,7 +1222,6 @@ if (DOM_AVAILABLE) {
 if (handoff === null) throw new Error('bundle never called __ModuleLoader__.load')
 if (handoff.id !== PLUGIN_ID) throw new Error(`handoff id mismatch: ${handoff.id}`)
 
-const icon = (props) => React.createElement('svg', { ...props, 'data-icon': true })
 // Minimal Modal stub matching the primitives contract used by the section:
 // open -> overlay with title/description/footer; closed -> null. The real
 // Modal portals to document.body; the stub renders in place — both forms
@@ -1309,9 +1236,7 @@ const ModalStub = (props) => {
 const requireTable = (spec) => {
   if (spec === 'react') return uiRequire('react')
   if (spec === 'react/jsx-runtime') return uiRequire('react/jsx-runtime')
-  if (spec === '@deepseek-ai/dsh-client-ui-primitives') {
-    return { IconChevronDownOutline14: icon, Modal: ModalStub }
-  }
+  if (spec === '@deepseek-ai/dsh-client-ui-primitives') return { Modal: ModalStub }
   throw new Error(`unexpected module-table word: ${spec}`)
 }
 const exports_ = handoff.factory(requireTable)
@@ -1326,12 +1251,13 @@ let registrations = []
 let dicts = []
 let rpcLog = []
 let restartResult = { ok: true, value: { scheduled: true, delayMs: 2600 } }
-let cardValue = { idleEnabled: true, idleMinutes: 45 }
-let statusValue = {
-  running: 0,
-  sessions: [],
+// `service.pid` is what the progress driver keys on: the restart replaces the
+// process, so the double flips it to model the replacement coming up.
+const makeStatus = ({ running = 0, sessions = [], pid = 4242 } = {}) => ({
+  running,
+  sessions,
   service: {
-    pid: 4242,
+    pid,
     startedAt: '2026-01-01T00:00:00.000Z',
     uptime: 3661,
     rss: 536870912,
@@ -1340,8 +1266,8 @@ let statusValue = {
     version: '0.1.0-rc.6',
     ports: [3080],
   },
-  idle: { enabled: true, idleMinutes: 120, lastBusyAt: Date.now() - 60_000 },
-}
+})
+let statusValue = makeStatus()
 const clientCtx = {
   effect: (fn) => fn(),
   locale: {
@@ -1365,19 +1291,15 @@ const clientCtx = {
 // the host route's fence enforces — and answered with a Response double.
 // `rpcFailure` forces the HTTP-failure branch (non-2xx).
 let rpcFailure = null
+/** What the version check answers; a fresh check may flip it. */
+let versionValue = { current: '0.1.5-rc.2', latest: '0.1.5-rc.3', hasUpdate: true, registry: 'https://registry.example', error: null }
+let updateResult = { ok: true, value: { scheduled: true, script: 'C:/update-dsh.ps1', version: '0.1.5-rc.3' } }
 const envelopeFor = (endpoint, args) => {
   if (endpoint === 'status') return { ok: true, value: statusValue }
+  if (endpoint === 'update') return updateResult
+  if (endpoint === 'versionCheck') return { ok: true, value: versionValue }
   if (endpoint === 'restart') return restartResult
   if (endpoint === 'installShortcut') return { ok: true, value: { created: true, icon: 'C:/icon.ico', output: 'created C:\\Users\\x\\Desktop\\dsh-web.lnk' } }
-  if (endpoint === 'getSettings') return { ok: true, value: cardValue }
-  if (endpoint === 'setSettings') {
-    cardValue = { ...cardValue, ...args.fields }
-    return { ok: true, value: cardValue }
-  }
-  if (endpoint === 'resetSettings') {
-    cardValue = { idleEnabled: true, idleMinutes: 120 }
-    return { ok: true, value: cardValue }
-  }
   return { ok: false, error: { code: 'bad-request', message: 'unexpected', details: {} } }
 }
 globalThis.fetch = async (url, init = {}) => {
@@ -1424,7 +1346,11 @@ const assertClientCall = (call, endpoint, args, label = endpoint) => {
 exports_.apply(clientCtx)
 
 const sectionReg = registrations.find((r) => r.name === 'settings.section')
-const cardReg = registrations.find((r) => r.name === 'settings.plugin.item')
+// The 插件配置 card is gone with the idle auto-stop: this plugin owns no
+// settings any more, so nothing may be contributed to `settings.plugin.item`.
+if (registrations.some((r) => r.name === 'settings.plugin.item')) {
+  throw new Error('settings.plugin.item must not be contributed any more (the config card was removed)')
+}
 if (sectionReg === undefined) throw new Error('settings.section never registered')
 if (sectionReg.id !== 'other' || sectionReg.order !== 30) {
   throw new Error(`section options mismatch: ${JSON.stringify(sectionReg)}`)
@@ -1432,7 +1358,7 @@ if (sectionReg.id !== 'other' || sectionReg.order !== 30) {
 // The section's whole inject surface, asserted EXACTLY: the deleted
 // `reloadPlugins` (重载用户插件) and `stopService` (中断服务) entries must stay
 // gone, and no new key may slip in unnoticed.
-const SECTION_INJECT_KEYS = ['installShortcut', 'restart', 'status']
+const SECTION_INJECT_KEYS = ['installShortcut', 'restart', 'status', 'update', 'versionCheck']
 const sectionInjected = sectionReg.inject()
 const sectionInjectKeys = Object.keys(sectionInjected).sort()
 if (JSON.stringify(sectionInjectKeys) !== JSON.stringify(SECTION_INJECT_KEYS)) {
@@ -1441,24 +1367,15 @@ if (JSON.stringify(sectionInjectKeys) !== JSON.stringify(SECTION_INJECT_KEYS)) {
 for (const key of SECTION_INJECT_KEYS) {
   if (typeof sectionInjected[key] !== 'function') throw new Error(`section inject must expose ${key} as a function`)
 }
-if (cardReg === undefined) throw new Error('settings.plugin.item never registered')
-if (cardReg.key !== 'ui-settings-other' || cardReg.locale !== 'settings.other.card') {
-  throw new Error(`card options mismatch: ${JSON.stringify(cardReg)}`)
-}
 const sectionDict = dicts.find((d) => d.ns === 'settings.other')
-const cardDict = dicts.find((d) => d.ns === 'settings.other.card')
-if (sectionDict === undefined || cardDict === undefined) throw new Error('dictionaries not registered')
+if (sectionDict === undefined) throw new Error('the section dictionary was not registered')
+if (dicts.some((d) => d.ns === 'settings.other.card')) throw new Error('the card dictionary must not be registered any more')
 const zhKeys = Object.keys(sectionDict.dict.zh)
 const enKeys = Object.keys(sectionDict.dict.en)
 if (JSON.stringify(zhKeys) !== JSON.stringify(enKeys)) {
   throw new Error(`zh/en key mismatch (section):\nzh: ${zhKeys}\nen: ${enKeys}`)
 }
-const zhCardKeys = Object.keys(cardDict.dict.zh)
-const enCardKeys = Object.keys(cardDict.dict.en)
-if (JSON.stringify(zhCardKeys) !== JSON.stringify(enCardKeys)) {
-  throw new Error(`zh/en key mismatch (card):\nzh: ${zhCardKeys}\nen: ${enCardKeys}`)
-}
-console.log(`apply contract OK: section id=other order=30 | card key=ui-settings-other | dict keys = ${zhKeys.length} + ${zhCardKeys.length}`)
+console.log(`apply contract OK: section id=other order=30, no config card | dict keys = ${zhKeys.length}`)
 
 if (!DOM_AVAILABLE) {
   console.log('\nclient DOM sections SKIPPED (jsdom not installed)')
@@ -1471,44 +1388,52 @@ const { act } = React
 const { createRoot } = uiRequire('react-dom/client')
 
 const fireClick = (el) => { el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) }
-const fireChange = (el, value) => {
-  const proto = el.tagName === 'SELECT' ? dom.window.HTMLSelectElement.prototype : dom.window.HTMLInputElement.prototype
-  const setter = Object.getOwnPropertyDescriptor(proto, 'value').set
-  setter.call(el, value)
-  el.dispatchEvent(new dom.window.Event('change', { bubbles: true }))
-}
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 const en = sectionDict.dict.en
 const clientInjected = sectionReg.inject('session-1')
+// Named-placeholder interpolation, like the shipped locale service does for
+// every key (the version card uses {v}, the session copy uses {n}).
 const tWithParams = (key, params) => {
-  const value = en[key]
-  return params && params.n !== undefined ? value.replace('{n}', String(params.n)) : value
+  let value = en[key]
+  for (const [name, replacement] of Object.entries(params ?? {})) {
+    value = value.replace('{' + name + '}', String(replacement))
+  }
+  return value
 }
+/** The section props every render in this harness uses. */
+const sectionProps = (extra = {}) => ({
+  restart: clientInjected.restart,
+  status: clientInjected.status,
+  installShortcut: clientInjected.installShortcut,
+  versionCheck: clientInjected.versionCheck,
+  update: clientInjected.update,
+  t: tWithParams,
+  ...extra,
+})
 
 const root = createRoot(dom.window.document.getElementById('root'))
 await act(async () => {
-  root.render(React.createElement(sectionReg.component, {
-    restart: clientInjected.restart,
-    status: clientInjected.status,
-    installShortcut: clientInjected.installShortcut,
-    t: tWithParams,
-  }))
+  root.render(React.createElement(sectionReg.component, sectionProps()))
 })
 
 const doc = dom.window.document
 const buttons = () => [...doc.querySelectorAll('.so-btn')]
 const buttonTexts = () => buttons().map((b) => b.textContent)
-// The current flow's status line is the LAST .so-flow-status in DOM order
-// (the shortcut success line from an earlier flow stays mounted).
+// The current flow's status line is the LAST .so-flow-status of the SERVICE
+// card (the shortcut success line stays mounted, and the version card below
+// owns a flow line of its own).
 const flowLine = () => {
-  const lines = [...doc.querySelectorAll('.so-flow-status')]
+  const card = doc.querySelector('.so-card')
+  const lines = [...card.querySelectorAll('.so-flow-status')]
   return lines.length > 0 ? lines[lines.length - 1] : null
 }
 
-// runtime snapshot block renders from the first /app/status poll
-const infoRows = () => [...doc.querySelectorAll('.so-info-row')]
-if (infoRows().length !== 8) throw new Error(`expected 8 info rows, got ${infoRows().length}`)
+// Runtime snapshot block renders from the first /app/status poll. Scoped to
+// the status block: the version card contributes info rows of its own.
+// (7 rows: the 空闲自动停止 countdown row went with the feature)
+const infoRows = () => [...doc.querySelectorAll('.so-status-block .so-info-row')]
+if (infoRows().length !== 7) throw new Error(`expected 7 info rows, got ${infoRows().length}`)
 const infoText = doc.querySelector('.so-info').textContent
 if (!infoText.includes('4242')) throw new Error(`pid missing: ${infoText}`)
 if (!infoText.includes('3080')) throw new Error(`ports missing: ${infoText}`)
@@ -1520,18 +1445,59 @@ const shortcutButton = buttons().find((b) => b.textContent === en.createShortcut
 if (shortcutButton === undefined) throw new Error('create-shortcut button missing')
 const restartButton = buttons().find((b) => b.textContent === en.restart)
 if (restartButton === undefined) throw new Error('restart button missing')
-// Exactly the three surviving controls: 「刷新」 + 创建桌面快捷方式 + 重启服务.
-if (buttons().length !== 3) {
-  throw new Error(`expected 3 buttons (${en.refresh} + ${en.createShortcut} + ${en.restart}), got ${buttons().length}: ${JSON.stringify(buttonTexts())}`)
+// Exactly these controls, and nothing else: the deleted ones (重载用户插件 /
+// 中断服务) must stay gone while 检查更新 arrived with the version card.
+// 更新并重启 only exists while the check reports an update, which the fixture
+// does (versionValue.hasUpdate).
+const EXPECTED_BUTTONS = [en.createShortcut, en.refresh, en.restart, en.update, en.versionCheck].sort()
+const actualButtons = buttonTexts().slice().sort()
+if (JSON.stringify(actualButtons) !== JSON.stringify(EXPECTED_BUTTONS)) {
+  throw new Error(`expected buttons ${JSON.stringify(EXPECTED_BUTTONS)}, got ${JSON.stringify(actualButtons)}`)
 }
 if (doc.querySelector('.so-danger-note') === null) throw new Error('danger note missing')
 // The mount poll went out over the /app prefix route as one fenced JSON POST —
-// no `ctx.connection.rpc`, no /api channel.
-assertClientCall(rpcLog[rpcLog.length - 1], 'status', {}, 'mount poll')
-rpcLog = [] // the mount already polled status once; reset before interaction
-console.log(`status block OK: 8 rows render pid/ports/versions; buttons = ${JSON.stringify(buttonTexts())}`)
+// no `ctx.connection.rpc`, no /api channel. (Searched, not "last": the version
+// card's own mount read lands after it.)
+assertClientCall(rpcLog.find((c) => c.url === `${APP_PATH}/status`), 'status', {}, 'mount poll')
+console.log(`status block OK: 7 rows render pid/ports/versions; buttons = ${JSON.stringify(buttonTexts())}`)
+
+// version card: the mount read reports the update, the manual check forces a
+// fresh read and follows the flipped answer. It asserts against the MOUNT log
+// (status + versionCheck) and clears it afterwards.
+{
+  const versionRows = [...doc.querySelectorAll('.so-info-row')].filter((row) => /0\.1\.5/.test(row.textContent))
+  const texts = versionRows.map((row) => row.textContent)
+  if (texts.length !== 2 || !texts.some((text) => text.includes('0.1.5-rc.2')) || !texts.some((text) => text.includes('0.1.5-rc.3'))) {
+    throw new Error(`version rows: ${JSON.stringify(texts)}`)
+  }
+  const available = [...doc.querySelectorAll('.so-flow-status')].find((el) => el.textContent === en.versionAvailable.replace('{v}', '0.1.5-rc.3'))
+  if (available === undefined) throw new Error('the update-available copy is missing')
+  if (versionRows.length !== 2) throw new Error(`the version card must show exactly two rows, got ${versionRows.length}`)
+  assertClientCall(rpcLog.find((c) => c.url === `${APP_PATH}/versionCheck`), 'versionCheck', {}, 'version mount read')
+
+  rpcLog = []
+  versionValue = { current: '0.1.5-rc.3', latest: '0.1.5-rc.3', hasUpdate: false, registry: 'https://registry.example', error: null }
+  await act(async () => { fireClick(buttons().find((b) => b.textContent === en.versionCheck)) })
+  assertClientCall(rpcLog.find((c) => c.url === `${APP_PATH}/versionCheck`), 'versionCheck', { force: true }, 'manual version check')
+  await act(async () => {})
+  const upToDate = [...doc.querySelectorAll('.so-flow-status')].find((el) => el.textContent === en.versionUpToDate)
+  if (upToDate === undefined) throw new Error('the manual check must follow the new answer')
+  // 更新并重启 tracks the answer: gone while up to date, back once the check
+  // reports an update again (the fixtures are restored for the flows below).
+  if ([...doc.querySelectorAll('.so-btn')].some((b) => b.textContent === en.update)) {
+    throw new Error('更新并重启 must not be offered while up to date')
+  }
+  versionValue = { current: '0.1.5-rc.2', latest: '0.1.5-rc.3', hasUpdate: true, registry: 'https://registry.example', error: null }
+  await act(async () => { fireClick([...doc.querySelectorAll('.so-btn')].find((b) => b.textContent === en.versionCheck)) })
+  await act(async () => {})
+  if (![...doc.querySelectorAll('.so-btn')].some((b) => b.textContent === en.update)) {
+    throw new Error('更新并重启 must come back with the update')
+  }
+  console.log('version card OK: mount read + forced re-check over POST /app/versionCheck (更新并重启 follows the answer)')
+}
 
 // refresh button re-polls /app/status
+rpcLog = [] // the mount (status + versionCheck) was asserted above
 await act(async () => { fireClick(refreshButton) })
 assertClientCall(rpcLog.find((c) => c.url === `${APP_PATH}/status`), 'status', {}, 'refresh')
 rpcLog = []
@@ -1553,7 +1519,7 @@ if (rpcLog.length !== 0) throw new Error('confirm state must not call the host y
 const confirmDialog = dialog()
 if (confirmDialog === null) throw new Error('restart confirm modal missing')
 if (confirmDialog.getAttribute('data-modal-title') !== en.restart) throw new Error('restart modal title mismatch')
-if (!confirmDialog.textContent.includes(en.confirmPrompt)) throw new Error('confirm prompt missing in modal')
+if (!confirmDialog.textContent.includes(en.confirmPromptRestart)) throw new Error('confirm prompt missing in modal')
 const confirmButton = buttons().find((b) => b.textContent === en.confirm)
 if (confirmButton === undefined) throw new Error('confirm button missing')
 console.log('confirm modal OK (restart)')
@@ -1561,31 +1527,106 @@ console.log('confirm modal OK (restart)')
 // cancel (in modal) returns to idle
 await act(async () => { fireClick(buttons().find((b) => b.textContent === en.cancel)) })
 if (dialog() !== null) throw new Error('cancel must close the modal')
-if (buttons().length !== 3) {
-  throw new Error(`cancel should restore the ${en.refresh} + ${en.createShortcut} + ${en.restart} buttons, got ${JSON.stringify(buttonTexts())}`)
+if (JSON.stringify(buttonTexts().slice().sort()) !== JSON.stringify(EXPECTED_BUTTONS)) {
+  throw new Error(`cancel should restore the idle buttons, got ${JSON.stringify(buttonTexts())}`)
 }
 console.log('cancel OK')
 
-// confirm -> calling -> scheduled; host endpoint + request shape
-await act(async () => { fireClick(buttons().find((b) => b.textContent === en.restart)) })
-await act(async () => { fireClick(buttons().find((b) => b.textContent === en.confirm)) })
-assertClientCall(rpcLog.find((c) => c.url === `${APP_PATH}/restart`), 'restart', {}, 'restart confirm')
-if (flowLine() === null || flowLine().textContent !== en.scheduled) throw new Error('scheduled status missing')
-console.log('restart flow OK: POST /app/restart (args {}) + scheduled status')
+// confirm -> calling -> progress; host endpoint + request shape, then the three
+// stages driven by what the page can still observe on its own origin.
+const progressHost = dom.window.document.createElement('div')
+const progressRoot = createRoot(progressHost)
+const pButton = (text) => [...progressHost.querySelectorAll('.so-btn')].find((b) => b.textContent === text)
+const pStepStates = () => [...progressHost.querySelectorAll('.so-progress-step')].map((el) => el.getAttribute('data-stage-state'))
+const pFill = () => progressHost.querySelector('.so-progress-fill')
+const pLine = (tone) => progressHost.querySelector(`.so-flow-status[data-tone="${tone}"]`)
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-// busy flow: sessions running -> busy view -> force restart passes force: true
+statusValue = makeStatus({ pid: 4242 })
+restartResult = { ok: true, value: { scheduled: true } }
+rpcLog = []
+await act(async () => { progressRoot.render(React.createElement(sectionReg.component, sectionProps())) })
+await act(async () => { fireClick(pButton(en.restart)) })
+await act(async () => { fireClick(pButton(en.confirm)) })
+assertClientCall(rpcLog.find((c) => c.url === `${APP_PATH}/restart`), 'restart', {}, 'restart confirm')
+// stage 1: the request is in, and the baseline poll still sees the OLD pid
+if (pFill() === null) throw new Error('progress bar missing after the restart was accepted')
+if (pFill().getAttribute('data-stage') !== '1' || pFill().getAttribute('data-state') !== 'active') {
+  throw new Error(`stage 1 fill: ${pFill().getAttribute('data-stage')} / ${pFill().getAttribute('data-state')}`)
+}
+if (JSON.stringify(pStepStates()) !== JSON.stringify(['done', 'active', 'pending'])) {
+  throw new Error(`stage 1 markers: ${JSON.stringify(pStepStates())}`)
+}
+// the old process is still answering: the bar must not move
+await act(async () => { await sleep(1100) })
+if (pFill().getAttribute('data-stage') !== '1') throw new Error(`the old pid must hold stage 1, got ${pFill().getAttribute('data-stage')}`)
+// the process goes away (the poll cannot connect), then answers with a NEW pid
+rpcFailure = 503
+await act(async () => { await sleep(1100) })
+if (pFill().getAttribute('data-stage') !== '2' || pFill().getAttribute('data-state') !== 'active') {
+  throw new Error(`a failed poll must move to stage 2: ${pFill().getAttribute('data-stage')} / ${pFill().getAttribute('data-state')}`)
+}
+if (JSON.stringify(pStepStates()) !== JSON.stringify(['done', 'done', 'active'])) {
+  throw new Error(`stage 2 markers: ${JSON.stringify(pStepStates())}`)
+}
+rpcFailure = null
+statusValue = makeStatus({ pid: 5151 })
+await act(async () => { await sleep(1100) })
+if (pFill().getAttribute('data-stage') !== '3' || pFill().getAttribute('data-state') !== 'ready') {
+  throw new Error(`the replacement pid must complete the bar: ${pFill().getAttribute('data-stage')} / ${pFill().getAttribute('data-state')}`)
+}
+if (JSON.stringify(pStepStates()) !== JSON.stringify(['done', 'done', 'done'])) {
+  throw new Error(`ready markers: ${JSON.stringify(pStepStates())}`)
+}
+if (pLine('ok') === null || pLine('ok').textContent !== en.readyCopy) throw new Error('ready copy missing')
+// The completion also re-reads the runtime snapshot: without that nudge the
+// block keeps showing the pre-restart pid until its own (throttled) 10 s poll,
+// which is exactly the stale line the progress bar had just contradicted.
+const pInfo = progressHost.querySelector('.so-info')
+if (pInfo === null || !pInfo.textContent.includes('5151')) {
+  throw new Error(`the runtime snapshot must follow the restart: ${pInfo === null ? 'no info block' : pInfo.textContent}`)
+}
+console.log('restart flow OK: POST /app/restart (args {}) + progress stages 1 -> 2 -> 3 driven by the pid')
+
+// unknown tail: nothing observable within the budget (the script can fall back
+// to another port, where this origin never answers again).
+const lostHost = dom.window.document.createElement('div')
+const lostRoot = createRoot(lostHost)
+statusValue = makeStatus({ pid: 4242 })
+restartResult = { ok: true, value: { scheduled: true } }
+rpcLog = []
+await act(async () => { lostRoot.render(React.createElement(sectionReg.component, sectionProps({ progressBudgetMs: 40 }))) })
+const lButton = (text) => [...lostHost.querySelectorAll('.so-btn')].find((b) => b.textContent === text)
+await act(async () => { fireClick(lButton(en.restart)) })
+await act(async () => { fireClick(lButton(en.confirm)) })
+await act(async () => { await sleep(1200) })
+const lostFill = lostHost.querySelector('.so-progress-fill')
+if (lostFill === null || lostFill.getAttribute('data-state') !== 'unknown' || lostFill.getAttribute('data-stage') !== '2') {
+  throw new Error(`the budget must degrade the last stage: ${lostFill?.getAttribute('data-stage')} / ${lostFill?.getAttribute('data-state')}`)
+}
+const lostLine = lostHost.querySelector('.so-flow-status[data-tone="error"]')
+if (lostLine === null || lostLine.textContent !== en.readyUnknown.replace('{n}', '0')) {
+  throw new Error(`unknown copy missing: ${lostLine?.textContent}`)
+}
+// 重试检测 re-probes without sending a second restart
+rpcLog = []
+statusValue = makeStatus({ pid: 5151 })
+await act(async () => { fireClick(lButton(en.checkAgain)) })
+await act(async () => { await sleep(1100) })
+if (lostHost.querySelector('.so-progress-fill').getAttribute('data-state') !== 'ready') {
+  throw new Error('check-again must re-probe the same origin')
+}
+if (rpcLog.some((c) => c.url === `${APP_PATH}/restart`)) throw new Error('check-again must not re-request the restart')
+console.log('progress OK: no observable replacement within the budget degrades to unknown + check-again re-probes')
+
+// busy flow: sessions running -> busy view -> 强制重启 must confirm too
 const busyHost = dom.window.document.createElement('div')
 const busyRoot = createRoot(busyHost)
 restartResult = { ok: false, error: { code: 'sessions-running', message: 'x', details: { running: 2, sessions: ['a', 'b'] } } }
-statusValue = { running: 2, sessions: ['a', 'b'] }
+statusValue = makeStatus({ running: 2, sessions: ['a', 'b'] })
 rpcLog = []
 await act(async () => {
-  busyRoot.render(React.createElement(sectionReg.component, {
-    restart: clientInjected.restart,
-    status: clientInjected.status,
-    installShortcut: clientInjected.installShortcut,
-    t: tWithParams,
-  }))
+  busyRoot.render(React.createElement(sectionReg.component, sectionProps()))
 })
 await act(async () => { fireClick([...busyHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.restart)) })
 await act(async () => { fireClick([...busyHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.confirm)) })
@@ -1593,32 +1634,53 @@ const busyLine = busyHost.querySelector('.so-flow-status[data-tone="error"]')
 if (busyLine === null || busyLine.textContent !== en.busy.replace('{n}', '2')) {
   throw new Error(`busy line: ${busyLine?.textContent}`)
 }
-const forceButton = [...busyHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.busyActionForce)
+const bButton = (text) => [...busyHost.querySelectorAll('.so-btn')].find((b) => b.textContent === text)
+const forceButton = bButton(en.busyActionForce)
 if (forceButton === undefined) throw new Error('force button missing')
-const waitButton = [...busyHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.busyActionWait)
+const waitButton = bButton(en.busyActionWait)
 if (waitButton === undefined) throw new Error('wait button missing')
+// 强制重启 is one of the two paths that used to disconnect the service with no
+// prompt at all: it must open the confirm dialog first, carrying the force copy.
 rpcLog = []
 await act(async () => { fireClick(forceButton) })
+if (rpcLog.length !== 0) throw new Error('force restart must not call the host before the confirmation')
+// The Modal stub renders in place, so a detached host is queried directly
+// (only the first flow renders into the attached #root and can use dialog()).
+const forceDialog = busyHost.querySelector('[role="dialog"]')
+if (forceDialog === null) throw new Error('force restart must confirm first')
+if (forceDialog.getAttribute('data-modal-title') !== en.busyActionForce) throw new Error('force modal title mismatch')
+if (!forceDialog.textContent.includes(en.confirmPromptForce.replace('{n}', '2'))) {
+  throw new Error(`force confirm copy: ${forceDialog.textContent}`)
+}
+// cancel leaves the service alone and returns to the busy view, which keeps the
+// 等待空闲/强制重启 choice (the sessions are still running)
+await act(async () => { fireClick(bButton(en.cancel)) })
+if (rpcLog.length !== 0) throw new Error('cancelling the force confirm must not call the host')
+if (busyHost.querySelector('[role="dialog"]') !== null) throw new Error('cancel must close the force dialog')
+if (bButton(en.busyActionForce) === undefined) throw new Error('cancel must fall back to the busy view')
+// confirmed: the request now goes out with force: true
+await act(async () => { fireClick(bButton(en.busyActionForce)) })
+await act(async () => { fireClick(bButton(en.confirm)) })
 assertClientCall(rpcLog.find((c) => c.url === `${APP_PATH}/restart`), 'restart', { force: true }, 'force restart')
-console.log('busy flow OK: refused -> busy view -> force restart sends force:true')
+console.log('busy flow OK: refused -> busy view -> force restart confirms first, then sends force:true')
 
-// wait flow: poll /app/status until idle, then auto-restart
+// wait flow: poll /app/status until idle, then confirm the auto-restart
 const waitHost = dom.window.document.createElement('div')
 const waitRoot = createRoot(waitHost)
 restartResult = { ok: false, error: { code: 'sessions-running', message: 'x', details: { running: 1, sessions: ['a'] } } }
-statusValue = { running: 1, sessions: ['a'] }
+statusValue = makeStatus({ running: 1, sessions: ['a'] })
 rpcLog = []
 await act(async () => {
-  waitRoot.render(React.createElement(sectionReg.component, {
-    restart: clientInjected.restart,
-    status: clientInjected.status,
-    installShortcut: clientInjected.installShortcut,
-    t: tWithParams,
-  }))
+  waitRoot.render(React.createElement(sectionReg.component, sectionProps()))
 })
-await act(async () => { fireClick([...waitHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.restart)) })
-await act(async () => { fireClick([...waitHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.confirm)) })
-await act(async () => { fireClick([...waitHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.busyActionWait)) })
+const wButton = (text) => [...waitHost.querySelectorAll('.so-btn')].find((b) => b.textContent === text)
+const wDialog = () => waitHost.querySelector('[role="dialog"]')
+await act(async () => { fireClick(wButton(en.restart)) })
+await act(async () => { fireClick(wButton(en.confirm)) })
+await act(async () => { fireClick(wButton(en.busyActionWait)) })
+// The confirmed restart that came back `sessions-running` is behind us: from
+// here on the log only holds this flow's polls (and any restart it fires).
+rpcLog = []
 // first status poll fires after the 2s interval. The sleep runs INSIDE act so
 // the interval-driven state update is flushed in the same scope (otherwise
 // React logs "not wrapped in act" for a poll this flow depends on).
@@ -1628,22 +1690,29 @@ if (waitingLine === null || waitingLine.textContent !== en.waiting.replace('{n}'
   throw new Error(`waiting line: ${waitingLine?.textContent}`)
 }
 if (!rpcLog.some((c) => c.url === `${APP_PATH}/status`)) throw new Error('wait flow must poll /app/status')
-// sessions finish -> next poll triggers the auto restart (interval is 2s)
-statusValue = { running: 0, sessions: [] }
+if (rpcLog.some((c) => c.url === `${APP_PATH}/restart`)) throw new Error('the wait flow must not restart while sessions run')
+// sessions finish -> the next poll asks for the second confirmation instead of
+// restarting on its own (the other path that used to fire with no prompt)
+statusValue = makeStatus()
 await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2200)) })
+if (rpcLog.some((c) => c.url === `${APP_PATH}/restart`)) {
+  throw new Error('the wait flow must ask before it disconnects the service')
+}
+const autoDialog = wDialog()
+if (autoDialog === null) throw new Error('the wait flow must open the confirm dialog once the sessions ended')
+if (!autoDialog.textContent.includes(en.confirmPromptAuto)) {
+  throw new Error(`auto confirm copy: ${autoDialog.textContent}`)
+}
+rpcLog = []
+await act(async () => { fireClick(wButton(en.confirm)) })
 assertClientCall(rpcLog.find((c) => c.url === `${APP_PATH}/restart`), 'restart', {}, 'wait-flow auto restart')
-console.log('wait flow OK: polls status and auto-restarts when idle')
+console.log('wait flow OK: polls status, then confirms before the auto restart')
 
 // error state: host failure surfaces as error copy
 const errorHost = dom.window.document.createElement('div')
 const root2 = createRoot(errorHost)
 await act(async () => {
-  root2.render(React.createElement(sectionReg.component, {
-    restart: async () => { throw new Error('private detail') },
-    status: clientInjected.status,
-    installShortcut: clientInjected.installShortcut,
-    t: tWithParams,
-  }))
+  root2.render(React.createElement(sectionReg.component, sectionProps({ restart: async () => { throw new Error('private detail') } })))
 })
 await act(async () => { fireClick([...errorHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.restart)) })
 await act(async () => { fireClick([...errorHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.confirm)) })
@@ -1659,12 +1728,7 @@ console.log('error state OK')
   rpcFailure = 500
   try {
     await act(async () => {
-      httpRoot.render(React.createElement(sectionReg.component, {
-        restart: clientInjected.restart,
-        status: clientInjected.status,
-        installShortcut: clientInjected.installShortcut,
-        t: tWithParams,
-      }))
+      httpRoot.render(React.createElement(sectionReg.component, sectionProps()))
     })
     await act(async () => { fireClick([...httpHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.restart)) })
     await act(async () => { fireClick([...httpHost.querySelectorAll('.so-btn')].find((b) => b.textContent === en.confirm)) })
@@ -1672,79 +1736,63 @@ console.log('error state OK')
     if (failedLine === null || failedLine.textContent !== en.error) {
       throw new Error(`an HTTP failure must show the error copy, got: ${failedLine?.textContent}`)
     }
-    if (/500|HTTP/.test(httpHost.textContent)) throw new Error('the error state must not leak the HTTP status')
+    // Scoped to the service card: that is the copy under test here (the
+    // version card below reports its own, separately-worded, failure).
+    if (/500|HTTP/.test(httpHost.querySelector('.so-card').textContent)) {
+      throw new Error('the error state must not leak the HTTP status')
+    }
   } finally {
     rpcFailure = null
   }
   console.log('error state OK: a non-2xx answer from the route shows the error copy')
 }
 
-// --- configuration card (设置 → 插件 → 插件配置) --------------------------------
-// The deployed card talks to the host through the /app prefix route
-// (getSettings/setSettings/resetSettings), NOT through a client settings scope.
-const enCard = cardDict.dict.en
-const tCardWithParams = (key, params) => {
-  const value = enCard[key]
-  return params && params.n !== undefined ? value.replace('{n}', String(params.n)) : value
+// update flow: 更新并重启 sits on the version card, must confirm first (it
+// installs a build and replaces the process), and then drives the SAME progress
+// bar — with the update's own title and first-stage label. Last block in the
+// DOM section: its progress polling runs for the update budget, so it is
+// unmounted on the way out instead of leaving an interval behind.
+{
+  const updateHost = dom.window.document.createElement('div')
+  const updateRoot = createRoot(updateHost)
+  versionValue = { current: '0.1.5-rc.2', latest: '0.1.5-rc.3', hasUpdate: true, registry: 'https://registry.example', error: null }
+  updateResult = { ok: true, value: { scheduled: true, script: 'C:/update-dsh.ps1', version: '0.1.5-rc.3' } }
+  statusValue = makeStatus({ pid: 4242 })
+  rpcLog = []
+  await act(async () => { updateRoot.render(React.createElement(sectionReg.component, sectionProps())) })
+  const uButton = (text) => [...updateHost.querySelectorAll('.so-btn')].find((b) => b.textContent === text)
+
+  await act(async () => { fireClick(uButton(en.update)) })
+  if (rpcLog.some((c) => c.url === `${APP_PATH}/update`)) {
+    throw new Error('the update must confirm before it calls the host')
+  }
+  const uDialog = updateHost.querySelector('[role="dialog"]')
+  if (uDialog === null) throw new Error('更新并重启 must open the confirm dialog')
+  if (uDialog.getAttribute('data-modal-title') !== en.update) throw new Error(`update modal title: ${uDialog.getAttribute('data-modal-title')}`)
+  if (!uDialog.textContent.includes(en.confirmPromptUpdate.replace('{v}', '0.1.5-rc.3'))) {
+    throw new Error(`update confirm copy: ${uDialog.textContent}`)
+  }
+  // cancel is the safe default: nothing installed, nothing disconnected
+  await act(async () => { fireClick(uButton(en.cancel)) })
+  if (uDialog !== null && updateHost.querySelector('[role="dialog"]') !== null) throw new Error('cancel must close the update dialog')
+  if (rpcLog.some((c) => c.url === `${APP_PATH}/update`)) throw new Error('cancelling the update must not call the host')
+
+  await act(async () => { fireClick(uButton(en.update)) })
+  await act(async () => { fireClick(uButton(en.confirm)) })
+  assertClientCall(rpcLog.find((c) => c.url === `${APP_PATH}/update`), 'update', { version: '0.1.5-rc.3' }, 'update confirm')
+  const uFill = updateHost.querySelector('.so-progress-fill')
+  if (uFill === null || uFill.getAttribute('data-stage') !== '1' || uFill.getAttribute('data-state') !== 'active') {
+    throw new Error(`the update must start the progress bar: ${uFill?.getAttribute('data-stage')} / ${uFill?.getAttribute('data-state')}`)
+  }
+  const uTitle = updateHost.querySelector('.so-progress .so-status-title')
+  if (uTitle === null || uTitle.textContent !== en.progressTitleUpdate) throw new Error(`update progress title: ${uTitle?.textContent}`)
+  const uSteps = [...updateHost.querySelectorAll('.so-progress-step')].map((el) => el.textContent)
+  if (uSteps.length !== 3 || !uSteps[0].includes(en.stageRequestUpdate)) {
+    throw new Error(`the update bar must label its first stage as an update: ${JSON.stringify(uSteps)}`)
+  }
+  console.log('update flow OK: 更新并重启 -> confirm -> POST /app/update {version} -> update progress bar')
+  await act(async () => { updateRoot.unmount() })
 }
-const cardHost = dom.window.document.createElement('div')
-const cardRoot = createRoot(cardHost)
-rpcLog = []
-await act(async () => {
-  cardRoot.render(React.createElement(cardReg.component, {
-    t: tCardWithParams,
-    ...cardReg.inject(),
-  }))
-})
-assertClientCall(rpcLog.find((c) => c.url === `${APP_PATH}/getSettings`), 'getSettings', {}, 'card load')
-
-const header = cardHost.querySelector('.soc-header')
-if (header === null) throw new Error('card header missing')
-await act(async () => { fireClick(header) })
-const inputs = [...cardHost.querySelectorAll('.soc-input')]
-if (inputs.length !== 1) throw new Error(`expected 1 number input, got ${inputs.length}`)
-const toggles = [...cardHost.querySelectorAll('.soc-toggle')]
-if (toggles.length !== 1) throw new Error(`expected 1 toggle, got ${toggles.length}`)
-const minutesInput = cardHost.querySelector('#soc-idleMinutes')
-if (minutesInput === null || minutesInput.value !== '45') throw new Error(`override value: ${minutesInput?.value}`)
-
-// staged edit -> save writes the field through /app/setSettings
-rpcLog = []
-await act(async () => { fireChange(minutesInput, '60') })
-if (!cardHost.querySelector('.soc-pending')) throw new Error('unsaved badge missing')
-const saveButton = cardHost.querySelector('.soc-save')
-if (saveButton === null || saveButton.disabled) throw new Error('save must be enabled with staged edits')
-await act(async () => { fireClick(saveButton) })
-assertClientCall(
-  rpcLog.find((c) => c.url === `${APP_PATH}/setSettings`),
-  'setSettings',
-  { fields: { idleMinutes: 60 } },
-  'card save',
-)
-if (cardValue.idleMinutes !== 60) throw new Error(`card must adopt the host response: ${JSON.stringify(cardValue)}`)
-console.log('card OK: fields render, staged edit saves through POST /app/setSettings')
-
-// toggle staged edit -> save writes the boolean
-await act(async () => { fireClick(cardHost.querySelector('#soc-idleEnabled')) })
-await act(async () => { fireClick(cardHost.querySelector('.soc-save')) })
-assertClientCall(
-  rpcLog.filter((c) => c.url === `${APP_PATH}/setSettings`).pop(),
-  'setSettings',
-  { fields: { idleEnabled: false } },
-  'card toggle',
-)
-console.log('card OK: toggle saves through POST /app/setSettings')
-
-// reset-all restores defaults through /app/resetSettings (second .soc-discard)
-await act(async () => { fireClick(cardHost.querySelectorAll('.soc-discard')[1]) })
-assertClientCall(
-  rpcLog.find((c) => c.url === `${APP_PATH}/resetSettings`),
-  'resetSettings',
-  {},
-  'card reset-all',
-)
-if (cardValue.idleMinutes !== 120) throw new Error(`reset must adopt the host response: ${JSON.stringify(cardValue)}`)
-console.log('card OK: reset-all calls POST /app/resetSettings')
 
 console.log('\nALL HARNESS CHECKS PASSED')
 process.exit(0)

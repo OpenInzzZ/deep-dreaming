@@ -15,7 +15,7 @@ deep-dreaming/
 │   ├── dsh-project-memory/       # 跨会话项目记忆(组合包插件)
 │   ├── session-cleanup/          # 会话日志自动清理(目录包插件)
 │   ├── ui-settings-plugin-manager/  # Web 设置「插件管理」标签页(UI 插件)+ verify
-│   ├── ui-settings-other/        # Web 设置「其他」页:服务运行状态/创建桌面快捷方式/重启服务(危险,唯一危险按钮)/空闲自动停止 + 静默启动脚本 + verify
+│   ├── ui-settings-other/        # Web 设置「其他」页:服务运行状态/创建桌面快捷方式/重启服务(危险,唯一危险按钮,三阶段进度条)+ 静默启动脚本 + verify
 │   ├── ui-settings-model-reasoning/  # 设置「模型」页扩展:自定义(llm-pi-ai)模型的思考开关 + 思考等级 + verify
 │   ├── ui-queue-tools/           # 排队消息增强:hover 全文预览 + 上下移排序 + verify
 │   ├── temp-session/             # 侧边栏一键发起不绑定项目的临时会话 + verify
@@ -33,7 +33,7 @@ deep-dreaming/
 | [dsh-project-memory](patches/dsh-project-memory/) | 跨会话项目记忆桥:**Memorix (MCP)** 负责存储/检索/去重/成熟度,本补丁只做「提示词引导 + 会话开始召回 followup + 每轮结束回顾 followup」;`mcp__memorix__*` 工具调用以**可折叠记忆卡片**展示 | 作为 **bundle** 安装:`dsh plugin --profile web add`(或 `pnpm add`)进 profile 并登记到 `dsh.profile.bundles` | [README](patches/dsh-project-memory/README.md) |
 | [session-cleanup](patches/session-cleanup/) | 按天数/容量定期清理归档会话,跳过活跃会话 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/session-cleanup/README.md) |
 | [ui-settings-plugin-manager](patches/ui-settings-plugin-manager/) | Web 设置新增「插件管理」标签页:状态过滤 + 官方/自定义分类 + **启停开关(热生效)** | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-settings-plugin-manager/README.md) |
-| [ui-settings-other](patches/ui-settings-other/) | Web 设置新增「其他」页:服务运行状态(pid/端口/内存/版本 + 刷新)+ **创建桌面快捷方式(鲸鱼娘图标)** + **重启服务(唯一危险按钮,有会话运行时可选等待空闲或强制)** + 空闲自动停止(可配,默认 2h);**覆盖 Web 标题栏 favicon 为鲸鱼娘图标**;配套静默启动脚本与品牌资产 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-settings-other/README.md) |
+| [ui-settings-other](patches/ui-settings-other/) | Web 设置新增「其他」页:服务运行状态(pid/端口/内存/版本 + 刷新)+ **创建桌面快捷方式(鲸鱼娘图标)** + **重启服务(唯一危险按钮,有会话运行时可选等待空闲或强制;三条断开路径统一确认,确认后三阶段进度条报告进度)**;**覆盖 Web 标题栏 favicon 为鲸鱼娘图标**;配套静默启动脚本与品牌资产 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-settings-other/README.md) |
 | [ui-queue-tools](patches/ui-queue-tools/) | 排队消息增强:hover 预览全文 + 上移/下移排序(host 半经 Inbox.splice 重排) | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-queue-tools/README.md) |
 | [ui-settings-model-reasoning](patches/ui-settings-model-reasoning/) | 设置「模型」页扩展:给自定义(llm-pi-ai)路由逐模型配置**思考开关 + 思考等级(档位与发送值)**,写回 `reasoningEfforts`,模型菜单随之出现「推理等级」 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-settings-model-reasoning/README.md) |
 | [temp-session](patches/temp-session/) | 侧边栏底部「临时会话」按钮:一键发起绑定**用户级临时目录**的会话,不关联任何项目 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/temp-session/README.md) |
