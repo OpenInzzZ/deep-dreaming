@@ -119,7 +119,9 @@ try {
 	if (root.injected.length !== 1) throw new Error(`recall must be injected on turn/start, got ${root.injected.length}`);
 	if (root.followed.length !== 0) throw new Error("recall must NOT open a turn of its own (followup)");
 	const recall = root.injected[0];
-	if (recall.source?.kind !== "memory" || recall.source?.recall !== true) {
+	if (recall.source?.kind !== "plugin" || recall.source?.plugin !== "project-memory") {
+		// A custom `kind` is not among the session-format migrator's known
+		// source kinds, so a log carrying one fails to migrate later.
 		throw new Error(`recall message source wrong: ${JSON.stringify(recall.source)}`);
 	}
 	if (recall.source?.form !== "notice" || recall.source?.summary !== "项目记忆召回 · memory search") {

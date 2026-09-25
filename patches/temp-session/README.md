@@ -13,26 +13,34 @@ dsh 发起会话必须绑定一个工作区(没有工作区时对话输入框是
 
 ## 工作原理
 
-- **Host 半(`lib/index.js`)**:通过 `ctx.connection.rpc.handle('/temp-session')`
-  注册独立 RPC 通道(权限 `loopback`,仅本机页面可达)。端点 `ensure`:
+- **Host 半(`lib/index.js`)**:在 `webServer` 上注册**前缀路由**
+  `/temp-session`(自带同源栅栏:非 POST → 405、非 `application/json` →
+  415、`Origin` 与 `Host` 不同 → 403)。载体的可用性由**声明的依赖**保证:
+  `ctx.inject(['webServer', 'workspaceRegistry'], …)` 让激活等待 HTTP 载体
+  就绪,而不是在 `apply` 里 `ctx.get('webServer')` 与载体绑定竞态(那正是四个
+  补丁重启后静默失联的原因)。**不再**用
+  `ctx.connection.rpc.handle`:dsh 0.1.5-rc.1 的 Connection 注册表会对外部插件
+  抛 `cannot get property "webServer" without inject`,通道根本不存在,浏览器
+  请求会落到 SPA 兜底(405/404)。端点 `ensure`:
   先 `mkdir -p` 用户级目录,再 `workspaceRegistry.resolveByPath(dir)` 幂等
-  复用;不存在则 `workspaceRegistry.create(dir, title)` 注册。并发点击
-  由内部 promise 链串行化,不会重复创建。
+  复用;不存在则 `workspaceRegistry.create(dir, title)` 注册。并发点击由
+  **每个插件实例自己的** promise 链串行化(`createEnsureQueue()`,在 `apply`
+  闭包内创建),不会重复创建,热重载后的新实例也不会排在旧实例的任务后面。
+  路由以 `ctx.effect(...)` 注册在那个子 fiber 上(`webServer` 与
+  `workspaceRegistry` 都声明在其中),卸载/热重载时 `/temp-session` 随之注销。
 - **Client 半(`lib/client.js`)**:注册 `sidebar.footer.action` 槽
-  (`id: 'temp-session'`, `order: -10`,排在设置上方);点击流程三段:
-  1. `ensure` 拿到临时工作区**路径**(host 侧事实:目录已创建);
-  2. `ctx.workspaces.create({ path })` 注册/复用该路径——0.1.5 的 Workspace
-     Controller 会把 unary 回声立即并入客户端快照,所以**不需要**再刷新
-     列表(旧版的 `workspaces.refresh()` 已不存在);
-  3. `ctx.uiWorkspace.startSession(workspaceId)` 走 New Session 流程并导航
-     (旧版的 `workspaces.startSession()` 已随 Controller 拆分移到
-     `uiWorkspace`)。
-  失败时按钮下方显示错误行,可重试。
-  > 适配记录(dsh 0.1.5-rc.2):`IWorkspaces` 现在只是纯 Controller 面
+  (`id: 'temp-session'`, `order: -10`,排在设置上方);点击流程:
+  `POST /temp-session/ensure`(body `{ args: {} }`,解析 `{ ok, value }` 信封)→
+  `uiWorkspace.startSession(workspaceId)`(宿主在 ensure 后会把工作区写入
+  客户端基线,不需要手动刷新列表)。失败时按钮下方显示错误行,可重试。
+  样式表以 `data-plugin` + `data-plugin-css` 注入,重复注入有去重守卫。
+  > 适配记录(dsh 0.1.5-rc.2):`IWorkspaces` 只剩纯 Controller 面
   > (`list/create/rename/delete/insertBefore/archiveSession/insertSessionBefore`),
-  > 工作区列表由 Controller 自己的 follow 流维持;新建会话导航归
-  > `@deepseek-ai/dsh-client-ui-workspace` 的 `uiWorkspace` 服务。注入面因此是
-  > `['slots','locale','connection','workspaces','uiWorkspace']`。
+  > 工作区列表由 Controller 自己的 follow 流维持;新建会话导航移到了
+  > `@deepseek-ai/dsh-client-ui-workspace` 的 `uiWorkspace` 服务。旧版的
+  > `workspaces.refresh()` 与 `workspaces.startSession()` 都已不存在,
+  > 浏览器半的注入面因此是 `['slots','locale','uiWorkspace']`(不再需要
+  > `connection` —— 传输是宿主自己注册的 `/temp-session` 前缀路由)。
 
 ## 部署(加载到 dsh)
 
@@ -68,13 +76,20 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 
 ```powershell
 # 在仓库根执行:\$repo = (Resolve-Path .).Path
-node verify-temp-session.mjs          # 在本补丁目录下运行
+node patches/temp-session/verify-temp-session.mjs   # 契约 + jsdom 渲染/交互断言
 ```
 
 覆盖:host 半 `ensure` 端点在真实临时目录上的幂等性(首次创建/二次复用、
-自定义 title)、`/temp-session` 通道注册与 bad-request 守卫、apply 不返回
-thenable 的 P0 回归守卫、client 半契约(bundle handoff、
-`sidebar.footer.action` 条目 id/order、zh/en 字典一致、注入面)。DOM 交互段
-(按钮渲染 wide/rail 两态、点击后 `ensure → workspaces.create(path) →
-uiWorkspace.startSession`、失败错误行)需要 react + jsdom;在仓库根执行一次
-`npm install` 即可,缺失时自动跳过并提示。
+自定义 title)、`/temp-session` 前缀路由注册与栅栏(403 跨源 / 405 非 POST /
+415 非 JSON / 404 端点为空或多段、400 非 JSON body、413 超大 body)、`webServer`
+与 `workspaceRegistry` 作为**静态 `inject` 依赖**声明(apply 内不得再出现
+`ctx.get('webServer')` 可选读取或动态载体门;载体缺席时宁可响亮报错,也不静默
+跳过页面的传输通道)、路由
+disposer(卸载即注销路由)、bad-request 守卫与 `args` 守卫(仅接受 `undefined`
+或普通对象,`null`/数组/标量一律 bad-request)、每实例串行链(有序、失败不污染
+链、实例之间互不影响)与并发 `ensure` 经路由的串行化、apply 不返回 thenable 的
+P0 回归守卫、client 半契约(bundle handoff、`sidebar.footer.action` 条目
+id/order、zh/en 字典一致、注入面不含 `connection`、`data-plugin-css` 样式
+去重)。DOM 交互段(按钮渲染 wide/rail 两态、点击后 `POST /temp-session/ensure`
+→ startSession、失败/HTTP 错误/网络错误的错误行)需要 react + jsdom;在仓库根
+执行一次 `npm install` 即可,缺失时自动跳过并提示。

@@ -18,6 +18,11 @@
  *   intervalMinutes: number 清理间隔分钟 (默认 360)
  *   dryRun: boolean         演练模式, 只报告不删除 (默认 false)
  *   sessionsRoot: string    会话根目录 (默认 $DSH_HOME/sessions)
+ *
+ * 浏览器半(设置页的配置卡片)经 webServer 上的前缀路由
+ * `POST /session-cleanup/<endpoint>` 读写配置(getConfig / setConfig /
+ * resetConfig),见 createRpcRoute —— dsh 0.1.5-rc.1 的
+ * `ctx.connection.rpc.handle` 对连接包之外的插件必然抛错,不能用。
  */
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -140,12 +145,16 @@ export async function runCleanup(sessionsRoot, options = {}, liveSessionIds = ne
   }
 
   // 4. 规则 B: 总占用超上限时按最旧优先删
+  // 统计口径 = 本次清理后仍会留在磁盘上的候选体积: 规则 A 已选中的会话这一轮
+  // 必定被删, 先把它们的体积从总量里扣除, 否则容量判断偏高、会比实际需要多删。
+  // 活跃会话在上面就 `continue` 了, 从不进入 candidates, 本就不参与该总量
+  // (result.totalBytes 仍统计包含活跃会话的全部占用, 仅用于报告)。
   if (cfg.maxTotalMB > 0) {
     const cap = cfg.maxTotalMB * 1024 * 1024
-    let total = candidates.reduce((sum, c) => sum + c.size, 0)
-    for (const c of [...candidates].reverse()) {
+    const survivors = candidates.filter((c) => !remove.has(c.key))
+    let total = survivors.reduce((sum, c) => sum + c.size, 0)
+    for (const c of survivors.reverse()) {
       if (total <= cap) break
-      if (remove.has(c.key)) continue
       remove.add(c.key)
       total -= c.size
     }
@@ -235,9 +244,99 @@ function registerConfigSection(ctx, ns, schema, entry, hooks, onScope, isUnloadi
   })
 }
 
-/** RPC failure envelope for the config channel. */
+/** RPC failure envelope for the config endpoints. */
 function configError(code, message) {
   return { ok: false, error: { code, message, details: {} } }
+}
+
+/**
+ * Local RPC over a `webServer` route, replacing `ctx.connection.rpc`.
+ *
+ * dsh 0.1.5-rc.1 broke the Connection RPC registry for every plugin outside
+ * the connection package: `handle()` calls `register()`, which touches
+ * `owner.webServer` on a context that never declared `webServer`, so it throws
+ * `cannot get property "webServer" without inject`. The channel then never
+ * exists and the browser's `POST /<channel>/<endpoint>` requests fall through
+ * to the SPA fallback (405/404).
+ *
+ * This is the same contract on the surface a plugin does own: one prefix route,
+ * a same-origin fence, JSON-only bodies, and the identical
+ * `{ ok, value }` / `{ ok, error: { code, message, details } }` envelope the
+ * endpoint handlers already return. The fence mirrors the Connection's own
+ * reasoning: a cross-site POST always carries its own `Origin`, and requiring
+ * `application/json` makes the browser preflight it (we never answer that
+ * preflight), so a page the user merely visits cannot reach these endpoints.
+ *
+ * @param path - prefix route path, e.g. `/session-cleanup`.
+ * @param handle - `async (endpoint, payload) => envelope`, unchanged from the
+ *   RPC handler signature.
+ */
+export function createRpcRoute(path, handle) {
+  const MAX_BODY_BYTES = 1 << 20
+  const fail = (res, status, code, message) => {
+    res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+    res.end(JSON.stringify({ ok: false, error: { code, message, details: {} } }))
+  }
+  return {
+    kind: 'prefix',
+    path,
+    handler: (req, res) => {
+      const host = req.headers.host
+      const origin = req.headers.origin
+      if (typeof origin === 'string' && origin.length > 0) {
+        let sameOrigin = false
+        try {
+          sameOrigin = new URL(origin).host === host
+        } catch {
+          sameOrigin = false
+        }
+        if (!sameOrigin) return fail(res, 403, 'forbidden', 'cross-origin request refused')
+      }
+      if (req.method !== 'POST') return fail(res, 405, 'method-not-allowed', 'RPC endpoints accept POST only')
+      const contentType = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase()
+      if (contentType !== 'application/json') return fail(res, 415, 'unsupported-media-type', 'content-type must be application/json')
+      const url = String(req.url ?? '')
+      const query = url.indexOf('?')
+      const pathname = query === -1 ? url : url.slice(0, query)
+      const endpoint = pathname.startsWith(`${path}/`) ? pathname.slice(path.length + 1) : undefined
+      if (endpoint === undefined || endpoint.length === 0 || endpoint.includes('/')) {
+        return fail(res, 404, 'unknown-endpoint', `unknown endpoint: ${JSON.stringify(pathname)}`)
+      }
+      let raw = ''
+      let overflow = false
+      req.on('data', (chunk) => {
+        if (overflow) return
+        raw += chunk
+        if (raw.length > MAX_BODY_BYTES) {
+          overflow = true
+          req.destroy()
+        }
+      })
+      req.on('error', () => { /* client went away */ })
+      req.on('end', () => {
+        if (overflow) return fail(res, 413, 'payload-too-large', 'request body is too large')
+        let payload
+        try {
+          payload = raw.length === 0 ? {} : JSON.parse(raw)
+        } catch {
+          return fail(res, 400, 'bad-request', 'body is not JSON')
+        }
+        void Promise.resolve()
+          .then(() => handle(endpoint, payload))
+          .then(
+            (envelope) => {
+              if (res.writableEnded) return
+              res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+              res.end(JSON.stringify(envelope))
+            },
+            (error) => {
+              if (res.writableEnded) return
+              fail(res, 500, 'internal', String(error?.message ?? error))
+            },
+          )
+      })
+    },
+  }
 }
 
 /**
@@ -245,15 +344,18 @@ function configError(code, message) {
  * 定时器注册为 effect, 插件卸载时自动释放。
  * 配置经 dsh-settings 注册(namespace `session-cleanup`), 设置变更时
  * (onChange) 按新配置重建定时器 —— 即时生效。
- * 配置经 /session-cleanup RPC 通道读写(getConfig/setConfig/resetConfig),由
- * 插件管理页的配置卡片调用 —— 不受 dsh 设置白名单(apiproxy)限制。
+ * 配置经 /session-cleanup 前缀路由读写(getConfig/setConfig/resetConfig),
+ * 由插件管理页的配置卡片调用 —— 不受 dsh 设置白名单(apiproxy)限制。
  *
- * `sessions` / `connection` 是**静态** inject(见上方 export),不再用 apply 内的
- * 动态 `ctx.inject(...)`:0.1.5-rc.2 实测用户层热重载之后动态那条不会重新激活
- * (通道一直 404 直到重启),而 whale-background 用的静态 inject 不受影响。
- * `settings` 仍是动态 inject —— 它是可选增强,缺失时回退到组合层 entry 配置。
+ * `sessions` / `webServer` 都是**静态** inject, 不是 apply 内的动态
+ * `ctx.inject(...)`: 用户层热重载后动态那条不会重新激活(通道一直 404 直到
+ * 重启), 静态 inject 不受影响; 而声明依赖才是让 `webServer` 在 apply 里一定
+ * 就绪的办法 —— Cordis 并行挂载各行, HTTP 载体比 `sessions` 绑定得晚, 用
+ * `ctx.get('webServer')` 去读会与那次绑定竞态, 读到 undefined 就静默丢掉页面
+ * 的整个传输通道(第一次重启后四个补丁就是这样一起失联的)。
+ * `settings` 仍是动态 inject —— 它是可选增强, 缺失时回退到组合层 entry 配置。
  */
-export const inject = ['sessions', 'connection']
+export const inject = ['sessions', 'webServer']
 
 export function apply(ctx, config = {}) {
   const cfg = { ...DEFAULTS, ...config }
@@ -296,16 +398,10 @@ export function apply(ctx, config = {}) {
     }, current.intervalMinutes * 60_000)
   }
 
-  registerConfigSection(ctx, SETTINGS_NAMESPACE, Config, config, {
-    setSource: (current) => { source = current },
-    onChange: start,
-  }, (scope) => { configScope = scope }, () => disposed)
-
-  start()
-
-  // Registered as an effect so the channel disposer runs on unload; the
-  // config RPC otherwise outlives the plugin and keeps answering.
-  ctx.effect(() => ctx.connection.rpc.handle('/session-cleanup', async (endpoint, payload) => {
+  // 端点处理函数: 契约与旧的 RPC handler 完全一致(getConfig / setConfig /
+  // resetConfig), 只是换了承载方式。`configScope` 在调用时才读取, 所以
+  // 无论设置分区此时是否已经挂上, 读到的都是当前那个 scope。
+  const handleEndpoint = async (endpoint, payload) => {
     if (endpoint === 'getConfig') {
       return { ok: true, value: source() }
     }
@@ -333,7 +429,25 @@ export function apply(ctx, config = {}) {
       }
     }
     return configError('bad-request', `unknown endpoint: ${endpoint}`)
-  }, { authority: 'loopback' }), 'session-cleanup: /session-cleanup rpc channel')
+  }
+
+  // 页面经由 webServer 上的一条前缀路由到达本插件。dsh 0.1.5 下
+  // `ctx.connection.rpc.handle` 对连接包之外的插件必然抛
+  // `cannot get property "webServer" without inject`(见 createRpcRoute 的
+  // 说明), 通道根本不会存在, 页面的 POST 会落到 SPA 兜底。
+  //
+  // 顺序很重要: 该注册排在设置分区之前。Cordis 在 apply 抛错时会回滚它此前
+  // 注册的每一个 effect, 而设置分区恰恰是最容易抛错的一步(见 ui-settings-other
+  // 的同类教训); 传输先落地, 设置挂掉也不会把页面的读写通道一起带走。
+  // 注册走 ctx.effect: 路由随插件卸载一起释放。
+  ctx.effect(() => ctx.webServer.register(createRpcRoute('/session-cleanup', handleEndpoint)), 'session-cleanup: /session-cleanup rpc route')
+
+  registerConfigSection(ctx, SETTINGS_NAMESPACE, Config, config, {
+    setSource: (current) => { source = current },
+    onChange: start,
+  }, (scope) => { configScope = scope }, () => disposed)
+
+  start()
 
   ctx.effect(() => () => {
     disposed = true

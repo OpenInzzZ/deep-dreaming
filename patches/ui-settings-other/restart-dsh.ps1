@@ -34,6 +34,20 @@ $ErrorActionPreference = 'Stop'
 
 function Log($m) { Write-Host $m }
 
+# A port can be owned by an unrelated process (another node app, a stale
+# listener) and Stop-Process -Force on it is destructive, so verify the PID
+# really is the dsh CLI — node.exe running @deepseek-ai/dsh — before killing.
+function Assert-DshProcess($proc) {
+    if (-not $proc) { throw 'the listening process disappeared while inspecting; nothing was stopped' }
+    $name = [System.IO.Path]::GetFileNameWithoutExtension([string]$proc.Name)
+    $cmd = [string]$proc.CommandLine
+    $isNode = $name -eq 'node' -or $name -eq 'nodejs'
+    $isDsh = $cmd -match '@deepseek-ai[\\/]dsh' -or $cmd -match 'dsh[\\/]lib[\\/]bin\.js'
+    if (-not ($isNode -and $isDsh)) {
+        throw "refusing to stop PID $($proc.ProcessId) ($($proc.Name)): it is not a dsh process (command line: $cmd)"
+    }
+}
+
 # --------------------------------------------------------------------
 # Port pool: real bind test (TcpListener) that catches TIME_WAIT ports
 # which netstat would report as free. Scans 3080-3100 and returns the
@@ -53,6 +67,34 @@ function Test-PortAvailable([int]$port) {
     }
 }
 
+# Readiness probe: "the service answered HTTP at all", NOT "HTTP 200".
+# The web app answers 401 to a credential-less GET (its root requires auth) and
+# Invoke-WebRequest throws on every non-2xx, so a 200-only gate made this script
+# wait the full 120 s, log a timeout, exit 1 — and skip the -OpenBrowser step
+# below, which is where the possibly-changed port gets opened. A WebException
+# that carries a Response is a real answer; only a refused/timed-out connection
+# means "not up yet".
+function Test-WebAnswered([int]$port) {
+    try {
+        $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$port/")
+        $req.Method = 'GET'
+        $req.Timeout = 3000
+        $req.AllowAutoRedirect = $false
+        $resp = $req.GetResponse()
+        $resp.Close()
+        return $true
+    } catch [System.Net.WebException] {
+        $resp = $_.Exception.Response
+        if ($null -ne $resp) {
+            try { $resp.Close() } catch { }
+            return $true
+        }
+        return $false
+    } catch {
+        return $false
+    }
+}
+
 function Find-AvailablePort([int]$prefer = 0) {
     if ($prefer -ne 0 -and (Test-PortAvailable $prefer)) { return $prefer }
     for ($p = $POOL_START; $p -le $POOL_END; $p++) {
@@ -62,90 +104,25 @@ function Find-AvailablePort([int]$prefer = 0) {
 }
 
 # --------------------------------------------------------------------
-# Auto-patch the dsh CLI to add --clean support (idempotent).
-# Same logic as start-dsh.ps1; duplicated so restart can patch before
-# relaunching the recovered command line.
+# Auto-patch the dsh CLI to add --clean support, delegated to the single
+# implementation: scripts/patch-cli.ps1 in this repo, deployed as
+# ~/.dsh/scripts/patch-dsh-cli.ps1. The injection body that used to live
+# here was a stale third copy whose String.Replace anchors no longer matched
+# the current dsh build — and it reported success anyway. A missing shared
+# script only warns: it must never block startup.
 # --------------------------------------------------------------------
 function Patch-Cli($binJs, $dshLib) {
-    $binContent = Get-Content $binJs -Raw
-    if ($binContent -match '--clean') {
-        Log "  CLI patch: already applied"
-        return
+    $shared = Join-Path $PSScriptRoot 'patch-dsh-cli.ps1'                                   # deployed: ~/.dsh/scripts/
+    if (-not (Test-Path $shared)) { $shared = Join-Path $PSScriptRoot '..\..\scripts\patch-cli.ps1' }  # in-repo: patches/ui-settings-other/ -> repo/scripts/
+    if (-not (Test-Path $shared)) { Log "  CLI patch: skipped (patch-dsh-cli.ps1 not deployed)"; return }
+    # A shared-script failure — or an environment that turns native exit codes
+    # into terminating errors — must never block startup.
+    try {
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $shared -Quiet
+        if ($LASTEXITCODE -ne 0) { Log "  CLI patch: WARN - patch-cli.ps1 exited $LASTEXITCODE (--clean unavailable)" }
+    } catch {
+        Log "  CLI patch: WARN - $($_.Exception.Message)"
     }
-    $wrapperMatch = [regex]::Match($binContent, 'import\("\./(profile-boot-[A-Za-z0-9_]+\.js)"\)')
-    if (-not $wrapperMatch.Success) { Log "  CLI patch: WARN - could not locate profile-boot wrapper; skipping"; return }
-    $wrapperFile = Join-Path $dshLib $wrapperMatch.Groups[1].Value
-    if (-not (Test-Path $wrapperFile)) { Log "  CLI patch: WARN - wrapper not found; skipping"; return }
-    $wrapperContent = Get-Content $wrapperFile -Raw
-    $implMatch = [regex]::Match($wrapperContent, 'from\s*"\./(profile-boot-[A-Za-z0-9_]+\.js)"')
-    if (-not $implMatch.Success) { Log "  CLI patch: WARN - could not locate profile-boot impl; skipping"; return }
-    $implFile = Join-Path $dshLib $implMatch.Groups[1].Value
-    if (-not (Test-Path $implFile)) { Log "  CLI patch: WARN - impl file not found; skipping"; return }
-
-    Log "  CLI patch: applying --clean support..."
-    $binContent = $binContent.Replace(
-        '.option("--dump-default-config", "print the profile tree without its user layer or --patch overlays and exit")',
-        '.option("--dump-default-config", "print the profile tree without its user layer or --patch overlays and exit").option("--clean", "skip user/custom plugins for a clean startup")'
-    )
-    $binContent = $binContent.Replace(
-        "return {
-		mode: `"profile`",
-		profile,
-		patches,
-		args
-	};",
-        "return {
-		mode: `"profile`",
-		profile,
-		patches,
-		args,
-		clean: options.clean === true
-	};"
-    )
-    $binContent = $binContent.Replace(
-        '.option("--dump-default-config", "print the web profile''s bundle layers (no user layer) and exit")',
-        '.option("--dump-default-config", "print the web profile''s bundle layers (no user layer) and exit").option("--clean", "skip user/custom plugins for a clean startup")'
-    )
-    $binContent = $binContent.Replace(
-        "await runProfile({
-			environment: loadLayeredEnv(`"dsh`"),
-			profile: invocation.profile,
-			patchFiles: invocation.patches,
-			args: invocation.args
-		});",
-        "await runProfile({
-			environment: loadLayeredEnv(`"dsh`"),
-			profile: invocation.profile,
-			patchFiles: invocation.patches,
-			args: invocation.args,
-			clean: invocation.clean
-		});"
-    )
-    Set-Content -Path $binJs -Value $binContent -Encoding UTF8 -NoNewline
-
-    $implContent = Get-Content $implFile -Raw
-    $implContent = $implContent.Replace(
-        'function composeProfile(name, patchFiles) {',
-        'function composeProfile(name, patchFiles, clean = false) {'
-    )
-    $implContent = $implContent.Replace(
-        "const profile = prepareProfile(name);
-	const homePatches = loadOptionalPatches(NAME, homePatchPath()) ?? [];
-	const overlays = patchFiles.flatMap((file) => loadOverlayPatches(NAME, resolve(file)));",
-        "const profile = prepareProfile(name, !clean);
-	const homePatches = clean ? [] : (loadOptionalPatches(NAME, homePatchPath()) ?? []);
-	const overlays = clean ? [] : patchFiles.flatMap((file) => loadOverlayPatches(NAME, resolve(file)));"
-    )
-    $implContent = $implContent.Replace(
-        'const composed = composeProfile(options.profile, options.patchFiles);',
-        'const composed = composeProfile(options.profile, options.patchFiles, options.clean);'
-    )
-    $implContent = $implContent.Replace(
-        "if (!signalShutdown.signal.aborted && ctx.fiber.state === 2 && ctx.get(`"loader`") !== void 0) try {",
-        "if (!options.clean && !signalShutdown.signal.aborted && ctx.fiber.state === 2 && ctx.get(`"loader`") !== void 0) try {"
-    )
-    Set-Content -Path $implFile -Value $implContent -Encoding UTF8 -NoNewline
-    Log "  CLI patch: [OK] --clean support injected"
 }
 
 Log '== dsh web restart =='
@@ -182,7 +159,7 @@ if (-not $conn) {
 }
 $oldPid = $conn.OwningProcess
 $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$oldPid"
-if (-not $proc) { throw "process $oldPid disappeared while inspecting" }
+Assert-DshProcess $proc
 Log "found listener: PID $oldPid on port $oldPort"
 Log "command line: $($proc.CommandLine)"
 
@@ -244,6 +221,11 @@ if ($recoveredBin -and (Test-Path $recoveredBin)) {
 Start-Sleep -Seconds $SettleSeconds
 
 # --- 5. stop the old process ----------------------------------------------------
+# Re-verify the PID right before the kill: the settle window above is long
+# enough for the old process to exit and its PID to be reused, and
+# Stop-Process -Force must never land on an unrelated process.
+$current = Get-CimInstance Win32_Process -Filter "ProcessId=$oldPid"
+if ($current) { Assert-DshProcess $current }
 Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue
 try { Wait-Process -Id $oldPid -Timeout 10 -ErrorAction Stop | Out-Null } catch { }
 Log 'old process stopped'
@@ -295,17 +277,14 @@ Log "logs: $outLog / $errLog"
 # --- 7. poll until the service answers ------------------------------------------
 for ($i = 0; $i -lt 60; $i++) {
     Start-Sleep -Seconds 2
-    try {
-        $probe = Invoke-WebRequest -Uri "http://127.0.0.1:$newPort/" -Method Get -TimeoutSec 3 -UseBasicParsing
-        if ($probe.StatusCode -eq 200) {
-            Log "service ready after ~$([int](($i + 1) * 2))s"
-            if ($OpenBrowser) {
-                Log "opening browser: http://127.0.0.1:$newPort"
-                Start-Process "http://127.0.0.1:$newPort"
-            }
-            exit 0
+    if (Test-WebAnswered $newPort) {
+        Log "service ready after ~$([int](($i + 1) * 2))s on port $newPort"
+        if ($OpenBrowser) {
+            Log "opening browser: http://127.0.0.1:$newPort"
+            Start-Process "http://127.0.0.1:$newPort"
         }
-    } catch { }
+        exit 0
+    }
 }
 Log "WARN: service did not answer within 120s; check $errLog"
 exit 1

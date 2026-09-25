@@ -1,12 +1,15 @@
 # whale-background
 
-会话区域背景插件:在对话滚动区居中显示鲸鱼娘透明图(13% 透明度)。
+会话区域背景插件:在对话滚动区居中偏右显示鲸鱼娘透明图(13% 透明度)。
 
 ## 功能
 
-- 会话滚动区域(`[data-conversation-scroll]`)中心显示鲸鱼娘背景图,
-  固定定位、`pointer-events: none`,不干扰阅读与交互;
-- 图片由 host 半以固定路由提供,客户端半只注入一段 CSS。
+- 在会话对话区域(`[data-conversation-scroll]`)居中偏右(水平中心再右移 125px,
+  垂直居中)显示鲸鱼娘背景图:伪元素固定定位、`pointer-events: none`,
+  不干扰阅读与交互;
+- 图片采用 13% 透明度(`opacity: 0.13`),不干扰正常阅读;
+- 背景源为 `whale-girl-transparent.png`,由 host 半以固定路由提供,
+  客户端半只注入一段 CSS。
 
 ## 实现原理(两半各干一件事)
 
@@ -25,8 +28,12 @@
 
 ## 依赖与升级注意
 
-- 图片资源来自 `ui-settings-other` 补丁的 `assets/whale-girl-transparent.png`
-  (host 半按 `import.meta.url` 相对定位,不写死路径);
+- 图片资源按候选列表依次查找,第一个存在的即被使用(host 半按
+  `import.meta.url` 相对定位前两处,不写死绝对路径):
+  1. 本补丁自己的 `assets/whale-girl-transparent.png`(仓库中不存在;放入即可优先命中)
+  2. 旧的兄弟路径 `ui-settings-other/assets/whale-girl-transparent.png`
+  3. 用户级资源目录 `~/.dsh/assets/whale-girl-transparent.png`
+- 三处都不存在时,Host 半打一条 warning 并跳过路由注册(插件照常挂载,只是没有背景图)。
 - 需要 DSH 的 `webServer` 服务(`ctx.webServer.register` 的路由形状
   `{ kind, path, handler }` 在 0.1.5-rc.2 仍然成立);
 - **升级 dsh 后要确认 `[data-conversation-scroll]` 仍然存在**——该属性由

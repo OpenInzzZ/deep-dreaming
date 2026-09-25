@@ -32,6 +32,8 @@ const CHECKS = [
   { path: 'patches/dsh-project-memory/tests/client-contract.mjs', label: 'project-memory: memory cards' },
   { path: 'patches/ui-settings-plugin-manager/verify-plugin-manager.mjs', label: 'plugin-manager: tab + toggle' },
   { path: 'patches/ui-settings-plugin-manager/tests/load-smoke.mjs', label: 'plugin-manager: real Cordis load' },
+  { path: 'patches/ui-settings-model-reasoning/verify-model-reasoning.mjs', label: 'model-reasoning: effort rows' },
+  { path: 'patches/ui-settings-model-reasoning/tests/load-smoke.mjs', label: 'model-reasoning: real Cordis load' },
   { path: 'patches/ui-settings-other/verify-settings-other.mjs', label: 'settings-other: section + flows' },
   { path: 'patches/ui-settings-other/tests/load-smoke.mjs', label: 'settings-other: real Cordis load' },
   { path: 'patches/ui-queue-tools/verify-queue-tools.mjs', label: 'queue-tools: dock + reorder' },

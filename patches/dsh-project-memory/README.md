@@ -100,6 +100,7 @@ primitives 的 `DisclosureRow`):
 
 | 工具 | 卡片标题 |
 | --- | --- |
+| `mcp__memorix__memorix_session_start` | 记忆 · 绑定项目/会话开始 |
 | `mcp__memorix__memorix_search` | 记忆 · 检索 |
 | `mcp__memorix__memorix_store` | 记忆 · 保存/更新 |
 | `mcp__memorix__memorix_project_context` | 记忆 · 任务上下文 |

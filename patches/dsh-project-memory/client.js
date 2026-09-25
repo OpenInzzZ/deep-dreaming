@@ -2,8 +2,9 @@
  * Browser half of dsh-project-memory: collapsible "memory phase" cards.
  *
  * Registers `tool.call.toolview` for Memorix's MCP tools
- * (mcp__memorix__search / store / context / detail), so every memory action
- * in a session renders as one collapsible card. The card reuses the shipped
+ * (mcp__memorix__memorix_session_start / memorix_search / memorix_store /
+ * memorix_project_context / memorix_detail), so every memory action in a
+ * session renders as one collapsible card. The card reuses the shipped
  * `DisclosureRow` primitive — the same component the official "Think"
  * reasoning row is built on — so the memory phase looks and behaves exactly
  * like the Think rows: leading icon + title + one-line summary, expanding
@@ -52,12 +53,14 @@ const CSS = [
 
 /** Display titles and leading icons per Memorix MCP tool name. */
 const TITLES = {
+  'mcp__memorix__memorix_session_start': '记忆 · 绑定项目/会话开始',
   'mcp__memorix__memorix_search': '记忆 · 检索',
   'mcp__memorix__memorix_store': '记忆 · 保存/更新',
   'mcp__memorix__memorix_project_context': '记忆 · 任务上下文',
   'mcp__memorix__memorix_detail': '记忆 · 详情',
 };
 const ICONS = {
+  'mcp__memorix__memorix_session_start': IconSparkleOutline16,
   'mcp__memorix__memorix_search': IconSearchOutline16,
   'mcp__memorix__memorix_store': IconListPenOutline16,
   'mcp__memorix__memorix_project_context': IconSparkleOutline16,
@@ -134,9 +137,12 @@ function MemoryToolCard({ block, callId }) {
   }, callId);
 }
 
-/** Contribute the collapsible memory cards for Memorix MCP tools. */
+/** Contribute the collapsible memory cards for Memorix MCP tools. The recall
+ *  followup tells the agent to call memorix_session_start FIRST, so that tool
+ *  must be registered here too — otherwise its call would fall through to the
+ *  default tool card instead of the "记忆" card. */
 function apply(ctx) {
-  for (const key of ['mcp__memorix__memorix_search', 'mcp__memorix__memorix_store', 'mcp__memorix__memorix_project_context', 'mcp__memorix__memorix_detail']) {
+  for (const key of ['mcp__memorix__memorix_session_start', 'mcp__memorix__memorix_search', 'mcp__memorix__memorix_store', 'mcp__memorix__memorix_project_context', 'mcp__memorix__memorix_detail']) {
     ctx.slots.inject('tool.call.toolview', () => ctx.slots.register(
       { name: 'tool.call.toolview', key },
       MemoryToolCard,

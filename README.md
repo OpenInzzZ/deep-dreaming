@@ -16,14 +16,15 @@ deep-dreaming/
 │   ├── dsh-project-memory/       # 跨会话项目记忆(Memorix 桥接,组合包插件)
 │   ├── session-cleanup/          # 会话日志自动清理(目录包插件)
 │   ├── ui-settings-plugin-manager/  # Web 设置「插件管理」标签页(UI 插件)+ verify
-│   ├── ui-settings-other/        # Web 设置「其他」页:服务状态/重启/中断/空闲自动停止 + 静默启动脚本 + verify
+│   ├── ui-settings-other/        # Web 设置「其他」页:服务运行状态/创建桌面快捷方式/重启服务(危险,唯一危险按钮,三阶段进度条)+ 静默启动脚本 + verify
+│   ├── ui-settings-model-reasoning/  # 设置「模型」页扩展:自定义(llm-pi-ai)模型的思考开关 + 思考等级 + verify
 │   ├── ui-queue-tools/           # 排队消息增强:hover 全文预览 + 上下移排序 + verify
 │   ├── temp-session/             # 侧边栏一键发起不绑定项目的临时会话 + verify
 │   └── whale-background/         # 会话区域鲸鱼娘背景图(目录包插件)
 └── scripts/
     ├── install.ps1               # 一键安装:建全部 junction + 合并 patch 条目 + 安装 bundle + Memorix + 部署校验(幂等)
     ├── deploy.ps1                # 部署校验:同步补丁脚本与品牌资产 + 核对 patch 层引用与 junction + 补齐 host 依赖链接
-    ├── patch-cli.ps1             # 给 npx 缓存的 dsh CLI 打 `--clean`(跳过用户层)补丁;模式不匹配时响亮失败
+    ├── patch-cli.ps1             # 给 npx 缓存的 dsh CLI 打 `--clean`(跳过用户层)补丁;锚点不匹配时响亮失败、不写半套
     ├── migrate-dsh-memory.mjs    # 把旧版 .dsh-memory/ 笔记导入 Memorix(幂等,可 --dry-run)
     ├── run-tests.mjs             # 跑完整个测试矩阵(npm test)
     └── test-deps.mjs             # 验证脚本的 react / jsdom 解析(仓库 node_modules → NODE_PATH → profile)
@@ -33,13 +34,14 @@ deep-dreaming/
 
 | 补丁 | 作用 | 部署方式 | 使用文档 |
 | --- | --- | --- | --- |
-| [dsh-project-memory](patches/dsh-project-memory/) | 跨会话项目记忆:**Memorix 桥接**——注入提示词并在会话第一轮召回既有记忆(带上工作区根目录与项目绑定),记忆存取由 Memorix 经 MCP(`mcp__memorix__*`)完成;记忆工具调用以**可折叠「记忆阶段」卡片**展示,**不产生额外对话轮次** | `dsh plugin --profile web add` 安装到 profile(组合包)+ Memorix 全局安装与 `memorix setup --agent dsh --global` | [README](patches/dsh-project-memory/README.md) |
+| [dsh-project-memory](patches/dsh-project-memory/) | 跨会话项目记忆:**Memorix 桥接**(存储/检索/去重/成熟度都在 Memorix)——注入提示词引导,并在会话第一轮召回既有记忆(带上本会话工作区根目录与项目绑定步骤),记忆存取由 Memorix 经 MCP(`mcp__memorix__*`)完成;记忆工具调用以**可折叠「记忆阶段」卡片**展示,**不产生额外对话轮次** | 作为 **bundle** 安装:`dsh plugin --profile web add`(或 `pnpm add`)进 profile 并登记到 `dsh.profile.bundles` + Memorix 全局安装与 `memorix setup --agent dsh --global` | [README](patches/dsh-project-memory/README.md) |
 | [session-cleanup](patches/session-cleanup/) | 按天数/容量定期清理归档会话,跳过活跃会话 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/session-cleanup/README.md) |
 | [ui-settings-plugin-manager](patches/ui-settings-plugin-manager/) | Web 设置新增「插件管理」标签页:状态过滤 + 官方/自定义分类 + **启停开关(热生效)** | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-settings-plugin-manager/README.md) |
-| [ui-settings-other](patches/ui-settings-other/) | Web 设置新增「其他」页:服务运行状态(pid/端口/内存/版本)+ **重载用户插件(热,不中断会话)** + **创建桌面快捷方式(鲸鱼娘图标)** + 重启/中断服务(危险)+ 空闲自动停止(可配,默认 2h);**覆盖 Web 标题栏 favicon 为鲸鱼娘图标**;配套静默启动脚本与品牌资产 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-settings-other/README.md) |
+| [ui-settings-other](patches/ui-settings-other/) | Web 设置新增「其他」页:服务运行状态(pid/端口/内存/版本 + 刷新)+ **创建桌面快捷方式(鲸鱼娘图标)** + **重启服务(唯一危险按钮,有会话运行时可选等待空闲或强制;三条断开路径统一确认,确认后三阶段进度条报告进度)**;**覆盖 Web 标题栏 favicon 为鲸鱼娘图标**;配套静默启动脚本与品牌资产 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-settings-other/README.md) |
 | [ui-queue-tools](patches/ui-queue-tools/) | 排队消息增强:hover 预览全文 + 上移/下移排序(host 半经 Inbox.splice 重排) | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-queue-tools/README.md) |
+| [ui-settings-model-reasoning](patches/ui-settings-model-reasoning/) | 设置「模型」页扩展:给自定义(llm-pi-ai)路由逐模型配置**思考开关 + 思考等级(档位与发送值)**,写回 `reasoningEfforts`,模型菜单随之出现「推理等级」 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/ui-settings-model-reasoning/README.md) |
 | [temp-session](patches/temp-session/) | 侧边栏底部「临时会话」按钮:一键发起绑定**用户级临时目录**的会话,不关联任何项目 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/temp-session/README.md) |
-| [whale-background](patches/whale-background/) | 会话区域背景:在对话滚动区右下角显示鲸鱼娘透明图(13% 透明度) | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/whale-background/README.md) |
+| [whale-background](patches/whale-background/) | 会话区域背景:在对话滚动区居中偏右显示鲸鱼娘透明图(13% 透明度),资源缺失时自动跳过而不影响启动 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/whale-background/README.md) |
 
 ## 快速部署
 
@@ -53,6 +55,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 # 完成后重启 dsh web:
 powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.dsh\scripts\restart-dsh.ps1"
 ```
+
+`install.ps1` 还会:幂等安装 **Memorix**(`npm install -g memorix` + `memorix setup --agent dsh --global`,写进 `~/.dsh/cordis.patch.yml`,用 `-SkipMemorix` 跳过)、把 `dsh-project-memory` 收敛为唯一的 bundle 属主(见下节不变量)、修好 `dsh web --clean` 逃生舱。所有脚本读写配置文件都走显式 UTF-8(Windows PowerShell 5.1 的 `Get-Content`/`Set-Content` 默认按 ANSI 解码,会把中文注释写成乱码)。
 
 手工方式(路径用变量,不写死):
 
@@ -87,6 +91,24 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 > 代码基于 `import.meta.url` / `%USERPROFILE%` 解析;克隆到任何位置、
 > 任何用户名下均可直接使用(`install.ps1` / `deploy.ps1` 自动跟随)。
 
+## 部署不变量(必读)
+
+- **一个 loader 行只能有一个来源。** `dsh-project-memory` 声明了 `dsh.bundle`,它的行由 bundle 层(包自带 `cordis.patch.yml`)提供;profile 层**不能**再写 `- id: project-memory`。两层若同时提供同一个 id,`applyEntryPatches` 不会去重,Loader 会 fail-loud 抛 `TypeError: duplicate loader entry id`,dsh 直接起不来。`install.ps1` 会**先**删掉 profile 行再装 bundle(若 bundle 步骤失败则把行恢复回去);`deploy.ps1` 检测到两者并存会报 FAIL。
+  注意 `dsh plugin add` / `dsh plugin update --profile web` 会自行把声明了 `dsh.bundle` 的依赖补进 `dsh.profile.bundles`,所以不要"为了保险"两边都写。
+- 其余 7 个补丁都是目录包:junction + profile 层 `- insert:` 行。
+- **不要在 `patches/` 下做递归扫描**:`patches/<p>/node_modules` 是指向 `~/.dsh/profiles/node_modules` 的 junction,而 profile 里的 `@local/*` 又指回 `patches/*`,形成环;`Get-ChildItem -Recurse` 之类的命令不会结束。
+
+## 故障恢复:`dsh web --clean`
+
+某个用户级补丁把启动搞坏时(比如上面那条 duplicate id),用干净启动绕过整个用户层:
+
+```powershell
+dsh web --clean                  # 只加载 bundle 层,跳过 profile 层 / home 层 / --patch 覆盖层
+dsh web --clean --dump-config    # 先看干净启动会组合出什么,再决定
+```
+
+官方没有这个开关:`scripts/patch-cli.ps1` 把它注入到 **npx 缓存**里的 dsh 构建(`lib/bin.js` + `profile-boot-*.js` + `dump-config-*.js`),不碰任何源码检出。这些是带 hash 的构建产物、每个 dsh 版本形状都不同,所以脚本是严格的:每处替换必须命中(或已应用)、写完必须过 `node --check`、最后还会真的跑两次 CLI 验证用户层确实消失;任何一步失败就回滚备份并以 1 退出。**每次升级 dsh 后重跑一次**(新的 npx 缓存里没有 `--clean`)。`start-dsh.ps1` / `restart-dsh.ps1` 会调用部署到 `~/.dsh/scripts/patch-dsh-cli.ps1` 的同一实现。
+
 ## 热插拔(启停/改配置免重启)
 
 dsh web 对 profile 的 `cordis.patch.yml` 内置热加载(`watchUserPatches`,
@@ -94,41 +116,40 @@ dsh web 对 profile 的 `cordis.patch.yml` 内置热加载(`watchUserPatches`,
 
 - **增删插件条目、修改条目 `config` → 保存文件后数秒内事务性生效**,
   host 半与 client 半都会重新装载/卸载,**无需重启 dsh**;
-- 设置 →「其他」页的 **「重载用户插件」** 按钮即手动触发一次该热重载
-  (不中断会话、排队消息不丢);
 - 用户层 patch 文件位置有两处,都会被监视:`~/.dsh/profiles/web/cordis.patch.yml`
   (profile 层)与 `~/.dsh/cordis.patch.yml`(home 层,Memorix 的 MCP 行在这里)。
   实测:home 层新增 `@deepseek-ai/dsh-mcp-client` 行后,运行中的 dsh 数秒内就
   拉起了 `memorix serve`(日志 `[memorix] MCP Server running on stdio`),
   工具随之出现在会话里。
-- ⚠️ **但改写 patch 文件会让"已有行"的 host 半失效,直到重启**(0.1.5-rc.2
-  实测):每次写入都会让 watcher 重新应用整个用户层 —— **新增行**能正常装载
-  (whale-background 就是这样热接上线的),而**已经存在的行**可能只保住条目、
-  丢掉 host 半:客户端半照常加载(界面看起来一切正常),但它的 RPC 通道与
-  settings namespace 都没了。2026-09-18 实测:一次 patch 文件写入之后,
-  `/queue`、`/app`、`/session-cleanup`、`/temp-session`、`/plugin-toggle`
-  五个通道全部消失(表现:排队消息拖拽排序报"排序失败",因为
-  `POST /queue/reorder` 落到 404),`session-cleanup` / `ui-settings-other`
-  的 settings namespace 也从 `settings.describe()` 里消失,而这两个补丁的
-  客户端半仍在正常渲染。**改动 patch 文件之后,依赖 host 侧功能前先重启。**
-  - 自查:连接服务把每个 RPC 通道挂成 `webServer` 的 prefix 路由,通道是否在册
-    可直接看路由表(host 端 `webServer.prefixes`,含 `/queue`、`/app` 等);
-    从浏览器侧对比更简单 —— 已注册通道对未授权裸请求回 **401**,不存在的位置
-    回 **405**。
-  - `install.ps1` 因此只在内容真的变化时才写该文件(无变化时 mtime 不变,
-    不再触发无谓的整层重载)。
-  - **host 半注册 RPC 通道必须用静态 `inject`**(如
-    `export const inject = ['connection','agents']` + 在 `apply` 里直接
-    `ctx.effect(() => ctx.connection.rpc.handle(...))`),不要把注册塞进
-    `apply` 内的动态 `ctx.inject(...)`:本轮实测中,能扛过上述重载的
-    whale-background 正是静态 inject,而五个用动态 inject 注册通道的补丁
-    全部失效。仓库里五个 host 半已统一改为静态 inject。
-- **host 半源码改动不热加载**(模块级 HMR 被官方禁用,补丁又在 `node_modules`
-  下),必须重启 dsh web(`restart-dsh.ps1`,会中断运行中会话,请在空闲时进行);
+- 触发条件是**文件内容确有变化**:只改注释、或写回一份内容等价的文件都**不会**
+  触发重挂 —— `Entry.update` 对 options 做深比较,无差异即直接返回;热重载不中断
+  会话、排队消息不丢。设置 →「其他」页原有的「重载用户插件」按钮已移除,原因正是
+  它只改写注释行、从不重挂任何插件。
+- ⚠️ 尽管如此,**改过 patch 文件、要用 host 侧功能之前先重启**。2026-09-18 实测:
+  一次整层重挂之后,`/queue`、`/app`、`/session-cleanup`、`/temp-session`、
+  `/plugin-toggle` 五个通道全部消失(表现:排队消息拖拽排序报「排序失败」,因为
+  `POST /queue/reorder` 落到 404),`session-cleanup` / `ui-settings-other` 的
+  settings namespace 也一并从 `settings.describe()` 里消失,而这两个补丁的客户端半
+  仍在正常渲染 —— 界面看起来一切正常。当时五个 host 半都用
+  `ctx.connection.rpc.handle` 注册通道,而这条 API 在 dsh 0.1.5 对连接包之外的插件
+  必然抛 `cannot get property "webServer" without inject`;抛错会把同一个 `apply`
+  里此前注册的每一个 effect 一起回滚(路由、定时器、设置分区全没)。所以「重挂丢掉
+  host 半」和「通道根本就没挂上」是同一个根因的两种表现,不是热加载本身的缺陷。
+  现在五个 host 半统一为:自己往 `webServer` 注册一条 fenced 前缀路由,并且用
+  **静态 `export const inject`** 把 `webServer` 声明成依赖(见 AGENTS.md
+  「Client ↔ Host transport」),不再走连接服务的通道注册。
+  - 自查:host 端读 `webServer` 的路由表最直接(应含 `/queue`、`/app` 等);浏览器侧
+    发一个 `POST /<channel>/<endpoint>`(带 `content-type: application/json`)拿到
+    `{ ok, ... }` JSON 信封即在册,落进 SPA 兜底(非 JSON 的 404/405)即不在册。
+  - `install.ps1` 因此只在内容真的变化时才写该文件(无变化时 mtime 不变,不再触发
+    无谓的整层重载)。
+- **补丁源码(仓库文件)改动不热加载**:dsh web 官方禁用了模块级 HMR,且补丁位于
+  `node_modules` 下不被监视;改完源码需重启 dsh web(`restart-dsh.ps1`,会中断所有
+  运行中会话,请在空闲时进行);
 - **client 半源码改动会被重新下发**:client-modules 的 HMR 会让该行改用新的
   bundle rev(实测改 `patches/temp-session/lib/client.js` 后,index 的
-  `__DSH_BOOT__` 里该行 rev 从批次 rev 变成独立的 `73afc512e22f`),已打开的
-  页面刷新即得新代码 —— 这也是本轮能在不重启的情况下验证客户端修复的原因。
+  `__DSH_BOOT__` 里该行 rev 从批次 rev 变成独立的 `73afc512e22f`),已打开的页面
+  刷新即得新代码 —— 这也是能在不重启的情况下验证客户端修复的原因。
 - bundle / profile manifest(`package.json` 的 `dsh.*`)改动需重启。
 
 ## 测试
@@ -149,7 +170,7 @@ node scripts/run-tests.mjs --list
 node patches/session-cleanup/session-cleanup.test.mjs            # 清理规则
 node patches/session-cleanup/verify-session-cleanup.mjs          # settings 集成 + 配置卡片
 node patches/session-cleanup/tests/load-smoke.mjs                # 真实 Cordis 加载冒烟(Invalid effect 回归)
-node patches/dsh-project-memory/tests/plugin.smoke.mjs           # Memorix 桥接:Config 校验 + 提示词/事件流
+node patches/dsh-project-memory/tests/plugin.smoke.mjs           # Memorix 桥接:Config 校验 + 提示词/事件流(无回顾轮次)
 node patches/dsh-project-memory/tests/client-contract.mjs        # 浏览器半契约(记忆折叠卡注册与渲染)
 node patches/ui-settings-plugin-manager/verify-plugin-manager.mjs  # 契约验证(启停逻辑 + 清单/过滤器)
 node patches/ui-settings-plugin-manager/tests/load-smoke.mjs      # 真实 Cordis 加载冒烟
@@ -157,7 +178,11 @@ node patches/ui-settings-other/verify-settings-other.mjs         # settings-othe
 node patches/ui-settings-other/tests/load-smoke.mjs              # 真实 Cordis 加载冒烟
 node patches/ui-queue-tools/verify-queue-tools.mjs               # queue-tools host + client 验证
 node patches/ui-queue-tools/tests/load-smoke.mjs                 # 真实 Cordis 加载冒烟
-node patches/temp-session/verify-temp-session.mjs               # temp-session host + client 契约 + 点击流程
+node patches/temp-session/verify-temp-session.mjs               # temp-session host + client 契约 + 点击流程(需 react/jsdom 的部分自动跳过)
+node patches/ui-queue-tools/tests/load-smoke.mjs                 # 真实 Cordis 加载冒烟(静态 inject 声明 + 前缀路由)
+node patches/ui-queue-tools/verify-queue-tools.mjs              # 排队工具 host + client 契约 + jsdom 拖拽/预览交互
+node patches/ui-settings-model-reasoning/verify-model-reasoning.mjs  # 模型思考配置:契约 + jsdom 渲染/交互/保存 ops
+node patches/ui-settings-model-reasoning/tests/load-smoke.mjs        # 真实 Cordis 加载冒烟
 node patches/whale-background/tests/load-smoke.mjs              # 鲸鱼娘图片路由 + 资源存在性
 ```
 

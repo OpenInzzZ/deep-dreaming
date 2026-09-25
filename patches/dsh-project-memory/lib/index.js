@@ -157,9 +157,12 @@ function installRecall(ctx, autoRecall) {
     if (!recallable(agent)) return;
     recalled.add(agent);
     try {
+      // The source shape is the canonical one: a custom `kind` is not among the
+      // session-format migrator's known source kinds, so a log containing one
+      // would fail to migrate when an old session is reopened.
       agent.inject(createUserMessage({
         content: [{ type: "text", text: recallPrompt(projectRootOf(agent)) }],
-        source: { kind: "memory", recall: true, form: "notice", summary: "项目记忆召回 · memory search" }
+        source: { kind: "plugin", plugin: name, form: "notice", summary: "项目记忆召回 · memory search" }
       }));
     } catch (error) {
       recalled.delete(agent);

@@ -40,12 +40,11 @@ const CSS = `
   document.head.appendChild(tag)
 })();
 
-const inject = ['slots'];
-
 function apply(ctx) {
-  // No additional client-side work needed
+  // No additional client-side work needed: the style tag above is the whole
+  // contribution, so this half declares no service dependency.
 }
 
-module.exports = { apply, inject };
+module.exports = { apply };
 return module.exports;
 } });
