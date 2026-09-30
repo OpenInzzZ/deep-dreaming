@@ -84,7 +84,7 @@ const host = await import(pathToFileURL(hostPath).href)
 // setEnabled against a TEMP patch file (never the real profile layer)
 const tmpDir = mkdtempSync(join(tmpdir(), 'plugin-manager-verify-'))
 const tmpPatch = join(tmpDir, 'cordis.patch.yml')
-const PATCH_HEADER = '# test layer\n- insert:\n    - id: a\n      name: pkg-a\n    - id: b\n      name: pkg-b\n'
+const PATCH_HEADER = '# test layer\n- insert:\n    - id: a\n      name: pkg-a\n    - id: b\n      name: pkg-b\n    - id: cordis:include\n      name: cordis:include\n'
 writeFileSync(tmpPatch, PATCH_HEADER)
 
 {
@@ -114,6 +114,31 @@ writeFileSync(tmpPatch, PATCH_HEADER)
   const builtinOn = await host.setEnabled(tmpPatch, 'cordis:include', true)
   if (builtinOn.changed !== true) throw new Error(`cordis: prefix enable: ${JSON.stringify(builtinOn)}`)
   console.log('host setEnabled OK: disable appends / enable removes / idempotent / rejects bad ids / accepts cordis: builtins')
+}
+
+// Regression: an id this layer does NOT carry must never be "disabled".
+//
+// The old code appended `- id: <id>\n  disabled: true` into whatever file the
+// config named and returned recognized:true, so toggling an entry that the file
+// never mentions rewrote the file for nothing and the page said 已生效. The row
+// now has to be present for the write to mean anything.
+{
+  const file = join(tmpDir, 'unaddressable.yml')
+  writeFileSync(file, PATCH_HEADER)
+  const before = readFileSync(file, 'utf8')
+  const miss = await host.setEnabled(file, 'not-in-this-layer', false)
+  if (miss.changed !== false){ throw new Error(`a missing row must not be written: ${JSON.stringify(miss)}`) }
+  if (miss.recognized !== false || miss.unaddressable !== true) {
+    throw new Error(`a missing row must be reported unaddressable: ${JSON.stringify(miss)}`)
+  }
+  if (readFileSync(file, 'utf8') !== before) throw new Error('a missing row must leave the file byte-identical')
+  // Same for enable: nothing to confirm, and no write.
+  const missOn = await host.setEnabled(file, 'not-in-this-layer', true)
+  if (missOn.changed !== false || missOn.recognized !== false || missOn.unaddressable !== true) {
+    throw new Error(`enable of a missing row must be unaddressable: ${JSON.stringify(missOn)}`)
+  }
+  if (readFileSync(file, 'utf8') !== before) throw new Error('enable of a missing row must leave the file byte-identical')
+  console.log('host setEnabled OK: an id absent from the layer is reported unaddressable and never written')
 }
 
 // Regression: tolerant disable-row recognition + honest reporting.
@@ -621,8 +646,8 @@ const requireTable = (spec) => {
   if (spec === '@deepseek-ai/dsh-client-ui-primitives') {
     const icon = (props) => React.createElement('svg', { ...props, 'data-icon': true })
     return {
-      IconChevronDownOutline14: icon,
-      IconSearchOutline16: icon,
+      IconChevronDownOutlineMedium: icon,
+      IconSearchOutlineRegular: icon,
     }
   }
   throw new Error(`unexpected module-table word: ${spec}`)

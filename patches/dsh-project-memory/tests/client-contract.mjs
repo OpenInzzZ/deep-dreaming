@@ -87,10 +87,10 @@ const requireTable = (spec) => {
     )
     return {
       DisclosureRow,
-      IconListPenOutline16: icon,
-      IconSearchOutline16: icon,
-      IconChecklistOutline14: icon,
-      IconSparkleOutline16: icon,
+      IconListPenOutlineRegular: icon,
+      IconSearchOutlineRegular: icon,
+      IconChecklistOutlineMedium: icon,
+      IconSparkleRegular: icon,
     }
   }
   throw new Error(`unexpected module-table word: ${spec}`)

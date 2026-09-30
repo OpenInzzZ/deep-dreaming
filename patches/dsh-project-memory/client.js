@@ -20,7 +20,7 @@ var module = { exports: {} }; var exports = module.exports;
 const React = require('react');
 const { useState } = React;
 const { jsx, jsxs, Fragment } = require('react/jsx-runtime');
-const { DisclosureRow, IconListPenOutline16, IconSearchOutline16, IconChecklistOutline14, IconSparkleOutline16 } = require('@deepseek-ai/dsh-client-ui-primitives');
+const { DisclosureRow, IconListPenOutlineRegular, IconSearchOutlineRegular, IconChecklistOutlineMedium, IconSparkleRegular } = require('@deepseek-ai/dsh-client-ui-primitives');
 
 const PLUGIN_ID = 'dsh-project-memory';
 
@@ -60,11 +60,11 @@ const TITLES = {
   'mcp__memorix__memorix_detail': '记忆 · 详情',
 };
 const ICONS = {
-  'mcp__memorix__memorix_session_start': IconSparkleOutline16,
-  'mcp__memorix__memorix_search': IconSearchOutline16,
-  'mcp__memorix__memorix_store': IconListPenOutline16,
-  'mcp__memorix__memorix_project_context': IconSparkleOutline16,
-  'mcp__memorix__memorix_detail': IconChecklistOutline14,
+  'mcp__memorix__memorix_session_start': IconSparkleRegular,
+  'mcp__memorix__memorix_search': IconSearchOutlineRegular,
+  'mcp__memorix__memorix_store': IconListPenOutlineRegular,
+  'mcp__memorix__memorix_project_context': IconSparkleRegular,
+  'mcp__memorix__memorix_detail': IconChecklistOutlineMedium,
 };
 
 /** Concatenate the result text blocks of a settled tool node. */
@@ -103,7 +103,7 @@ function MemoryToolCard({ block, callId }) {
   const running = !('kind' in block) || block.kind !== 'tool-result';
   const name = running ? block.name : (block.call?.name ?? '');
   const title = TITLES[name] ?? '记忆';
-  const Icon = ICONS[name] ?? IconListPenOutline16;
+  const Icon = ICONS[name] ?? IconListPenOutlineRegular;
   const text = running ? '' : resultText(block);
   const isError = !running && block.isError === true;
   const [open, setOpen] = useState(false);

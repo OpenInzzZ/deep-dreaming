@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Queue Reorder",
+    "description": "Adds drag-to-reorder to the pending-message queue above the composer, plus a hover preview of the full message. Officially the queue can only be edited, removed or steered, never reordered."
+  }
+}

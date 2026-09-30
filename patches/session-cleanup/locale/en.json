@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session Cleanup",
+    "description": "Periodically deletes old session logs by age and total size on disk, always skipping sessions that are still running. Every rule is editable, and a dry run reports what would be removed without touching anything."
+  }
+}

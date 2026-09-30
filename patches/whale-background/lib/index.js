@@ -22,14 +22,20 @@ const patchRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 /**
  * Candidate asset locations, in resolution order:
  *   1. this patch's own `assets/` directory (a drop-in copy wins),
- *   2. the legacy sibling location, `ui-settings-other/assets/`,
- *   3. a user-level asset drop, `~/.dsh/assets/`.
+ *   2. `~/.dsh/assets/`, where `scripts/deploy.ps1` syncs the bundled brand assets,
+ *   3. the ARCHIVED `ui-settings-other` patch, `archive/patches/ui-settings-other/assets/`
+ *      - that patch owned this PNG originally and is kept read-only under `archive/`,
+ *   4. the pre-archive sibling location, `ui-settings-other/assets/`, so a checkout
+ *      that still has the patch in place keeps working,
+ *   5. the repo-level archive copy of the web scripts, which carried the same PNG.
  */
 export function assetCandidates(name = ASSET_NAME) {
+  const repoRoot = join(patchRoot, '..', '..')
   return [
     join(patchRoot, 'assets', name),
-    join(patchRoot, '..', 'ui-settings-other', 'assets', name),
     join(homedir(), '.dsh', 'assets', name),
+    join(repoRoot, 'archive', 'patches', 'ui-settings-other', 'assets', name),
+    join(patchRoot, '..', 'ui-settings-other', 'assets', name),
   ]
 }
 

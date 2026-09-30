@@ -11,14 +11,20 @@
  * pi-ai provider card.
  *
  * Data rides the shipped settings transport, never a private channel: the
- * plugin binds `ctx.settingsScope` to the `llm-pi-ai` namespace and writes
- * through that scope's path operator —
- * `scope.mutate([{ op: 'set', path: [...providerPath, 'models'], value }])` —
- * while reads ride the same scope's describe mirror (`scope.getSnapshot()` and
- * `scope.subscribe()`), so the Host stays the single fact source and concurrent
- * edits fence on the revision. The scope controller owns the underlying
- * `remote.settings` calls, which is why this half injects `settingsScope`
- * rather than `remote.settings` itself.
+ * plugin takes the `llm-pi-ai` namespace's shared form from `ctx.configForms`
+ * and writes through that form's path operator —
+ * `form.mutate([{ op: 'set', path: [...providerPath, 'models'], value }])` —
+ * while reads ride the same form's snapshot (`form.getSnapshot()` and
+ * `form.subscribe()`), so the Host stays the single fact source and concurrent
+ * edits fence on the revision. The form already owns the underlying
+ * `remote.settings` calls on the *provider's* fiber, which is why this half
+ * injects `configForms` rather than `remote.settings` itself.
+ *
+ * The service was named `settingsScope` up to 0.1.7-alpha.1; it was renamed to
+ * `configForms` and its single `bind({ namespace })` entry point became
+ * `get(entryId)` (the settings namespace of a Host plugin entry IS its loader
+ * entry id). Declaring the old name is not a soft failure: Cordis keeps the
+ * entry pending on a service nobody provides, so this half never activated.
  *
  * Hand-written in the client-bundle contract (no build step): the shell's
  * module loader receives this file through `window.__ModuleLoader__.load` and
@@ -32,7 +38,7 @@ var module = { exports: {} }; var exports = module.exports;
 const React = require('react');
 const { useState, useSyncExternalStore } = React;
 const { jsx, jsxs } = require('react/jsx-runtime');
-const { Switch, Input, IconChevronDownOutline14 } = require('@deepseek-ai/dsh-client-ui-primitives');
+const { Switch, Input, IconChevronDownOutlineMedium } = require('@deepseek-ai/dsh-client-ui-primitives');
 
 const PLUGIN_ID = '@local/dsh-client-ui-settings-model-reasoning';
 
@@ -136,7 +142,7 @@ const en = {
 };
 
 /** Services required by the registrations. */
-const inject = ['slots', 'locale', 'settingsScope'];
+const inject = ['slots', 'locale', 'configForms'];
 
 /** Whether a wire value is a plain object (the `reasoningEfforts` map shape). */
 function isPlainObject(value) {
@@ -345,7 +351,7 @@ function ModelReasoningCard({ provider, t, scope }) {
             disabled: readOnly || busy || !state.enabled,
             onClick: () => { setOpenId(open ? null : model.id) },
             children: [
-              jsx(IconChevronDownOutline14, { className: open ? 'mr-chevron mr-chevron-open' : 'mr-chevron' }, 'chevron'),
+              jsx(IconChevronDownOutlineMedium, { className: open ? 'mr-chevron mr-chevron-open' : 'mr-chevron' }, 'chevron'),
               jsx('span', { children: open ? t('collapse') : t('levels') }, 'label'),
             ],
           }, 'expand'),
@@ -399,7 +405,7 @@ function ModelReasoningCard({ provider, t, scope }) {
 /** Contribute the thinking-configuration card to every pi-ai provider card. */
 function apply(ctx) {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'model-reasoning: dictionaries')
-  const scope = ctx.settingsScope.bind({ namespace: PI_AI_NS })
+  const scope = ctx.configForms.get(PI_AI_NS)
   ctx.slots.inject('settings.models.provider-card', () => ctx.slots.register({
     name: 'settings.models.provider-card',
     key: PI_AI_NS,

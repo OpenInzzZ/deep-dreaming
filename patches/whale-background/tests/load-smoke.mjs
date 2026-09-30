@@ -30,7 +30,6 @@ import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join, delimiter } from 'node:path'
-import { existsSync } from 'node:fs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const patchDir = join(here, '..')
@@ -56,13 +55,17 @@ function resolveCordisEntry() {
   )
 }
 
-const assetPath = join(patchDir, '..', 'ui-settings-other', 'assets', 'whale-girl-transparent.png')
-assert.ok(existsSync(assetPath), `whale image asset missing: ${assetPath}`)
-
 const { Context } = await import(pathToFileURL(resolveCordisEntry()).href)
 const host = await import(pathToFileURL(hostPath).href)
 
 assert.deepEqual(host.inject, ['webServer'], 'the host half must declare the webServer service in inject')
+
+// The asset is resolved through the patch's own candidate list (own assets/ ->
+// ~/.dsh/assets/ -> the archived ui-settings-other copy). Assert the SAME
+// resolution the host half uses, instead of a hardcoded path: this patch
+// deliberately does not bundle the ~6 MB PNG, and ui-settings-other is archived.
+const assetPath = host.resolveAssetPath()
+assert.ok(assetPath !== null, `whale image asset missing from every candidate: ${host.assetCandidates().join(', ')}`)
 
 const ctx = new Context()
 const routes = []

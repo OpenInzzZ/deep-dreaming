@@ -26,7 +26,7 @@ var module = { exports: {} }; var exports = module.exports;
 const React = require('react');
 const { useEffect, useState } = React;
 const { jsx, jsxs } = require('react/jsx-runtime');
-const { IconChevronDownOutline14 } = require('@deepseek-ai/dsh-client-ui-primitives');
+const { IconChevronDownOutlineMedium } = require('@deepseek-ai/dsh-client-ui-primitives');
 
 const PLUGIN_ID = '@local/dsh-plugin-session-cleanup';
 
@@ -296,7 +296,7 @@ function SessionCleanupCard({ t, getConfig, setConfig, resetConfig }) {
           jsx('span', { className: 'sc-description', children: t('description') }, 'desc'),
         ] }, 'head-text'),
         dirty ? jsx('span', { className: 'sc-pending', children: t('unsaved') }, 'pending') : null,
-        jsx(IconChevronDownOutline14, { className: 'sc-chevron' + (open ? ' sc-chevron-open' : ''), 'aria-hidden': true }, 'chevron'),
+        jsx(IconChevronDownOutlineMedium, { className: 'sc-chevron' + (open ? ' sc-chevron-open' : ''), 'aria-hidden': true }, 'chevron'),
       ],
     }, 'header'),
     open ? jsxs('div', { className: 'sc-body', children: [
@@ -360,7 +360,7 @@ const call = async (endpoint, args) => {
   return envelope.value
 }
 
-/** Contribute the cleanup configuration card into 插件配置 + 插件管理. */
+/** Contribute the cleanup configuration page into 设置 → 会话清理. */
 function apply(ctx) {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'session-cleanup: card dictionaries')
 
@@ -368,12 +368,26 @@ function apply(ctx) {
   const setConfig = (fields) => call('setConfig', { fields })
   const resetConfig = () => call('resetConfig', {})
   const cardApi = () => ({ getConfig, setConfig, resetConfig })
+  const t = ctx.locale.bind(NS)
 
-  // The shipped 插件配置 page (settings.plugin.item). Config cards live only
-  // here; the plugin-manager page is enable/disable management only.
-  ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
-    name: 'settings.plugin.item',
-    key: 'session-cleanup',
+  // The shipped settings shell's page slot, `settings.section`.
+  //
+  // This used to register on `settings.plugin.item` ("设置 → 插件 → 插件配置"),
+  // which no longer exists in 0.2.0-rc.2: that slot appears only inside a
+  // comment in the shipped `slot-contract.d.ts`, so `slots.inject` waited for a
+  // declaration that never came and the page was never rendered at all. The
+  // shipped sections (general `id: 'developer-tools'` order 15, models
+  // `order: 10`, plugins `order: 15`) all use this shape, including the thunk
+  // `label` that becomes the nav entry.
+  //
+  // The card's data path is this plugin's own fenced `/session-cleanup` route
+  // rather than the settings document, so the page keeps working regardless of
+  // how the Host wires its settings service.
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'session-cleanup',
+    order: 40,
+    label: () => t('title'),
     locale: NS,
     inject: cardApi,
   }, SessionCleanupCard))

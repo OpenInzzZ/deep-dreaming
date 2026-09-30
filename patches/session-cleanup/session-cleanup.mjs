@@ -62,8 +62,58 @@ export const DEFAULTS = {
   sessionsRoot: undefined,
 }
 
-/** 会话目录名形态: session-<uuid> */
-const SESSION_DIR_RE = /^session-/
+/**
+ * 会话目录名不再是固定前缀。
+ *
+ * 官方布局是 `<sessionsRoot>/<projectKey(cwd)>/<encodeSegment(id)>/`
+ * (`session-persistence-jsonl/src/format.ts` 的 `sessionDir`)，而 `id` 有两种
+ * 铸造方式：会话控制器用 `session-${randomUUID()}`，子智能体/分叉/agent-team
+ * 等路径直接用裸 `randomUUID()`。旧实现写死 `/^session-/`，实测本机 28 个会话
+ * 目录里只认得 6 个 —— 剩下 22 个(含最旧的那个)永远清不掉。
+ *
+ * 所以改成**排除法**：跳过隐藏项与官方那个非会话的 `_no-cwd` 桶，其余目录一律
+ * 视为候选。这比再猜一遍命名规则安全：猜错只是少扫，而少扫是静默的。
+ */
+const NON_SESSION_DIRS = new Set(['_no-cwd'])
+
+/**
+ * `SessionId` -> 目录名，与官方 `encodeSegment` 同构(`format.ts:199`)。
+ *
+ * 必须自己实现一份：补丁宿主端只 import `@deepseek-ai/schemastery`，且这个
+ * 转换要参与"绝不删活跃会话"的判断。安全字符(`A-Za-z0-9._-`)原样保留，其余
+ * 按 UTF-16 码元写成 `~XXXX`；`.` 与 `..` 特判，防止目录穿越。
+ */
+export function encodeSegment(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) return ''
+  if (raw === '.') return '~002E'
+  if (raw === '..') return '~002E~002E'
+  let out = ''
+  for (let i = 0; i < raw.length; i++) {
+    const code = raw.charCodeAt(i)
+    const ch = String.fromCharCode(code)
+    if (ch !== '~' && /^[A-Za-z0-9._-]$/.test(ch)) out += ch
+    else out += '~' + code.toString(16).toUpperCase().padStart(4, '0')
+  }
+  return out
+}
+
+/**
+ * 这个目录是不是活跃会话的日志目录？
+ *
+ * 关键安全判断：官方把 id 编码成目录名，所以目录名可能是 id 本身
+ * (`session-<uuid>` 全为安全字符)、也可能是它的 `encodeSegment` 形态。只比
+ * 其中一种，另一种形态下的**活跃会话会被当成陈旧日志删掉**。两种都接受，
+ * 宁可少删不可误删。
+ */
+export function isLiveSessionDir(name, liveSessionIds) {
+  if (typeof name !== 'string' || name.length === 0) return false
+  if (liveSessionIds.has(name)) return true
+  for (const id of liveSessionIds) {
+    if (typeof id !== 'string' || id.length === 0) continue
+    if (encodeSegment(id) === name) return true
+  }
+  return false
+}
 
 /** 解析会话根目录: 配置 > $DSH_HOME/sessions > ~/.dsh/sessions */
 export function resolveSessionsRoot(configured) {
@@ -115,7 +165,7 @@ export async function runCleanup(sessionsRoot, options = {}, liveSessionIds = ne
       return []
     })
     for (const entry of entries) {
-      if (!entry.isDirectory() || !SESSION_DIR_RE.test(entry.name)) continue
+      if (!entry.isDirectory() || entry.name.startsWith('.') || NON_SESSION_DIRS.has(entry.name)) continue
       const sessionDir = join(projectDir, entry.name)
       const { size, mtimeMs } = await statSessionDir(sessionDir).catch((e) => {
         result.errors.push(`stat ${project.name}/${entry.name}: ${e.message}`)
@@ -123,7 +173,7 @@ export async function runCleanup(sessionsRoot, options = {}, liveSessionIds = ne
       })
       result.scanned += 1
       result.totalBytes += size
-      if (liveSessionIds.has(entry.name)) {
+      if (isLiveSessionDir(entry.name, liveSessionIds)) {
         result.skippedLive += 1
         continue
       }

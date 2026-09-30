@@ -1,5 +1,9 @@
 # deep-dreaming deploy script - sync scripts + verify user-level patch wiring
 # Usage: powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
+#        powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1 -Profile web   # legacy web profile
+param(
+    [string]$Profile = 'desktop'
+)
 $ErrorActionPreference = 'Stop'
 
 # Explicit UTF-8 IO: under Windows PowerShell 5.1 a no-BOM UTF-8 file read with
@@ -13,33 +17,28 @@ function Read-Utf8([string]$Path) {
 $dev = Split-Path -Parent $PSScriptRoot          # D:\GitHub\deep-dreaming
 $dshHome = Join-Path $env:USERPROFILE '.dsh'     # ~/.dsh
 
-# 0. Sync helper scripts to ~/.dsh/scripts/ (the restart button triggers these).
-#    Sources live inside their owning patch directory.
+# 0. Sync the desktop lifecycle scripts to ~/.dsh/scripts/.
+#    The web lifecycle scripts (start/restart/stop/update-dsh.ps1,
+#    install-desktop-shortcut.ps1, patch-cli.ps1) are ARCHIVED under
+#    archive/web-scripts/ and are deliberately NOT deployed any more: this
+#    collection targets the DSH desktop app, whose lifecycle belongs to Electron.
 $scriptsDir = Join-Path $dshHome 'scripts'
 New-Item -ItemType Directory -Path $scriptsDir -Force | Out-Null
-foreach ($name in @('restart-dsh.ps1', 'stop-dsh.ps1', 'start-dsh.ps1', 'update-dsh.ps1', 'install-desktop-shortcut.ps1')) {
-    $src = Join-Path $dev "patches\ui-settings-other\$name"
+foreach ($name in @('start-desktop.ps1', 'restart-desktop.ps1')) {
+    $src = Join-Path $dev "scripts\$name"
     if (Test-Path $src) {
         Copy-Item $src (Join-Path $scriptsDir $name) -Force
         Write-Host "  [OK] script: $name -> ~/.dsh/scripts/"
     }
 }
 
-# 0.1. The canonical DSH-CLI patcher is shared with start-dsh.ps1/restart-dsh.ps1
-#      so the injection logic lives in exactly one file. Those scripts call
-#      ~/.dsh/scripts/patch-dsh-cli.ps1 when it is present.
-$cliPatcher = Join-Path $dev 'scripts\patch-cli.ps1'
-if (Test-Path $cliPatcher) {
-    Copy-Item $cliPatcher (Join-Path $scriptsDir 'patch-dsh-cli.ps1') -Force
-    Write-Host '  [OK] script: patch-cli.ps1 -> ~/.dsh/scripts/patch-dsh-cli.ps1'
-}
-
-# 0.5. Sync brand assets (whale-girl icons) to ~/.dsh/assets/ — the desktop
-#      shortcut's IconLocation and the favicon route read from here.
+# 0.5. Sync the brand asset to ~/.dsh/assets/. It lives at the REPO level, not in
+#      a patch: the patch that used to own it (ui-settings-balance) is retired, and
+#      the whale image is resolved by whale-background from its own assets/.
 $assetsDir = Join-Path $dshHome 'assets'
 New-Item -ItemType Directory -Path $assetsDir -Force | Out-Null
-foreach ($name in @('DeepSeekHarness-WhaleGirl.ico', 'whale-girl-transparent.png', 'favicon-128.png')) {
-    $src = Join-Path $dev "patches\ui-settings-other\assets\$name"
+foreach ($name in @('favicon-128.png')) {
+    $src = Join-Path $dev "assets\$name"
     if (Test-Path $src) {
         Copy-Item $src (Join-Path $assetsDir $name) -Force
         Write-Host "  [OK] asset: $name -> ~/.dsh/assets/"
@@ -47,10 +46,11 @@ foreach ($name in @('DeepSeekHarness-WhaleGirl.ico', 'whale-girl-transparent.png
 }
 
 Write-Host '== deep-dreaming deploy ==' -ForegroundColor Cyan
+Write-Host "profile : $Profile"
 
-# 1. Validate every @local/... reference in the web profile patch layer: the
-#    package must be linked (junction) into the profile node_modules.
-$profilePatch = Join-Path $dshHome 'profiles\web\cordis.patch.yml'
+# 1. Validate every @local/... reference in the profile patch layer: the
+#    package must be linked (junction) into the shared profile node_modules.
+$profilePatch = Join-Path $dshHome "profiles\$Profile\cordis.patch.yml"
 $modulesBase = Join-Path $dshHome 'profiles\node_modules'
 $checked = 0
 $failed = 0
@@ -78,8 +78,8 @@ if (Test-Path $profilePatch) {
 #      cordis.patch.yml row, so inserting that same row from the profile layer
 #      composes TWO entries with the same id, and the boot aborts fail-loud with
 #      `TypeError: duplicate loader entry id: <id>` (cordis-plugin-loader).
-$profilePkgPath = Join-Path $dshHome 'profiles\web\package.json'
-$profileNodeModules = Join-Path $dshHome 'profiles\web\node_modules'
+$profilePkgPath = Join-Path $dshHome "profiles\$Profile\package.json"
+$profileNodeModules = Join-Path $dshHome "profiles\$Profile\node_modules"
 if ((Test-Path $profilePatch) -and (Test-Path $profilePkgPath)) {
     $manifest = Read-Utf8 $profilePkgPath | ConvertFrom-Json
     $bundles = @($manifest.dsh.profile.bundles)
@@ -127,7 +127,7 @@ if (Test-Path $homePatch) {
 #    repo-side real path, so the repo tree must expose the host node_modules.
 #    Missing/dangling/empty-dir links are (re)created; real dirs that already
 #    provide @deepseek-ai are kept as-is.
-$depPlugins = @('dsh-project-memory', 'session-cleanup', 'ui-settings-other', 'ui-settings-model-reasoning', 'temp-session', 'whale-background')
+$depPlugins = @('dsh-project-memory', 'session-cleanup', 'ui-settings-model-reasoning', 'ui-queue-tools', 'temp-session', 'whale-background')
 if (-not (Test-Path $modulesBase)) {
     Write-Host '  [!] ~/.dsh/profiles/node_modules not found; run `dsh plugin --profile web add` first' -ForegroundColor Yellow
 } else {
@@ -155,19 +155,74 @@ if (-not (Test-Path $modulesBase)) {
     }
 }
 
+# 3.5. Shared host-dependency store health (READ-ONLY).
+#      The patches import their host packages from the patch's real path, so the ONLY
+#      thing that answers is `<profiles>\node_modules`. This check verifies that every
+#      projection there can actually be resolved by Node. It never rewrites a link:
+#      re-pointing the store at the desktop app's packaged runtime is impossible
+#      (a junction into app.asar is unreadable, copying the scope is 236 MB, and
+#      removing the projections makes the imports fail). See scripts/desktop-install.mjs.
+if ($Profile -eq 'desktop') {
+    Write-Host ''
+    Write-Host '== host dependency store (read-only) ==' -ForegroundColor Cyan
+    $helper = Join-Path $dev 'scripts\desktop-install.mjs'
+    $exe = $null
+    $processLines = @()
+    foreach ($line in (Get-CimInstance Win32_Process -Filter "Name LIKE '%DeepSeek%'" -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.CommandLine })) {
+        if (-not $line) { continue }
+        $processLines += $line
+        if (-not $exe -and $line -match '^\s*"([^"]*DeepSeek Harness\.exe)"') { $exe = $Matches[1] }
+    }
+    if (-not (Test-Path $helper)) {
+        Write-Host '  [!] scripts\desktop-install.mjs missing; cannot verify the store' -ForegroundColor Yellow
+    } elseif (-not $exe) {
+        Write-Host '  [!] DSH desktop app not found; cannot verify the store (start the app, or pass -InstallRoot to install.ps1)' -ForegroundColor Yellow
+    } else {
+        # The helper resolves the installation from these process command lines, so it
+        # must receive them: it deliberately does not spawn a shell of its own.
+        $processesFile = Join-Path ([System.IO.Path]::GetTempPath()) "deep-dreaming-procs-$PID.json"
+        [System.IO.File]::WriteAllText($processesFile, (ConvertTo-Json @($processLines) -Compress), [System.Text.UTF8Encoding]::new($false))
+        $previous = $env:ELECTRON_RUN_AS_NODE
+        $env:ELECTRON_RUN_AS_NODE = '1'
+        try {
+            # Plain node cannot see inside app.asar: this must run under Electron.
+            $raw = (& $exe $helper 'discover' '--processes-file' $processesFile 2>&1 | Out-String).Trim()
+        } finally {
+            $env:ELECTRON_RUN_AS_NODE = $previous
+            Remove-Item $processesFile -Force -ErrorAction SilentlyContinue
+        }
+        $json = ($raw -split "`r?`n" | Where-Object { $_.Trim().StartsWith('{') } | Select-Object -Last 1)
+        $report = if ($json) { try { $json | ConvertFrom-Json } catch { $null } } else { $null }
+        if ($null -eq $report) {
+            Write-Host '  [!] store check produced no report' -ForegroundColor Yellow
+            Write-Host "      $raw" -ForegroundColor DarkGray
+        } elseif (-not $report.ok) {
+            Write-Host "  [!] store check could not resolve the installation: $($report.error)" -ForegroundColor Yellow
+        } else {
+            Write-Host "  install : $($report.installation.installRoot) (dsh $($report.installation.version))"
+            Write-Host "  store   : $($report.summary.summary)"
+            foreach ($probe in @($report.store.probe)) {
+                $mark = if ($probe.ok) { '[OK]' } else { '[FAIL]' }
+                Write-Host "  $mark $($probe.name) $($probe.version)"
+            }
+            if ($report.summary.healthy) {
+                Write-Host '  [OK] every projection resolves; the patches can import their host packages' -ForegroundColor Green
+            } else {
+                Write-Host '  [FAIL] the store has unusable projections; rebuild it with the CLI that created it' -ForegroundColor Red
+                foreach ($name in @($report.store.broken)) { Write-Host "         broken: $name" -ForegroundColor DarkGray }
+                $failed++
+            }
+        }
+    }
+}
+
 Write-Host ''
 if ($failed -gt 0) { Write-Host "Deploy check FAILED ($failed broken link(s))." -ForegroundColor Red; exit 1 }
 Write-Host "Deploy check done ($checked reference(s) verified)." -ForegroundColor Green
 Write-Host "  - cordis.patch.yml entry changes hot-apply within seconds (no restart)." -ForegroundColor DarkGray
-Write-Host "  - Plugin SOURCE changes need a dsh web restart (restart-dsh.ps1); bundle/profile manifest changes too." -ForegroundColor DarkGray
-
-# 4. Patch the dsh CLI (npx cache) to add --clean startup support.
-#    Idempotent: already-patched files are skipped.
-$patchCli = Join-Path $dev 'scripts\patch-cli.ps1'
-if (Test-Path $patchCli) {
-    Write-Host ''
-    Write-Host '== CLI patch ==' -ForegroundColor Cyan
-    powershell -NoProfile -ExecutionPolicy Bypass -File $patchCli
-    Write-Host '  dsh web --clean   skip user/custom plugins (cordis.patch.yml layers)'
-    Write-Host '  dsh web --port N  already supported natively by the web app'
+if ($Profile -eq 'desktop') {
+    Write-Host "  - Plugin SOURCE changes need the desktop app restarted (restart-desktop.ps1); bundle/profile manifest changes too." -ForegroundColor DarkGray
+} else {
+    Write-Host "  - The web profile is legacy (see archive/web-scripts/README.md); source changes need its own restart." -ForegroundColor DarkGray
 }

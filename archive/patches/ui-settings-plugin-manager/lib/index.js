@@ -21,17 +21,75 @@
  */
 import { homedir } from 'node:os'
 import { join, isAbsolute } from 'node:path'
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile, writeFile, readdir, stat } from 'node:fs/promises'
 
 export const name = 'ui-settings-plugin-manager'
 
-/** Resolve the profile patch layer to toggle entries on. */
-export function resolvePatchFile(config = {}) {
+/** dsh home (`~/.dsh`), where the profiles tree lives. */
+const dshHome = () => join(homedir(), '.dsh')
+
+/** One profile directory's name, tested for the patch-layer row of `id`. */
+async function profileHasRow(profileDir, id) {
+  const patchFile = join(profileDir, 'cordis.patch.yml')
+  try {
+    const content = await readFile(patchFile, 'utf8')
+    if (analyzeDisabledRows(content, id).found) return { patchFile, at: Infinity }
+    // The row may not exist yet (a patch that is linked but not inserted). Any
+    // mention of the id at all still identifies the layer that owns it.
+    if (new RegExp(`^\\s*-?\\s*id:\\s*['"]?${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"]?\\s*$`, 'm').test(content)) {
+      return { patchFile, at: 0 }
+    }
+    return undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Resolve the profile patch layer to toggle entries on.
+ *
+ * An explicit `config.patchFile` always wins. Otherwise the layer is DETECTED
+ * rather than assumed: the old default hardcoded `profiles/web`, so every
+ * toggle on the desktop app silently rewrote a file nobody watches while the
+ * UI reported success. Detection scans the profiles tree for the layer that
+ * actually carries the row, preferring the one whose composed `cordis.yml` was
+ * touched most recently (the running profile rewrites it on every load).
+ *
+ * @param config - entry config; `patchFile` overrides detection.
+ * @param id - loader entry id whose owning layer should be found.
+ * @param home - dsh home to scan; defaults to `~/.dsh` (tests pass a temp dir).
+ * @returns the absolute patch-layer path, or undefined when no layer carries it.
+ */
+export async function resolvePatchFile(config = {}, id = '', home = dshHome()) {
   const configured = config.patchFile
   if (typeof configured === 'string' && configured.length > 0) {
-    return isAbsolute(configured) ? configured : join(homedir(), '.dsh', configured)
+    return isAbsolute(configured) ? configured : join(home, configured)
   }
-  return join(homedir(), '.dsh', 'profiles', 'web', 'cordis.patch.yml')
+  const profilesDir = join(home, 'profiles')
+  let names = []
+  try {
+    names = (await readdir(profilesDir, { withFileTypes: true }))
+      .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
+      .map(entry => entry.name)
+  } catch {
+    return undefined
+  }
+  const candidates = []
+  for (const name of names) {
+    const profileDir = join(profilesDir, name)
+    const hit = await profileHasRow(profileDir, id)
+    if (hit === undefined) continue
+    let at = 0
+    try {
+      at = (await stat(join(profileDir, 'cordis.yml'))).mtimeMs
+    } catch {
+      at = 0
+    }
+    candidates.push({ profile: name, patchFile: hit.patchFile, at })
+  }
+  if (candidates.length === 0) return undefined
+  candidates.sort((left, right) => right.at - left.at)
+  return candidates[0].patchFile
 }
 
 /**
@@ -348,23 +406,44 @@ export async function setEnabled(patchFile, id, enabled) {
       // file still has a row for it; when it does not, the disable comes from
       // another layer and this call cannot confirm anything.
       const notes = found ? warnings : [...warnings, `no row for id ${JSON.stringify(id)} in this patch file`]
-      return { enabled: true, changed: false, removed: 0, recognized: notes.length === 0, warnings: notes }
+      return {
+        enabled: true,
+        changed: false,
+        removed: 0,
+        recognized: notes.length === 0,
+        unaddressable: !found && warnings.length === 0,
+        warnings: notes,
+      }
     }
     await writeFile(patchFile, withoutRows, 'utf8')
-    return { enabled: true, changed: true, removed, recognized: warnings.length === 0, warnings }
+    return { enabled: true, changed: true, removed, recognized: warnings.length === 0, unaddressable: false, warnings }
   }
   if (removed > 0) {
     // Already disabled by a recognizable row: a second row for the same id
     // would just duplicate the override.
-    return { enabled: false, changed: false, removed: 0, recognized: warnings.length === 0, warnings }
+    return { enabled: false, changed: false, removed: 0, recognized: warnings.length === 0, unaddressable: false, warnings }
   }
   if (warnings.length > 0) {
     // A disable-ish row is there but cannot be judged: do not append a second
     // override blindly, report the lines the user has to look at instead.
-    return { enabled: false, changed: false, removed: 0, recognized: false, warnings }
+    return { enabled: false, changed: false, removed: 0, recognized: false, unaddressable: false, warnings }
+  }
+  if (!found) {
+    // Nothing in this layer names the id at all. Appending a disable row would
+    // write `- id: <id>` into a profile that does not load it: the Loader would
+    // ignore the row, nothing would change, and reporting success here is how
+    // this used to lie. Report it as unaddressable in THIS layer instead.
+    return {
+      enabled: false,
+      changed: false,
+      removed: 0,
+      recognized: false,
+      unaddressable: true,
+      warnings: [`no row for id ${JSON.stringify(id)} in ${patchFile}`],
+    }
   }
   await writeFile(patchFile, appendDisabledBlock(content, id), 'utf8')
-  return { enabled: false, changed: true, removed: 0, recognized: true, warnings: [] }
+  return { enabled: false, changed: true, removed: 0, recognized: true, unaddressable: false, warnings: [] }
 }
 
 /** RPC failure envelope. */
@@ -465,8 +544,12 @@ export function createRpcRoute(path, handle) {
 /**
  * Endpoint handler: the unchanged `/plugin-toggle` contract, one endpoint.
  * Kept separate from the transport so it stays directly testable.
+ *
+ * The target patch layer is resolved **per call**, from the id being toggled:
+ * the layer that actually carries that row is the only one where a disable row
+ * means anything, and it is not necessarily the one a config default named.
  */
-async function handleEndpoint(endpoint, payload, patchFile) {
+async function handleEndpoint(endpoint, payload, config) {
   if (endpoint !== 'setEnabled') {
     return toggleError('bad-request', `unknown endpoint: ${endpoint}`)
   }
@@ -480,6 +563,24 @@ async function handleEndpoint(endpoint, payload, patchFile) {
     return toggleError('bad-request', `entryId must be a plain identifier (${ID_HINT})`)
   }
   try {
+    const patchFile = await resolvePatchFile(config, id)
+    if (patchFile === undefined) {
+      // No profile layer carries this id, so there is nothing to rewrite. Say so
+      // instead of writing a row into a file that will never load it.
+      return {
+        ok: true,
+        value: {
+          enabled,
+          changed: false,
+          removed: 0,
+          recognized: false,
+          unaddressable: true,
+          warnings: [`no profile patch layer carries ${JSON.stringify(id)}`],
+          entryId: id,
+          patchFile: null,
+        },
+      }
+    }
     const result = await setEnabled(patchFile, id, enabled)
     return { ok: true, value: { ...result, entryId: id, patchFile } }
   } catch (error) {
@@ -498,23 +599,13 @@ async function handleEndpoint(endpoint, payload, patchFile) {
  * later than the other host services. Reading it with `ctx.get('webServer')`
  * while `apply` runs races that binding, sees `undefined`, and silently skips
  * the page's whole transport; that race is how four of five migrated patches
- * came up dead after the first restart. The endpoint handler still closes over
- * `patchFile` from this scope.
+ * came up dead after the first restart.
  */
 export const inject = ['webServer']
 
 export function apply(ctx, config = {}) {
-  const patchFile = resolvePatchFile(config)
-
-  // The page reaches this half over one prefix route on the web carrier.
-  // `ctx.connection.rpc.handle` is not an option in dsh 0.1.5: its registry
-  // reads `owner.webServer` on the *reading* plugin's context, which never
-  // declared it, and throws `cannot get property "webServer" without inject`,
-  // so no channel would exist and the page's RPC calls would land on the SPA
-  // fallback. See createRpcRoute() for the fence that replaces the Connection's
-  // own.
   try {
-    const route = createRpcRoute('/plugin-toggle', (endpoint, payload) => handleEndpoint(endpoint, payload, patchFile))
+    const route = createRpcRoute('/plugin-toggle', (endpoint, payload) => handleEndpoint(endpoint, payload, config))
     ctx.effect(() => ctx.webServer.register(route), 'ui-settings-plugin-manager: /plugin-toggle route')
   } catch (error) {
     ctx.logger?.warn(`[ui-settings-plugin-manager] the /plugin-toggle route could not be registered: ${String(error?.message ?? error)}`)

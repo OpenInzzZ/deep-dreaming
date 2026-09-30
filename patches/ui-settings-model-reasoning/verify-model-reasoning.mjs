@@ -81,7 +81,7 @@ const requireTable = (spec) => {
   if (spec === 'react') return uiRequire('react')
   if (spec === 'react/jsx-runtime') return uiRequire('react/jsx-runtime')
   if (spec === '@deepseek-ai/dsh-client-ui-primitives') {
-    return { Switch, Input, IconChevronDownOutline14: icon }
+    return { Switch, Input, IconChevronDownOutlineMedium: icon }
   }
   throw new Error(`unexpected module-table word: ${spec}`)
 }
@@ -89,7 +89,7 @@ const exports_ = handoff.factory(requireTable)
 
 // --- exports contract ---------------------------------------------------------
 if (typeof exports_.apply !== 'function') throw new Error('exports.apply missing')
-if (!Array.isArray(exports_.inject) || exports_.inject.join(',') !== 'slots,locale,settingsScope') {
+if (!Array.isArray(exports_.inject) || exports_.inject.join(',') !== 'slots,locale,configForms') {
   throw new Error(`exports.inject mismatch: ${JSON.stringify(exports_.inject)}`)
 }
 if (exports_.NS !== 'modelReasoning') throw new Error(`NS mismatch: ${exports_.NS}`)
@@ -188,8 +188,12 @@ const clientCtx = {
     register: (ns, dict) => { dictionaries.push({ ns, dict }) },
     bind,
   },
-  settingsScope: {
-    bind: (spec) => { boundSpec = spec; return fakeScope },
+  configForms: {
+    // Regression: 0.2.0-rc.2's settings service is `configForms`, whose entry
+    // point is `get(entryId)` — the settings namespace of a Host plugin entry is
+    // its loader entry id. It used to be `settingsScope.bind({ namespace })`;
+    // declaring that retired name leaves the entry pending forever.
+    get: (entryId) => { boundSpec = { entryId }; return fakeScope },
   },
   slots: {
     inject: (key, callback) => { injectedEntry = { key, registration: callback() } },
@@ -208,8 +212,8 @@ if (registered.name !== 'settings.models.provider-card' || registered.key !== 'l
   throw new Error(`registration mismatch: ${JSON.stringify({ name: registered.name, key: registered.key })}`)
 }
 if (registered.locale !== 'modelReasoning') throw new Error(`registration locale: ${registered.locale}`)
-if (boundSpec === null || boundSpec.namespace !== 'llm-pi-ai') {
-  throw new Error(`scope bind mismatch: ${JSON.stringify(boundSpec)}`)
+if (boundSpec === null || boundSpec.entryId !== 'llm-pi-ai') {
+  throw new Error(`configForms.get mismatch: ${JSON.stringify(boundSpec)}`)
 }
 const face = registered.inject()
 if (typeof face.scope?.mutate !== 'function' || typeof face.scope?.getSnapshot !== 'function') {

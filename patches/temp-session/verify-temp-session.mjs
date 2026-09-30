@@ -583,7 +583,7 @@ const requireTable = (spec) => {
   if (spec === 'react') return uiRequire('react')
   if (spec === 'react/jsx-runtime') return uiRequire('react/jsx-runtime')
   if (spec === '@deepseek-ai/dsh-client-ui-primitives') {
-    return { IconSparkle16: icon }
+    return { IconSparkleRegular: icon }
   }
   throw new Error(`unexpected module-table word: ${spec}`)
 }

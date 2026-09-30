@@ -23,7 +23,7 @@
  * `{ ok, value }` / `{ ok, error }` envelope.
  *
  * Client half: loads the exact deployed `client.js`, asserts the
- * `settings.plugin.item` card registration (key 'session-cleanup'),
+ * `settings.section` page registration (id 'session-cleanup'),
  * checks the dictionaries, drives the cardApi (getConfig / setConfig /
  * resetConfig) through a `fetch` double — the card reads and writes config over
  * `POST /session-cleanup/<endpoint>` — and renders the card in jsdom to
@@ -602,7 +602,7 @@ const requireTable = (spec) => {
   if (spec === 'react') return React
   if (spec === 'react/jsx-runtime') return uiRequire('react/jsx-runtime')
   if (spec === '@deepseek-ai/dsh-client-ui-primitives') {
-    return { IconChevronDownOutline14: icon }
+    return { IconChevronDownOutlineMedium: icon }
   }
   throw new Error(`unexpected module-table word: ${spec}`)
 }
@@ -610,6 +610,23 @@ const exports_ = handoff.factory(requireTable)
 if (typeof exports_.apply !== 'function' || !Array.isArray(exports_.inject)) throw new Error('exports contract broken')
 if (exports_.NS !== 'session-cleanup.card') throw new Error(`NS mismatch: ${exports_.NS}`)
 console.log('exports contract OK:', JSON.stringify(exports_.inject), 'NS =', exports_.NS)
+
+// Regression: the shipped settings shell's page slot must be the one claimed.
+// The card used to register on `settings.plugin.item` ("设置 → 插件 → 插件配置"),
+// a slot 0.2.0-rc.2 no longer declares — it survives only inside a comment in
+// the shipped slot contract. A registration on an undeclared slot waits forever
+// and renders nowhere, so the assertion is made against the SOURCE: the failure
+// mode is a page that never appears, which no render test here could catch.
+{
+  const source = readFileSync(clientPath, 'utf8')
+  if (!/settings\.section/.test(source)) {
+    throw new Error("the card must register on the shipped `settings.section` page slot")
+  }
+  if (/['"]settings\.plugin\.item['"]/.test(source)) {
+    throw new Error("the card must not register on the retired `settings.plugin.item` slot")
+  }
+  console.log('settings slot source OK: registers on settings.section, never the retired settings.plugin.item')
+}
 
 // Card CSS must only reference theme aliases the shipped theme actually defines:
 // an undefined var() silently drops its declaration (the shipped settings card
@@ -667,7 +684,7 @@ const clientCtx = {
     bind: () => (key) => 't:' + key,
   },
   slots: {
-    inject: (_key, callback) => { registered = callback() },
+    inject: (key, callback) => { registered = callback(); registered.slot = key },
     register: (options, component) => ({ ...options, component }),
   },
 }
@@ -688,8 +705,29 @@ activeCtx = fetchCtx
 
 exports_.apply(clientCtx)
 if (registered === null) throw new Error('slots.inject never registered')
-if (registered.key !== 'session-cleanup') {
+// Regression: the page must claim the slot the shipped settings shell actually
+// declares. `settings.plugin.item` was the 0.1.x "设置 → 插件 → 插件配置" slot;
+// it survives only inside a comment in the shipped slot contract, so a card
+// registered there waits forever and renders nowhere.
+if (registered.slot !== 'settings.section') {
+  throw new Error(`the card must register on settings.section, got ${JSON.stringify(registered.slot)}`)
+}
+if (registered.name !== 'settings.section') {
+  throw new Error(`registration name must match the slot: ${JSON.stringify(registered.name)}`)
+}
+if (registered.id !== 'session-cleanup') {
   throw new Error(`card registration mismatch: ${JSON.stringify(registered)}`)
+}
+// The nav entry is a thunk the shell resolves per render (the shape every
+// shipped section uses), not a fixed string.
+if (typeof registered.label !== 'function') {
+  throw new Error(`the section label must be a thunk: ${JSON.stringify(registered.label)}`)
+}
+if (registered.label() !== 't:title') {
+  throw new Error(`the label must resolve through this plugin's dictionary: ${JSON.stringify(registered.label())}`)
+}
+if (typeof registered.inject !== 'function' || registered.inject().getConfig === undefined) {
+  throw new Error('the card must receive its api through an inject thunk')
 }
 if (dictionaries === null || dictionaries.ns !== exports_.NS) throw new Error('dictionaries not registered')
 const zhKeys = Object.keys(dictionaries.dicts.zh)
@@ -697,7 +735,7 @@ const enKeys = Object.keys(dictionaries.dicts.en)
 if (JSON.stringify(zhKeys) !== JSON.stringify(enKeys)) {
   throw new Error(`zh/en key mismatch:\nzh: ${zhKeys}\nen: ${enKeys}`)
 }
-console.log(`apply contract OK: settings.plugin.item key=session-cleanup | dict keys = ${zhKeys.length}`)
+console.log(`apply contract OK: settings.section id=session-cleanup label=thunk | dict keys = ${zhKeys.length}`)
 
 // The client must not depend on the Connection RPC surface any more, and its
 // inject list must not name a service it no longer reads. (The explanatory

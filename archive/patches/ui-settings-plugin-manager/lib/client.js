@@ -21,7 +21,7 @@ var module = { exports: {} }; var exports = module.exports;
 const React = require('react');
 const { useEffect, useId, useMemo, useState } = React;
 const { jsx, jsxs } = require('react/jsx-runtime');
-const { IconChevronDownOutline14, IconSearchOutline16 } = require('@deepseek-ai/dsh-client-ui-primitives');
+const { IconChevronDownOutlineMedium, IconSearchOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives');
 
 const PLUGIN_ID = '@local/dsh-client-ui-settings-plugin-manager';
 
@@ -133,6 +133,7 @@ const zh = {
   toggleDone: '已生效',
   toggleCleared: '已生效,清除 {n} 行禁用行',
   toggleUnconfirmed: '未能确认,请手工检查 cordis.patch.yml',
+  toggleUnaddressable: '这个 profile 的补丁层里没有这一行,无法从页面启停',
   toggleFailed: '操作失败',
   selfProtected: '本管理页不能停用(否则无法在此恢复,需手动编辑 cordis.patch.yml)',
 };
@@ -173,6 +174,7 @@ const en = {
   toggleDone: 'Applied',
   toggleCleared: 'Applied, cleared {n} disabled row(s)',
   toggleUnconfirmed: 'Not confirmed — check cordis.patch.yml by hand',
+  toggleUnaddressable: 'No row for this entry in the profile patch layer, so it cannot be toggled from here',
   toggleFailed: 'Operation failed',
   selfProtected: 'This manager page cannot be disabled (otherwise it could not be restored here; edit cordis.patch.yml manually instead)',
 };
@@ -276,6 +278,7 @@ function PluginManagerSettingsTab({ list, toggleEnabled, t }) {
           entryId: entry.entryId,
           removed: typeof value?.removed === 'number' ? value.removed : 0,
           recognized: value?.recognized !== false,
+          unaddressable: value?.unaddressable === true,
           warnings: Array.isArray(value?.warnings) ? value.warnings : [],
         })
         setRequest(value => value + 1)
@@ -299,7 +302,7 @@ function PluginManagerSettingsTab({ list, toggleEnabled, t }) {
     ] }, 'failure') : null,
     state.status === 'ready' ? jsx('div', { className: 'pm-catalog', children: [
       jsx('label', { className: 'pm-search', children: [
-        jsx(IconSearchOutline16, { 'aria-hidden': true }, 'search-icon'),
+        jsx(IconSearchOutlineRegular, { 'aria-hidden': true }, 'search-icon'),
         jsx('span', { className: 'pm-visually-hidden', children: t('search') }, 'search-label'),
         jsx('input', {
           type: 'search',
@@ -391,7 +394,7 @@ function PluginManagerSettingsTab({ list, toggleEnabled, t }) {
                     title: status,
                   }, 'status') : null,
                   jsx('span', { className: 'pm-config-tag', 'data-enabled': entry.enabled ? 'true' : 'false', children: configuration }, 'config'),
-                  jsx(IconChevronDownOutline14, { className: 'pm-chevron', size: 12, 'aria-hidden': true }, 'chevron'),
+                  jsx(IconChevronDownOutlineMedium, { className: 'pm-chevron', size: 12, 'aria-hidden': true }, 'chevron'),
                 ] }, 'trailing'),
               ],
             }, 'content'),
@@ -424,7 +427,7 @@ function PluginManagerSettingsTab({ list, toggleEnabled, t }) {
                             className: 'pm-toggle-status',
                             'data-tone': 'error',
                             title: toggleReport.warnings.join('\n'),
-                            children: t('toggleUnconfirmed'),
+                            children: toggleReport.unaddressable ? t('toggleUnaddressable') : t('toggleUnconfirmed'),
                           }, 'toggle-unconfirmed'))
                     : null,
                 ] }, 'actions'),

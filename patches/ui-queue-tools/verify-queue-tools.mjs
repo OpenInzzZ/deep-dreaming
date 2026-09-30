@@ -617,14 +617,14 @@ if (React === undefined || React === null) {
     if (spec === 'react/jsx-runtime') return uiRequire('react/jsx-runtime')
     if (spec === '@deepseek-ai/dsh-client-ui-primitives') {
       return {
-        IconChevronDownOutline14: icon,
-        IconChevronUpOutline14: icon,
-        IconCloseOutline16: icon,
-        IconEditOutline16: icon,
-        IconQueueOutline14: icon,
-        IconSendOutline14: icon,
-        IconTrashOutline16: icon,
-        IconCheckOutline16: icon,
+        IconChevronDownOutlineMedium: icon,
+        IconChevronUpOutlineMedium: icon,
+        IconCloseOutlineRegular: icon,
+        IconEditOutlineRegular: icon,
+        IconQueueOutlineMedium: icon,
+        IconSendOutlineMedium: icon,
+        IconTrashOutlineRegular: icon,
+        IconCheckOutlineRegular: icon,
         Tooltip: TooltipStub,
       }
     }
@@ -645,6 +645,30 @@ if (React === undefined || React === null) {
   if (exports_.inject.includes('conversation')) throw new Error(`client inject declares the unused service 'conversation': ${JSON.stringify(exports_.inject)}`)
   if (exports_.inject.includes('connection')) throw new Error(`client inject still declares 'connection': the transport is now fetch('/queue/…'): ${JSON.stringify(exports_.inject)}`)
   console.log('exports contract OK:', JSON.stringify(exports_.inject), 'NS =', exports_.NS)
+
+  // Regression: the dock must read the Session's `inbox` projection, not the
+  // retired `SessionSnapshot.queue` field. `queue` was removed in 0.2.0-rc.2
+  // (`pendingSubmissions` replaced it and the pending list moved to the
+  // projection), so the old read produced `undefined` and the very next
+  // `.filter(...)` threw during render — the whole dock vanished. Source-level
+  // assertion because the failure mode is a silent absence, not a wrong value.
+  {
+    const source = readFileSync(clientPath, 'utf8')
+    // Strip comments first: the prose that explains the migration names the
+    // retired field (in both `//` and JSDoc form), and only a real property read
+    // is a defect. `[^:]` keeps `https://` inside string literals intact.
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1')
+    if (/\bs\.queue\b/.test(code)) {
+      throw new Error("the dock must not read the retired `SessionSnapshot.queue` field (use the `inbox` projection)")
+    }
+    if (!/useProjection\(['"]inbox['"]\)/.test(code)) {
+      throw new Error("the dock must read the `inbox` projection through the slot's `useProjection` prop")
+    }
+    if (!/pendingSubmissions/.test(code)) {
+      throw new Error('the dock must fold locally queued submissions in through `pendingSubmissions`')
+    }
+    console.log('projection source OK: reads inbox via useProjection, never the retired snapshot.queue field')
+  }
 
   let registered = null
   let dictionaries = null
@@ -767,17 +791,28 @@ if (React === undefined || React === null) {
     const dom = globalThis.window
     const en = dictionaries.dicts.en
     const zh = dictionaries.dicts.zh
-    const rows = [
-      { id: 'm1', placement: 'queued', preview: 'short one…', text: 'short one' },
-      { id: 'm2', placement: 'queued', preview: 'second message…', text: 'second message' },
-    ]
+    // 0.2.0-rc.2 wire shape: a row carries model-facing `content` blocks, and the
+    // dock folds its own preview/text out of them. The old harness fed a
+    // pre-flattened `{ placement, preview, text }`, which is exactly the shape
+    // that no longer arrives.
+    const userRow = (id, text) => ({
+      id,
+      role: 'user',
+      content: [{ type: 'text', text }],
+      source: { kind: 'user' },
+    })
+    // The projection reads straight from this list, so a reorder performed by
+    // the dock is visible to the next render exactly as it is in the app.
+    const dockInbox = makeInbox([])
+    const projectionOf = () => ({ 'next-turn': dockInbox.nextTurn })
     const root = createRoot(dom.document.getElementById('root'))
     const injected = registered.inject('session-1')
     const notifies = []
     // The dock's failure copy is whatever `t` resolves, so the toast checks pick
     // the dictionary explicitly (zh is the shipped user-facing wording).
-    const renderProps = (dict = en, queue = rows) => ({
-      useSession: (select) => select({ queue, running: false, subagent: null }),
+    const renderProps = (dict = en) => ({
+      useSession: (select) => select({ pendingSubmissions: [], running: false, subagent: null }),
+      useProjection: (key) => (key === 'inbox' ? projectionOf() : undefined),
       updateQueue: injected.updateQueue,
       notify: (level, text) => { notifies.push({ level, text }) },
       reorder: injected.reorder,
@@ -786,6 +821,8 @@ if (React === undefined || React === null) {
         return params && params.n !== undefined ? value.replace('{n}', String(params.n)) : value
       },
     })
+    // Seed the Host list the dock renders and reorders.
+    dockInbox.nextTurn = [userRow('m1', 'short one'), userRow('m2', 'second message')]
     await act(async () => {
       root.render(React.createElement(registered.component, renderProps()))
     })
@@ -908,22 +945,77 @@ if (React === undefined || React === null) {
     console.log('multiline edit OK: Shift+Enter newline, Enter submits, text preserved')
 
     // single row: no reorder affordance (row not draggable)
+    dockInbox.nextTurn = [userRow('m1', 'short one')]
     await act(async () => {
-      root.render(React.createElement(registered.component, {
-        useSession: (select) => select({ queue: [rows[0]], running: false, subagent: null }),
-        updateQueue: injected.updateQueue,
-        notify: () => {},
-        reorder: injected.reorder,
-        t: (key, params) => {
-          const value = en[key]
-          return params && params.n !== undefined ? value.replace('{n}', String(params.n)) : value
-        },
-      }))
+      root.render(React.createElement(registered.component, renderProps()))
     })
     const singleRow = doc.querySelector('.qt-row')
     if (singleRow === null) throw new Error('single row missing')
     if (singleRow.getAttribute('draggable') === 'true') throw new Error('single-row queue must not be draggable')
     console.log('single-row queue hides reorder affordance OK')
+
+    // A locally queued submission the Host has not admitted yet: it renders so
+    // the count stays truthful, but it carries no message id of its own, so it
+    // must never be draggable and must never offer edit/remove/steer against a
+    // phantom id. The two durable rows beside it stay reorderable between
+    // themselves — a pending row simply cannot be a drag source or a target.
+    await act(async () => {
+      dockInbox.nextTurn = [userRow('m1', 'short one'), userRow('m2', 'second message')]
+      root.render(React.createElement(registered.component, {
+        ...renderProps(),
+        useSession: (select) => select({
+          pendingSubmissions: [
+            { requestId: 'local-1', placement: 'queued' },
+            { requestId: 'echo-1', placement: 'transcript' },
+          ],
+          running: false,
+          subagent: null,
+        }),
+      }))
+    })
+    const pendingRows = [...doc.querySelectorAll('.qt-row[data-qt-pending="1"]')]
+    if (pendingRows.length !== 1) {
+      throw new Error(`exactly the queued local echo must render as pending, got ${pendingRows.length}`)
+    }
+    if (pendingRows[0].getAttribute('draggable') === 'true') {
+      throw new Error('a pending row has no Host message id and must not be draggable')
+    }
+    if (pendingRows[0].querySelector('.qt-actions') !== null) {
+      throw new Error('a pending row must show a sending state instead of edit/remove/steer')
+    }
+    // The transcript echo is already in the chat, so the dock must not list it.
+    if (doc.querySelectorAll('.qt-row').length !== 3) {
+      throw new Error(`transcript echoes must not be listed: ${doc.querySelectorAll('.qt-row').length} rows`)
+    }
+    // A drop onto a pending row must be a no-op rather than a reorder against
+    // an index that does not exist in the Host's list.
+    const reordersBefore = rpcCalls.filter((entry) => entry.url === '/queue/reorder').length
+    await act(async () => { fireEvent.drop(pendingRows[0], { dataTransfer: {} }) })
+    if (rpcCalls.filter((entry) => entry.url === '/queue/reorder').length !== reordersBefore) {
+      throw new Error('dropping onto a pending row must not reorder')
+    }
+    console.log('pending local submission OK: sending row, not draggable, no phantom actions, transcript echo excluded, drop refused')
+
+    // A row whose wire content is not all text cannot round-trip an edit, and
+    // the dock must say so instead of silently dropping the attachments.
+    dockInbox.nextTurn = [
+      { id: 'img-1', role: 'user', content: [{ type: 'image', attachment: { name: 'a.png' } }], source: { kind: 'user' } },
+      userRow('m2', 'second message'),
+    ]
+    await act(async () => {
+      root.render(React.createElement(registered.component, renderProps()))
+    })
+    const imageRow = doc.querySelectorAll('.qt-row')[0]
+    const editBtn = imageRow.querySelector('button[aria-label="' + en.edit + '"]')
+    if (editBtn === null) throw new Error('non-text row must still render its actions')
+    if (editBtn.disabled !== true) throw new Error('editing a non-text row must be disabled')
+    if (editBtn.getAttribute('title') !== en['edit.unsupported']) {
+      throw new Error(`non-text row must explain itself: ${editBtn.getAttribute('title')}`)
+    }
+    if (imageRow.querySelector('.qt-preview').textContent !== '[image]') {
+      throw new Error(`a non-text block must preview as its marker: ${imageRow.querySelector('.qt-preview').textContent}`)
+    }
+    console.log('non-text row OK: edit disabled with the shipped explanation, blocks preview as markers')
   }
 
   // The `fetch` double is installed on the shared global: put the real one back

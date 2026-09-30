@@ -23,7 +23,7 @@ var module = { exports: {} }; var exports = module.exports;
 const React = require('react');
 const { useEffect, useId, useMemo, useState } = React;
 const { jsx, jsxs, Fragment } = require('react/jsx-runtime');
-const { IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconEditOutline16, IconQueueOutline14, IconSendOutline14, IconTrashOutline16, IconCheckOutline16, Tooltip } = require('@deepseek-ai/dsh-client-ui-primitives');
+const { IconChevronDownOutlineMedium, IconChevronUpOutlineMedium, IconCloseOutlineRegular, IconEditOutlineRegular, IconQueueOutlineMedium, IconSendOutlineMedium, IconTrashOutlineRegular, IconCheckOutlineRegular, Tooltip } = require('@deepseek-ai/dsh-client-ui-primitives');
 
 const PLUGIN_ID = '@local/dsh-client-ui-queue-tools';
 
@@ -80,6 +80,7 @@ const zh = {
   remove: '删除排队消息',
   steer: '插话发送',
   'steer.unavailable': '仅运行中可插话发送',
+  sending: '正在发送…',
   editFailed: '编辑失败：这条消息可能已经开始发送。',
   removeFailed: '删除失败：这条消息可能已经开始发送。',
   steerFailed: '插话发送失败，请重试。',
@@ -97,6 +98,7 @@ const en = {
   remove: 'Remove queued message',
   steer: 'Steer queued message',
   'steer.unavailable': 'Steering is available only while the agent is running',
+  sending: 'Sending…',
   editFailed: 'Edit failed: this message may have already started sending.',
   removeFailed: 'Removal failed: this message may have already started sending.',
   steerFailed: 'Steering failed. Try again.',
@@ -111,6 +113,106 @@ const NS = 'queue.tools';
  *  sends is relative to that list, and the host validates it as such. */
 const QUEUED_PLACEMENT = 'queued';
 
+/**
+ * Character budget of one row's preview, matching the shipped dock.
+ *
+ * 0.2.0-rc.2 stopped sending a pre-flattened `preview`/`text` pair on each row:
+ * a row now carries the model-facing `content` blocks and every consumer folds
+ * its own text out of them (the shipped `previewOf`/`textOf` do exactly this).
+ * Reading `row.preview` therefore rendered `undefined` for every message.
+ */
+const QUEUE_PREVIEW_CHARS = 200;
+
+/**
+ * Fold one row's content blocks into the single-line preview the dock shows.
+ *
+ * The shipped dock drops image/file blocks here because it renders them as
+ * thumbnails and file chips beside the text; this dock renders no attachment
+ * row, so dropping them would leave an attachment-only message as a blank line.
+ * They stay as `[image]` / `[file]` markers instead — visible, and the reason
+ * such a row reports "editing is not supported" rather than looking empty.
+ */
+function previewOf(content) {
+  if (!Array.isArray(content)) return '';
+  const flat = content
+    .map((block) => {
+      if (block === null || typeof block !== 'object') return '';
+      return block.type === 'text' ? block.text : '[' + String(block.type) + ']';
+    })
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const chars = Array.from(flat);
+  return chars.length > QUEUE_PREVIEW_CHARS ? chars.slice(0, QUEUE_PREVIEW_CHARS).join('') + '…' : flat;
+}
+
+/**
+ * The row's text when editing can round-trip it, `null` otherwise.
+ *
+ * Only an all-text message can be edited through the queue action, so anything
+ * carrying an image, file or tool block is reported as unsupported instead of
+ * silently losing that content on save.
+ */
+function textOf(content) {
+  if (!Array.isArray(content) || content.length === 0) return null;
+  if (!content.every((block) => block !== null && typeof block === 'object' && block.type === 'text')) return null;
+  return content.map((block) => block.text).join('');
+}
+
+/**
+ * The `next-turn` rows to render, from the Session's `inbox` projection.
+ *
+ * This used to read `useSession((s) => s.queue)`. That field is gone in
+ * 0.2.0-rc.2 — `SessionSnapshot` exposes `pendingSubmissions` instead, and the
+ * pending queue itself moved to the `inbox` projection (`['next-turn']`, the
+ * same list the reorder endpoint splices). The old read produced `undefined`,
+ * and the very next `.filter(...)` threw during render, so the whole dock
+ * vanished rather than degrading.
+ *
+ * Rows are normalised here so every consumer below sees `{ id, content,
+ * preview, text, pending }` regardless of which shape the projection sends:
+ * a durable row keeps its message id, while a locally queued submission that
+ * the Host has not admitted yet has only its request id and no content.
+ */
+function rowsOf(inbox, pendingSubmissions) {
+  const durable = inbox !== null && typeof inbox === 'object' && Array.isArray(inbox['next-turn']) ? inbox['next-turn'] : [];
+  const admitted = new Set();
+  for (const row of durable) {
+    const source = row?.source;
+    if (source !== null && typeof source === 'object' && source.kind === 'user' && typeof source.rpcId === 'string') {
+      admitted.add(source.rpcId);
+    }
+  }
+  const local = Array.isArray(pendingSubmissions) ? pendingSubmissions : [];
+  return [
+    ...durable.map((row) => {
+      const content = Array.isArray(row?.content) ? row.content : [];
+      return {
+        id: typeof row?.id === 'string' ? row.id : null,
+        content,
+        preview: previewOf(content),
+        text: textOf(content),
+        pending: false,
+      };
+    }),
+    ...local
+      .filter((item) => item?.placement === QUEUED_PLACEMENT && !admitted.has(item?.requestId))
+      .map((item) => ({
+        id: typeof item?.requestId === 'string' ? item.requestId : null,
+        content: [],
+        preview: '',
+        text: null,
+        pending: true,
+      })),
+  ];
+}
+
+/** Index of `id` inside the projection's `next-turn` list (the Host's space). */
+function nextTurnIndexOf(inbox, id) {
+  const durable = inbox !== null && typeof inbox === 'object' && Array.isArray(inbox['next-turn']) ? inbox['next-turn'] : [];
+  return durable.findIndex((row) => row?.id === id);
+}
+
 /** Services required by the queue-dock registration. */
 const inject = ['slots', 'locale', 'sessions'];
 
@@ -124,12 +226,12 @@ const transportError = (message) => Object.assign(new Error(message), { code: 't
 /**
  * One call to the host half over its `/queue` prefix route.
  *
- * This used to be `ctx.connection.rpc.call('/queue', …)`, which cannot work in
- * dsh 0.1.5-rc.1: the Connection registry throws `cannot get property
- * "webServer" without inject` for every plugin outside the connection package,
- * so the channel never exists and the request would land on the SPA fallback.
- * The host half registers that route itself (see `createRpcRoute` there) and
- * answers the same `{ ok, value }` / `{ ok, error }` envelope.
+ * This used to be a Connection RPC call, which cannot work in this dsh version:
+ * the Connection registry throws `cannot get property "webServer" without
+ * inject` for every plugin outside the connection package, so the channel never
+ * exists and the request would land on the SPA fallback. The host half registers
+ * that route itself (see `createRpcRoute` there) and answers the same
+ * `{ ok, value }` / `{ ok, error }` envelope.
  *
  * Same-origin by construction, JSON in and out — the host's fence requires it.
  */
@@ -164,9 +266,10 @@ const call = async (endpoint, args) => {
  * Props arrive from the slot renderer (`useSession`, `t`) and this
  * registrant's inject face (`updateQueue`, `notify`, `reorder`).
  */
-function QueueToolsDock({ useSession, updateQueue, notify, reorder, t }) {
-  const inbox = useSession((s) => s.queue);
-  const queue = useMemo(() => inbox.filter((row) => row.placement === QUEUED_PLACEMENT), [inbox]);
+function QueueToolsDock({ useSession, useProjection, updateQueue, notify, reorder, t }) {
+  const inbox = useProjection('inbox');
+  const pendingSubmissions = useSession((s) => s.pendingSubmissions);
+  const queue = useMemo(() => rowsOf(inbox, pendingSubmissions), [inbox, pendingSubmissions]);
   const running = useSession((s) => s.running);
   const queueMutable = useSession((s) => s.subagent === null);
   const [editing, setEditing] = useState(null);
@@ -185,7 +288,13 @@ function QueueToolsDock({ useSession, updateQueue, notify, reorder, t }) {
   const interactionActive = queueMutable && (editing !== null || busy !== null);
   const expanded = !collapsed || interactionActive;
   const listVisible = queue.length === 1 || expanded;
-  const canReorder = queueMutable && queue.length > 1;
+  // Only admitted durable rows are reorderable. A locally queued submission
+  // does carry its `requestId`, but the Host has not published a row for it yet,
+  // so there is no inbox entry to splice and the official dock keeps its actions
+  // disabled until the row arrives. `movable` is what the drag affordances and
+  // the index arithmetics below count.
+  const movable = queue.filter((row) => !row.pending).length;
+  const canReorder = queueMutable && movable > 1;
 
   const applyAction = async (itemId, action, failure) => {
     setBusy(itemId);
@@ -211,6 +320,24 @@ function QueueToolsDock({ useSession, updateQueue, notify, reorder, t }) {
     }
   };
 
+  /**
+   * Drop handler: translate a drop onto `toRow` into a `next-turn` index.
+   *
+   * The dock renders a *filtered* list (a locally queued submission that the
+   * Host has not admitted is appended after the durable rows), while the reorder
+   * endpoint splices the projection's own `next-turn` list. Sending the rendered
+   * index would land the row in the wrong slot as soon as the two orders differ,
+   * so the target is resolved back to a durable row and its position inside the
+   * projection is what travels.
+   */
+  const dropOn = (toRow) => {
+    if (draggingId === null || toRow.pending || draggingId === toRow.id) return;
+    const fromIndex = nextTurnIndexOf(inbox, draggingId);
+    const toIndex = nextTurnIndexOf(inbox, toRow.id);
+    if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
+    void applyReorder(draggingId, toIndex);
+  };
+
   const endDrag = () => {
     setDraggingId(null);
     setDragOverId(null);
@@ -233,40 +360,43 @@ function QueueToolsDock({ useSession, updateQueue, notify, reorder, t }) {
       disabled: interactionActive ? true : undefined,
       onClick: () => { setCollapsed((value) => !value) },
       children: [
-        jsx('span', { className: 'qt-lead', 'aria-hidden': true, children: jsx(IconQueueOutline14, {}) }, 'lead'),
+        jsx('span', { className: 'qt-lead', 'aria-hidden': true, children: jsx(IconQueueOutlineMedium, {}) }, 'lead'),
         jsx('span', { className: 'qt-count', children: t('count', { n: queue.length }) }, 'count'),
-        jsx('span', { className: 'qt-chevron', 'aria-hidden': true, children: expanded ? jsx(IconChevronDownOutline14, {}) : jsx(IconChevronUpOutline14, {}) }, 'chevron'),
+        jsx('span', { className: 'qt-chevron', 'aria-hidden': true, children: expanded ? jsx(IconChevronDownOutlineMedium, {}) : jsx(IconChevronUpOutlineMedium, {}) }, 'chevron'),
       ],
     }, 'header') : null,
     jsx('ul', {
       id: listId,
       className: 'qt-list',
       hidden: !listVisible,
-      children: listVisible ? queue.map((row, index) => jsxs('li', {
+      children: listVisible ? queue.map((row) => jsxs('li', {
         className: 'qt-row' + (editing?.id === row.id ? ' qt-row-editing' : '') + (draggingId === row.id ? ' qt-row-dragging' : '') + (dragOverId === row.id && draggingId !== null && draggingId !== row.id ? ' qt-row-over' : ''),
-        draggable: canReorder && editing?.id !== row.id ? true : undefined,
+        'data-qt-pending': row.pending ? '1' : undefined,
+        // `false`, never `undefined`: React does not remove an attribute that a
+        // previous render already set when the new value is undefined, so a row
+        // that stops being draggable would keep `draggable="true"` in the DOM.
+        draggable: canReorder && !row.pending && editing?.id !== row.id ? true : false,
         'aria-grabbed': draggingId === row.id ? true : undefined,
         onDragStart: (event) => {
-          if (!canReorder) return
+          if (!canReorder || row.pending) return
           setDraggingId(row.id)
           try { event.dataTransfer.effectAllowed = 'move' } catch { /* jsdom has no dataTransfer */ }
         },
         onDragOver: (event) => {
-          if (draggingId === null || draggingId === row.id) return
+          if (draggingId === null || draggingId === row.id || row.pending) return
           event.preventDefault()
           try { event.dataTransfer.dropEffect = 'move' } catch { /* jsdom */ }
           setDragOverId(row.id)
         },
         onDrop: (event) => {
-          if (draggingId === null || draggingId === row.id) return
+          if (draggingId === null) return
           event.preventDefault()
-          const fromIndex = queue.findIndex((candidate) => candidate.id === draggingId)
-          if (fromIndex >= 0 && fromIndex !== index) void applyReorder(draggingId, index)
+          dropOn(row)
           endDrag()
         },
         onDragEnd: endDrag,
         children: [
-          queue.length === 1 ? jsx('span', { className: 'qt-lead', 'aria-hidden': true, children: jsx(IconQueueOutline14, {}) }, 'lead') : null,
+          queue.length === 1 ? jsx('span', { className: 'qt-lead', 'aria-hidden': true, children: jsx(IconQueueOutlineMedium, {}) }, 'lead') : null,
           editing?.id === row.id ? jsx('textarea', {
             autoFocus: true,
             rows: 1,
@@ -296,23 +426,30 @@ function QueueToolsDock({ useSession, updateQueue, notify, reorder, t }) {
               }
             },
           }, 'editor') : jsx(Tooltip, {
+            // Pending rows have no content to preview yet; the row still renders
+            // so the count and the collapse state stay truthful.
             label: row.text ?? row.preview,
             side: 'bottom',
             delayMs: 500,
             maxWidth: 480,
             children: jsx('span', {
               className: 'qt-preview',
+              'data-qt-empty': row.preview.length === 0 ? '1' : undefined,
               children: row.preview,
             }, 'preview'),
           }, 'preview-tip'),
-          queueMutable ? jsx('div', { className: 'qt-actions', children: editing?.id === row.id ? jsxs(Fragment, { children: [
+          // A locally queued submission has no Host row to act on yet: the
+          // shipped dock shows a sending state instead of actions, and offering
+          // edit/remove/steer here would post an id the Host cannot resolve.
+          row.pending ? jsx('span', { className: 'qt-sending', children: t('sending') }, 'sending')
+            : queueMutable ? jsx('div', { className: 'qt-actions', children: editing?.id === row.id ? jsxs(Fragment, { children: [
             jsx(Tooltip, { label: t('save'), side: 'bottom', delayMs: 500, children: jsx('button', {
               type: 'button',
               className: 'qt-action',
               'aria-label': t('save'),
               disabled: busy !== null || editing.text.trim() === '',
               onClick: () => { void saveEdit() },
-              children: jsx(IconCheckOutline16, { size: 14 }),
+              children: jsx(IconCheckOutlineRegular, { size: 14 }),
             }, 'save') }),
             jsx(Tooltip, { label: t('cancelEdit'), side: 'bottom', delayMs: 500, children: jsx('button', {
               type: 'button',
@@ -320,7 +457,7 @@ function QueueToolsDock({ useSession, updateQueue, notify, reorder, t }) {
               'aria-label': t('cancelEdit'),
               disabled: busy !== null,
               onClick: () => { setEditing(null) },
-              children: jsx(IconCloseOutline16, { size: 14 }),
+              children: jsx(IconCloseOutlineRegular, { size: 14 }),
             }, 'cancel') }),
           ] }) : jsxs(Fragment, { children: [
             jsx(Tooltip, { label: t('edit'), side: 'bottom', delayMs: 500, disabled: row.text === null, children: jsx('button', {
@@ -341,7 +478,7 @@ function QueueToolsDock({ useSession, updateQueue, notify, reorder, t }) {
                 // glitch); keyboard Tab focus keeps working.
                 if (event.preventDefault) event.preventDefault()
               },
-              children: jsx(IconEditOutline16, { size: 14 }),
+              children: jsx(IconEditOutlineRegular, { size: 14 }),
             }, 'edit') }),
             jsx(Tooltip, { label: t('remove'), side: 'bottom', delayMs: 500, children: jsx('button', {
               type: 'button',
@@ -349,7 +486,7 @@ function QueueToolsDock({ useSession, updateQueue, notify, reorder, t }) {
               'aria-label': t('remove'),
               disabled: busy !== null,
               onClick: () => { void applyAction(row.id, { kind: 'remove' }, t('removeFailed')) },
-              children: jsx(IconTrashOutline16, { size: 14 }),
+              children: jsx(IconTrashOutlineRegular, { size: 14 }),
             }, 'remove') }),
             jsx(Tooltip, { label: t('steer'), side: 'bottom', delayMs: 500, disabled: !running, children: jsx('button', {
               type: 'button',
@@ -358,7 +495,7 @@ function QueueToolsDock({ useSession, updateQueue, notify, reorder, t }) {
               title: running ? undefined : t('steer.unavailable'),
               disabled: busy !== null || !running,
               onClick: () => { void applyAction(row.id, { kind: 'steer' }, t('steerFailed')) },
-              children: jsx(IconSendOutline14, {}),
+              children: jsx(IconSendOutlineMedium, {}),
             }, 'steer') }),
           ] }) }, 'actions') : null,
         ],

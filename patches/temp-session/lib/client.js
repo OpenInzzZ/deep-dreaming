@@ -26,7 +26,7 @@ var module = { exports: {} }; var exports = module.exports;
 const React = require('react');
 const { useState } = React;
 const { jsx, jsxs } = require('react/jsx-runtime');
-const { IconSparkle16 } = require('@deepseek-ai/dsh-client-ui-primitives');
+const { IconSparkleRegular } = require('@deepseek-ai/dsh-client-ui-primitives');
 
 const PLUGIN_ID = '@local/dsh-client-ui-temp-session';
 const NS = 'sidebar.tempSession';
@@ -135,7 +135,7 @@ function TempSessionAction({ wide, startTempSession, t }) {
       disabled: busy ? true : undefined,
       onClick: run,
       children: [
-        jsx(IconSparkle16, { key: 'icon', size: wide ? 16 : 18 }),
+        jsx(IconSparkleRegular, { key: 'icon', size: wide ? 16 : 18 }),
         wide ? jsx('span', { key: 'label', className: 'ts-label', children: busy ? t('busy') : t('label') }, 'label') : null,
       ],
     }, 'temp-session-action'),
