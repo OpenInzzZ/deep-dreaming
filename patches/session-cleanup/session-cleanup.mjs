@@ -18,6 +18,11 @@
  *   intervalMinutes: number 清理间隔分钟 (默认 360)
  *   dryRun: boolean         演练模式, 只报告不删除 (默认 false)
  *   sessionsRoot: string    会话根目录 (默认 $DSH_HOME/sessions)
+ *
+ * 浏览器半(设置页的配置卡片)经 webServer 上的前缀路由
+ * `POST /session-cleanup/<endpoint>` 读写配置(getConfig / setConfig /
+ * resetConfig),见 createRpcRoute —— dsh 0.1.5-rc.1 的
+ * `ctx.connection.rpc.handle` 对连接包之外的插件必然抛错,不能用。
  */
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -57,8 +62,58 @@ export const DEFAULTS = {
   sessionsRoot: undefined,
 }
 
-/** 会话目录名形态: session-<uuid> */
-const SESSION_DIR_RE = /^session-/
+/**
+ * 会话目录名不再是固定前缀。
+ *
+ * 官方布局是 `<sessionsRoot>/<projectKey(cwd)>/<encodeSegment(id)>/`
+ * (`session-persistence-jsonl/src/format.ts` 的 `sessionDir`)，而 `id` 有两种
+ * 铸造方式：会话控制器用 `session-${randomUUID()}`，子智能体/分叉/agent-team
+ * 等路径直接用裸 `randomUUID()`。旧实现写死 `/^session-/`，实测本机 28 个会话
+ * 目录里只认得 6 个 —— 剩下 22 个(含最旧的那个)永远清不掉。
+ *
+ * 所以改成**排除法**：跳过隐藏项与官方那个非会话的 `_no-cwd` 桶，其余目录一律
+ * 视为候选。这比再猜一遍命名规则安全：猜错只是少扫，而少扫是静默的。
+ */
+const NON_SESSION_DIRS = new Set(['_no-cwd'])
+
+/**
+ * `SessionId` -> 目录名，与官方 `encodeSegment` 同构(`format.ts:199`)。
+ *
+ * 必须自己实现一份：补丁宿主端只 import `@deepseek-ai/schemastery`，且这个
+ * 转换要参与"绝不删活跃会话"的判断。安全字符(`A-Za-z0-9._-`)原样保留，其余
+ * 按 UTF-16 码元写成 `~XXXX`；`.` 与 `..` 特判，防止目录穿越。
+ */
+export function encodeSegment(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) return ''
+  if (raw === '.') return '~002E'
+  if (raw === '..') return '~002E~002E'
+  let out = ''
+  for (let i = 0; i < raw.length; i++) {
+    const code = raw.charCodeAt(i)
+    const ch = String.fromCharCode(code)
+    if (ch !== '~' && /^[A-Za-z0-9._-]$/.test(ch)) out += ch
+    else out += '~' + code.toString(16).toUpperCase().padStart(4, '0')
+  }
+  return out
+}
+
+/**
+ * 这个目录是不是活跃会话的日志目录？
+ *
+ * 关键安全判断：官方把 id 编码成目录名，所以目录名可能是 id 本身
+ * (`session-<uuid>` 全为安全字符)、也可能是它的 `encodeSegment` 形态。只比
+ * 其中一种，另一种形态下的**活跃会话会被当成陈旧日志删掉**。两种都接受，
+ * 宁可少删不可误删。
+ */
+export function isLiveSessionDir(name, liveSessionIds) {
+  if (typeof name !== 'string' || name.length === 0) return false
+  if (liveSessionIds.has(name)) return true
+  for (const id of liveSessionIds) {
+    if (typeof id !== 'string' || id.length === 0) continue
+    if (encodeSegment(id) === name) return true
+  }
+  return false
+}
 
 /** 解析会话根目录: 配置 > $DSH_HOME/sessions > ~/.dsh/sessions */
 export function resolveSessionsRoot(configured) {
@@ -110,7 +165,7 @@ export async function runCleanup(sessionsRoot, options = {}, liveSessionIds = ne
       return []
     })
     for (const entry of entries) {
-      if (!entry.isDirectory() || !SESSION_DIR_RE.test(entry.name)) continue
+      if (!entry.isDirectory() || entry.name.startsWith('.') || NON_SESSION_DIRS.has(entry.name)) continue
       const sessionDir = join(projectDir, entry.name)
       const { size, mtimeMs } = await statSessionDir(sessionDir).catch((e) => {
         result.errors.push(`stat ${project.name}/${entry.name}: ${e.message}`)
@@ -118,7 +173,7 @@ export async function runCleanup(sessionsRoot, options = {}, liveSessionIds = ne
       })
       result.scanned += 1
       result.totalBytes += size
-      if (liveSessionIds.has(entry.name)) {
+      if (isLiveSessionDir(entry.name, liveSessionIds)) {
         result.skippedLive += 1
         continue
       }
@@ -140,12 +195,16 @@ export async function runCleanup(sessionsRoot, options = {}, liveSessionIds = ne
   }
 
   // 4. 规则 B: 总占用超上限时按最旧优先删
+  // 统计口径 = 本次清理后仍会留在磁盘上的候选体积: 规则 A 已选中的会话这一轮
+  // 必定被删, 先把它们的体积从总量里扣除, 否则容量判断偏高、会比实际需要多删。
+  // 活跃会话在上面就 `continue` 了, 从不进入 candidates, 本就不参与该总量
+  // (result.totalBytes 仍统计包含活跃会话的全部占用, 仅用于报告)。
   if (cfg.maxTotalMB > 0) {
     const cap = cfg.maxTotalMB * 1024 * 1024
-    let total = candidates.reduce((sum, c) => sum + c.size, 0)
-    for (const c of [...candidates].reverse()) {
+    const survivors = candidates.filter((c) => !remove.has(c.key))
+    let total = survivors.reduce((sum, c) => sum + c.size, 0)
+    for (const c of survivors.reverse()) {
       if (total <= cap) break
-      if (remove.has(c.key)) continue
       remove.add(c.key)
       total -= c.size
     }
@@ -235,107 +294,213 @@ function registerConfigSection(ctx, ns, schema, entry, hooks, onScope, isUnloadi
   })
 }
 
-/** RPC failure envelope for the config channel. */
+/** RPC failure envelope for the config endpoints. */
 function configError(code, message) {
   return { ok: false, error: { code, message, details: {} } }
 }
 
 /**
- * Cordis 插件入口: 注入 sessions 服务, 启动时立即清理一次, 之后按
- * intervalMinutes 周期清理。定时器注册为 effect, 插件卸载时自动释放。
+ * Local RPC over a `webServer` route, replacing `ctx.connection.rpc`.
+ *
+ * dsh 0.1.5-rc.1 broke the Connection RPC registry for every plugin outside
+ * the connection package: `handle()` calls `register()`, which touches
+ * `owner.webServer` on a context that never declared `webServer`, so it throws
+ * `cannot get property "webServer" without inject`. The channel then never
+ * exists and the browser's `POST /<channel>/<endpoint>` requests fall through
+ * to the SPA fallback (405/404).
+ *
+ * This is the same contract on the surface a plugin does own: one prefix route,
+ * a same-origin fence, JSON-only bodies, and the identical
+ * `{ ok, value }` / `{ ok, error: { code, message, details } }` envelope the
+ * endpoint handlers already return. The fence mirrors the Connection's own
+ * reasoning: a cross-site POST always carries its own `Origin`, and requiring
+ * `application/json` makes the browser preflight it (we never answer that
+ * preflight), so a page the user merely visits cannot reach these endpoints.
+ *
+ * @param path - prefix route path, e.g. `/session-cleanup`.
+ * @param handle - `async (endpoint, payload) => envelope`, unchanged from the
+ *   RPC handler signature.
+ */
+export function createRpcRoute(path, handle) {
+  const MAX_BODY_BYTES = 1 << 20
+  const fail = (res, status, code, message) => {
+    res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+    res.end(JSON.stringify({ ok: false, error: { code, message, details: {} } }))
+  }
+  return {
+    kind: 'prefix',
+    path,
+    handler: (req, res) => {
+      const host = req.headers.host
+      const origin = req.headers.origin
+      if (typeof origin === 'string' && origin.length > 0) {
+        let sameOrigin = false
+        try {
+          sameOrigin = new URL(origin).host === host
+        } catch {
+          sameOrigin = false
+        }
+        if (!sameOrigin) return fail(res, 403, 'forbidden', 'cross-origin request refused')
+      }
+      if (req.method !== 'POST') return fail(res, 405, 'method-not-allowed', 'RPC endpoints accept POST only')
+      const contentType = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase()
+      if (contentType !== 'application/json') return fail(res, 415, 'unsupported-media-type', 'content-type must be application/json')
+      const url = String(req.url ?? '')
+      const query = url.indexOf('?')
+      const pathname = query === -1 ? url : url.slice(0, query)
+      const endpoint = pathname.startsWith(`${path}/`) ? pathname.slice(path.length + 1) : undefined
+      if (endpoint === undefined || endpoint.length === 0 || endpoint.includes('/')) {
+        return fail(res, 404, 'unknown-endpoint', `unknown endpoint: ${JSON.stringify(pathname)}`)
+      }
+      let raw = ''
+      let overflow = false
+      req.on('data', (chunk) => {
+        if (overflow) return
+        raw += chunk
+        if (raw.length > MAX_BODY_BYTES) {
+          overflow = true
+          req.destroy()
+        }
+      })
+      req.on('error', () => { /* client went away */ })
+      req.on('end', () => {
+        if (overflow) return fail(res, 413, 'payload-too-large', 'request body is too large')
+        let payload
+        try {
+          payload = raw.length === 0 ? {} : JSON.parse(raw)
+        } catch {
+          return fail(res, 400, 'bad-request', 'body is not JSON')
+        }
+        void Promise.resolve()
+          .then(() => handle(endpoint, payload))
+          .then(
+            (envelope) => {
+              if (res.writableEnded) return
+              res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+              res.end(JSON.stringify(envelope))
+            },
+            (error) => {
+              if (res.writableEnded) return
+              fail(res, 500, 'internal', String(error?.message ?? error))
+            },
+          )
+      })
+    },
+  }
+}
+
+/**
+ * Cordis 插件入口: 启动时立即清理一次, 之后按 intervalMinutes 周期清理。
+ * 定时器注册为 effect, 插件卸载时自动释放。
  * 配置经 dsh-settings 注册(namespace `session-cleanup`), 设置变更时
  * (onChange) 按新配置重建定时器 —— 即时生效。
- * 配置经 /session-cleanup RPC 通道读写(getConfig/setConfig/resetConfig),由
- * 插件管理页的配置卡片调用 —— 不受 dsh 设置白名单(apiproxy)限制。
+ * 配置经 /session-cleanup 前缀路由读写(getConfig/setConfig/resetConfig),
+ * 由插件管理页的配置卡片调用 —— 不受 dsh 设置白名单(apiproxy)限制。
+ *
+ * `sessions` / `webServer` 都是**静态** inject, 不是 apply 内的动态
+ * `ctx.inject(...)`: 用户层热重载后动态那条不会重新激活(通道一直 404 直到
+ * 重启), 静态 inject 不受影响; 而声明依赖才是让 `webServer` 在 apply 里一定
+ * 就绪的办法 —— Cordis 并行挂载各行, HTTP 载体比 `sessions` 绑定得晚, 用
+ * `ctx.get('webServer')` 去读会与那次绑定竞态, 读到 undefined 就静默丢掉页面
+ * 的整个传输通道(第一次重启后四个补丁就是这样一起失联的)。
+ * `settings` 仍是动态 inject —— 它是可选增强, 缺失时回退到组合层 entry 配置。
  */
+export const inject = ['sessions', 'webServer']
+
 export function apply(ctx, config = {}) {
   const cfg = { ...DEFAULTS, ...config }
   if (!cfg.enabled) return
 
-  // Note: `ctx.inject` returns a thenable Fiber; returning it from `apply`
-  // makes Cordis treat it as an Effect and fail with TypeError('Invalid
-  // effect'). The child fiber's disposer is registered on the parent fiber
-  // automatically, so a statement call is enough.
-  ctx.inject(['sessions', 'connection'], (ctx) => {
-    const logger = ctx.logger
-    /** 当前权威配置: 设置文档 > 组合层 entry; settings 缺失时回退 entry。 */
-    let source = () => ({ ...DEFAULTS, ...config })
-    let configScope = null
-    let timer = null
-    let disposed = false
+  const logger = ctx.logger
+  /** 当前权威配置: 设置文档 > 组合层 entry; settings 缺失时回退 entry。 */
+  let source = () => ({ ...DEFAULTS, ...config })
+  let configScope = null
+  let timer = null
+  let disposed = false
 
-    const tick = async (reason, cfg) => {
-      // A tick landing after teardown began must not scan or log; the
-      // interval callback and start() both funnel through here.
-      if (disposed) return
-      const sessionsRoot = resolveSessionsRoot(cfg.sessionsRoot)
-      const liveIds = new Set(ctx.sessions.list().map((s) => s.id))
-      const result = await runCleanup(sessionsRoot, cfg, liveIds)
-      logger.info(`[${reason}] ${summarize(result)}`)
-      if (result.errors.length > 0) logger.warn(`cleanup errors: ${result.errors.join(' | ')}`)
+  const tick = async (reason, cfg) => {
+    // A tick landing after teardown began must not scan or log; the
+    // interval callback and start() both funnel through here.
+    if (disposed) return
+    const sessionsRoot = resolveSessionsRoot(cfg.sessionsRoot)
+    const liveIds = new Set(ctx.sessions.list().map((s) => s.id))
+    const result = await runCleanup(sessionsRoot, cfg, liveIds)
+    logger.info(`[${reason}] ${summarize(result)}`)
+    if (result.errors.length > 0) logger.warn(`cleanup errors: ${result.errors.join(' | ')}`)
+  }
+
+  const stop = () => {
+    if (timer !== null) {
+      clearInterval(timer)
+      timer = null
     }
+  }
 
-    const stop = () => {
-      if (timer !== null) {
-        clearInterval(timer)
-        timer = null
+  const start = () => {
+    stop()
+    if (disposed) return
+    const current = source()
+    if (!current.enabled) return
+    // 启动/配置变更即清理一次; 失败不阻断
+    void tick('startup', current).catch((e) => logger.warn(`startup cleanup failed: ${e.message}`))
+    timer = setInterval(() => {
+      void tick('interval', source()).catch((e) => logger.warn(`interval cleanup failed: ${e.message}`))
+    }, current.intervalMinutes * 60_000)
+  }
+
+  // 端点处理函数: 契约与旧的 RPC handler 完全一致(getConfig / setConfig /
+  // resetConfig), 只是换了承载方式。`configScope` 在调用时才读取, 所以
+  // 无论设置分区此时是否已经挂上, 读到的都是当前那个 scope。
+  const handleEndpoint = async (endpoint, payload) => {
+    if (endpoint === 'getConfig') {
+      return { ok: true, value: source() }
+    }
+    if (configScope === null) {
+      return configError('settings-unavailable', 'settings service is not ready yet')
+    }
+    if (endpoint === 'setConfig') {
+      const fields = payload?.args?.fields
+      if (typeof fields !== 'object' || fields === null || Array.isArray(fields)) {
+        return configError('bad-request', 'fields must be a plain object')
       }
-    }
-
-    const start = () => {
-      stop()
-      if (disposed) return
-      const current = source()
-      if (!current.enabled) return
-      // 启动/配置变更即清理一次; 失败不阻断
-      void tick('startup', current).catch((e) => logger.warn(`startup cleanup failed: ${e.message}`))
-      timer = setInterval(() => {
-        void tick('interval', source()).catch((e) => logger.warn(`interval cleanup failed: ${e.message}`))
-      }, current.intervalMinutes * 60_000)
-    }
-
-    registerConfigSection(ctx, SETTINGS_NAMESPACE, Config, config, {
-      setSource: (current) => { source = current },
-      onChange: start,
-    }, (scope) => { configScope = scope }, () => disposed)
-
-    start()
-
-    // Registered as an effect so the channel disposer runs on unload; the
-    // config RPC otherwise outlives the plugin and keeps answering.
-    ctx.effect(() => ctx.connection.rpc.handle('/session-cleanup', async (endpoint, payload) => {
-      if (endpoint === 'getConfig') {
+      try {
+        await configScope.update(fields)
         return { ok: true, value: source() }
+      } catch (error) {
+        return configError('settings-rejected', String(error?.message ?? error))
       }
-      if (configScope === null) {
-        return configError('settings-unavailable', 'settings service is not ready yet')
+    }
+    if (endpoint === 'resetConfig') {
+      try {
+        await configScope.replace({})
+        return { ok: true, value: source() }
+      } catch (error) {
+        return configError('settings-rejected', String(error?.message ?? error))
       }
-      if (endpoint === 'setConfig') {
-        const fields = payload?.args?.fields
-        if (typeof fields !== 'object' || fields === null || Array.isArray(fields)) {
-          return configError('bad-request', 'fields must be a plain object')
-        }
-        try {
-          await configScope.update(fields)
-          return { ok: true, value: source() }
-        } catch (error) {
-          return configError('settings-rejected', String(error?.message ?? error))
-        }
-      }
-      if (endpoint === 'resetConfig') {
-        try {
-          await configScope.replace({})
-          return { ok: true, value: source() }
-        } catch (error) {
-          return configError('settings-rejected', String(error?.message ?? error))
-        }
-      }
-      return configError('bad-request', `unknown endpoint: ${endpoint}`)
-    }, { authority: 'loopback' }), 'session-cleanup: /session-cleanup rpc channel')
+    }
+    return configError('bad-request', `unknown endpoint: ${endpoint}`)
+  }
 
-    return ctx.effect(() => () => {
-      disposed = true
-      stop()
-    })
+  // 页面经由 webServer 上的一条前缀路由到达本插件。dsh 0.1.5 下
+  // `ctx.connection.rpc.handle` 对连接包之外的插件必然抛
+  // `cannot get property "webServer" without inject`(见 createRpcRoute 的
+  // 说明), 通道根本不会存在, 页面的 POST 会落到 SPA 兜底。
+  //
+  // 顺序很重要: 该注册排在设置分区之前。Cordis 在 apply 抛错时会回滚它此前
+  // 注册的每一个 effect, 而设置分区恰恰是最容易抛错的一步(见 ui-settings-other
+  // 的同类教训); 传输先落地, 设置挂掉也不会把页面的读写通道一起带走。
+  // 注册走 ctx.effect: 路由随插件卸载一起释放。
+  ctx.effect(() => ctx.webServer.register(createRpcRoute('/session-cleanup', handleEndpoint)), 'session-cleanup: /session-cleanup rpc route')
+
+  registerConfigSection(ctx, SETTINGS_NAMESPACE, Config, config, {
+    setSource: (current) => { source = current },
+    onChange: start,
+  }, (scope) => { configScope = scope }, () => disposed)
+
+  start()
+
+  ctx.effect(() => () => {
+    disposed = true
+    stop()
   })
 }

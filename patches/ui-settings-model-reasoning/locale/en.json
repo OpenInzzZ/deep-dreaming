@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Model Reasoning",
+    "description": "Adds a thinking switch and effort levels to every custom pi-ai model card in Settings → Models, so reasoning is configured per model instead of by hand-editing the patch file."
+  }
+}

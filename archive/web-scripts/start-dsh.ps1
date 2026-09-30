@@ -1,0 +1,282 @@
+﻿# start-dsh.ps1 — silently start the dsh web service if it is not already running.
+# Usage:
+#   powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File .\scripts\start-dsh.ps1
+#   powershell -ExecutionPolicy Bypass -File .\scripts\start-dsh.ps1 -Port 3080
+#   powershell -ExecutionPolicy Bypass -File .\scripts\start-dsh.ps1 -Force   # start even if the port is busy
+#   powershell -ExecutionPolicy Bypass -File .\scripts\start-dsh.ps1 -OpenBrowser  # focus/open browser when already running
+#   powershell -ExecutionPolicy Bypass -File .\scripts\start-dsh.ps1 -Clean   # skip user/custom plugins
+#   powershell -ExecutionPolicy Bypass -File .\scripts\start-dsh.ps1 -Pause   # show port and wait for key before exit
+#
+# Port selection: when -Port is 0 (default), the script scans 3080-3100 and
+# picks the first port that passes a real bind test (TcpListener start/stop),
+# which catches TIME_WAIT ports that netstat would report as free. Pass an
+# explicit -Port to pin one port and skip the pool.
+#
+# -Pause mode (desktop shortcut): the window stays open, prints the port, and
+# waits for a key press before closing. Never use -Pause from restart-dsh.ps1
+# or other scripts that need to run unattended.
+#
+# Flow:
+#   1. pick a port (pool scan or explicit)
+#   2. already running on that port? → focus existing browser window (or open one), then exit (unless -Force)
+#   3. locate node.exe and the newest npx-cached dsh CLI entry
+#   4. auto-patch the CLI to add --clean support (idempotent, see Patch-Cli)
+#   5. build CLI args (--port, --clean, extra NodeArgs)
+#   6. start `node <bin> web` hidden, logs → $LogDir (dsh web auto-opens the browser)
+#   7. poll the port until the service answers
+#   8. -Pause: print the port and wait for a key press
+param(
+    [int]$Port = 0,
+    [switch]$Force,
+    [switch]$OpenBrowser,
+    [switch]$Clean,
+    [switch]$Pause,
+    [string]$LogDir = (Join-Path $env:USERPROFILE '.dsh\logs'),
+    [string[]]$NodeArgs = @()
+)
+$ErrorActionPreference = 'Stop'
+
+function Log($m) { Write-Host $m }
+
+function Focus-DshWindow {
+    try {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class DshWinFocus {
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+}
+'@ -ErrorAction Stop
+    } catch {
+        return $false
+    }
+    $found = $false
+    foreach ($proc in Get-Process -ErrorAction SilentlyContinue) {
+        if ($proc.MainWindowTitle -like '*DeepSeek Harness*') {
+            [DshWinFocus]::ShowWindow($proc.MainWindowHandle, 9) | Out-Null
+            [DshWinFocus]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
+            Log "focused existing browser window (PID $($proc.Id)): $($proc.MainWindowTitle)"
+            $found = $true
+            break
+        }
+    }
+    return $found
+}
+
+# --------------------------------------------------------------------
+# Port pool: real bind test (TcpListener) that catches TIME_WAIT ports
+# which netstat would report as free. Scans 3080-3100 and returns the
+# first truly available port.
+# --------------------------------------------------------------------
+$POOL_START = 3080
+$POOL_END   = 3100
+
+function Test-PortAvailable([int]$port) {
+    try {
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $port)
+        $listener.Start()
+        $listener.Stop()
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+# Readiness probe: "the service answered HTTP at all", NOT "HTTP 200".
+# The web app answers 401 to a credential-less GET (its root requires auth) and
+# Invoke-WebRequest throws on every non-2xx, so a 200-only gate made this script
+# wait the full 120 s, report a timeout and skip the browser step on a perfectly
+# healthy service. A WebException that carries a Response is a real answer;
+# only a refused/timed-out connection means "not up yet".
+function Test-WebAnswered([int]$port) {
+    try {
+        $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$port/")
+        $req.Method = 'GET'
+        $req.Timeout = 3000
+        $req.AllowAutoRedirect = $false
+        $resp = $req.GetResponse()
+        $resp.Close()
+        return $true
+    } catch [System.Net.WebException] {
+        $resp = $_.Exception.Response
+        if ($null -ne $resp) {
+            try { $resp.Close() } catch { }
+            return $true
+        }
+        return $false
+    } catch {
+        return $false
+    }
+}
+
+function Find-AvailablePort {
+    for ($p = $POOL_START; $p -le $POOL_END; $p++) {
+        if (Test-PortAvailable $p) { return $p }
+    }
+    throw "no available port in range $POOL_START-$POOL_END"
+}
+
+# A dsh web instance already listening somewhere in the pool. This has to be
+# looked up BEFORE the pool scan: Find-AvailablePort returns a port that is free
+# by construction, so scanning first can never see a running instance and the
+# "already running" check below would always miss — starting a SECOND server on
+# the next free port, against the same profile (same session store, same
+# settings, two patch watchers). A listener that is not a dsh node process is
+# ignored, so an unrelated app on a pool port still falls through to the scan.
+function Get-RunningDsh {
+    for ($p = $POOL_START; $p -le $POOL_END; $p++) {
+        $conn = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $conn) { continue }
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$($conn.OwningProcess)" -ErrorAction SilentlyContinue
+        if (-not $proc) { continue }
+        $name = [System.IO.Path]::GetFileNameWithoutExtension([string]$proc.Name)
+        $cmd = [string]$proc.CommandLine
+        $isNode = $name -eq 'node' -or $name -eq 'nodejs'
+        $isDsh = $cmd -match '@deepseek-ai[\\/]dsh' -or $cmd -match 'dsh[\\/]lib[\\/]bin\.js'
+        if ($isNode -and $isDsh) { return @{ Port = $p; Pid = [int]$conn.OwningProcess } }
+    }
+    return $null
+}
+
+# --------------------------------------------------------------------
+# Auto-patch the dsh CLI to add --clean support, delegated to the single
+# implementation: scripts/patch-cli.ps1 in this repo, deployed as
+# ~/.dsh/scripts/patch-dsh-cli.ps1. The injection body that used to live
+# here was a stale third copy whose String.Replace anchors no longer matched
+# the current dsh build — and it reported success anyway. A missing shared
+# script only warns: it must never block startup.
+# --------------------------------------------------------------------
+function Patch-Cli($binJs, $dshLib) {
+    $shared = Join-Path $PSScriptRoot 'patch-dsh-cli.ps1'                                   # deployed: ~/.dsh/scripts/
+    if (-not (Test-Path $shared)) { $shared = Join-Path $PSScriptRoot '..\..\scripts\patch-cli.ps1' }  # in-repo: patches/ui-settings-other/ -> repo/scripts/
+    if (-not (Test-Path $shared)) { Log "  CLI patch: skipped (patch-dsh-cli.ps1 not deployed)"; return }
+    # A shared-script failure — or an environment that turns native exit codes
+    # into terminating errors — must never block startup.
+    try {
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $shared -Quiet
+        if ($LASTEXITCODE -ne 0) { Log "  CLI patch: WARN - patch-cli.ps1 exited $LASTEXITCODE (--clean unavailable)" }
+    } catch {
+        Log "  CLI patch: WARN - $($_.Exception.Message)"
+    }
+}
+
+# ====================================================================
+# Main
+# ====================================================================
+# --- 0. pick a port: pool scan when default (0), explicit otherwise ----------
+if ($Port -eq 0) {
+    # A running instance must be found before the free-port scan (see Get-RunningDsh).
+    $running = Get-RunningDsh
+    if ($running -and -not $Force) {
+        $Port = $running.Port
+        Log "found a running dsh web (PID $($running.Pid) on port $Port)"
+    } else {
+        $Port = Find-AvailablePort
+        Log "auto-selected port $Port from pool $POOL_START-$POOL_END"
+    }
+}
+Log '== dsh web start =='
+Log "port: $Port  force: $([bool]$Force)  openBrowser: $([bool]$OpenBrowser)  clean: $([bool]$Clean)  pause: $([bool]$Pause)"
+
+# --- 1. already running? --------------------------------------------------
+$conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($conn -and -not $Force) {
+    Log "dsh web is already running (PID $($conn.OwningProcess) on port $Port); nothing to do."
+    if ($Pause) {
+        Write-Host ''
+        Write-Host "DSH Web 已在运行" -ForegroundColor Green
+        Write-Host "端口: $Port" -ForegroundColor Cyan
+        Write-Host "地址: http://127.0.0.1:$Port" -ForegroundColor Cyan
+        Write-Host ''
+        Write-Host '按任意键关闭...' -ForegroundColor DarkGray
+        [Console]::ReadKey($true) | Out-Null
+    }
+    # dsh web is already running so it won't auto-open; focus the existing
+    # browser window, or open a new tab if the window can't be found.
+    if ($OpenBrowser) {
+        if (-not (Focus-DshWindow)) {
+            Log "opening default browser: http://127.0.0.1:$Port"
+            Start-Process "http://127.0.0.1:$Port"
+        }
+    }
+    exit 0
+}
+
+# --- 2. locate node.exe ----------------------------------------------------
+$node = (Get-Command node -ErrorAction SilentlyContinue).Source
+if (-not $node) { throw 'node.exe not found on PATH' }
+Log "node: $node"
+
+# --- 3. locate the dsh CLI entry (npx cache, newest copy) -------------------
+$cacheRoot = Join-Path $env:LOCALAPPDATA 'npm-cache\_npx'
+$bin = $null
+$dshLib = $null
+if (Test-Path $cacheRoot) {
+    $candidates = @(Get-ChildItem $cacheRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        $b = Join-Path $_.FullName 'node_modules\@deepseek-ai\dsh\lib\bin.js'
+        if (Test-Path $b) { Get-Item $b }
+    } | Sort-Object LastWriteTime -Descending)
+    if ($candidates.Count -gt 0) {
+        $bin = $candidates[0].FullName
+        $dshLib = $candidates[0].DirectoryName
+    }
+}
+if (-not $bin) { throw 'dsh bin.js not found under the npx cache' }
+Log "entry: $bin"
+
+# --- 4. auto-patch the CLI (idempotent) ------------------------------------
+Patch-Cli $bin $dshLib
+
+# --- 5. build CLI arguments -------------------------------------------------
+# ORDER MATTERS: the launcher's flags (--clean) must come BEFORE the web app's
+# flags (--port, --no-open, etc.) because the first unknown option triggers
+# passThroughOptions and everything after it is forwarded to the web app.
+$cliArgs = @($bin, 'web')
+if ($Clean) { $cliArgs += '--clean' }
+if ($Port -ne 3080) { $cliArgs += '--port'; $cliArgs += [string]$Port }
+$cliArgs += $NodeArgs
+
+# --- 6. start hidden with logs ----------------------------------------------
+New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$outLog = Join-Path $LogDir "dsh-web.$stamp.out.log"
+$errLog = Join-Path $LogDir "dsh-web.$stamp.err.log"
+try {
+    $started = Start-Process -FilePath $node -ArgumentList $cliArgs -WindowStyle Hidden `
+        -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
+} catch {
+    Log "log redirection failed ($($_.Exception.Message)); starting without logs"
+    $started = Start-Process -FilePath $node -ArgumentList $cliArgs -WindowStyle Hidden -PassThru
+}
+Log "started dsh web PID $($started.Id) (hidden window)"
+Log "logs: $outLog / $errLog"
+
+# --- 7. poll until the service answers -------------------------------------
+for ($i = 0; $i -lt 60; $i++) {
+    Start-Sleep -Seconds 2
+    if (Test-WebAnswered $Port) {
+        Log "service ready after ~$([int](($i + 1) * 2))s (dsh web auto-opens the browser)"
+        if ($Pause) {
+            Write-Host ''
+            Write-Host 'DSH Web 已启动' -ForegroundColor Green
+            Write-Host "端口: $Port" -ForegroundColor Cyan
+            Write-Host "地址: http://127.0.0.1:$Port" -ForegroundColor Cyan
+            Write-Host ''
+            Write-Host '按任意键关闭此窗口(服务保持运行)...' -ForegroundColor DarkGray
+            [Console]::ReadKey($true) | Out-Null
+        }
+        exit 0
+    }
+}
+if ($Pause) {
+    Write-Host ''
+    Write-Host 'DSH Web 启动超时' -ForegroundColor Red
+    Write-Host "端口: $Port" -ForegroundColor Cyan
+    Write-Host "日志: $errLog" -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '按任意键关闭...' -ForegroundColor DarkGray
+    [Console]::ReadKey($true) | Out-Null
+}
+Log "WARN: service did not answer within 120s; check $errLog"
+exit 1
