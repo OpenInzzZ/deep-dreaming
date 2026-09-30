@@ -58,7 +58,7 @@
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-queue-tools" -Target "$repo\patches\ui-queue-tools"
 ```
 
-2. 在 `~/.dsh/profiles/web/cordis.patch.yml` 中追加启用条目:
+2. 在 `~/.dsh/profiles/desktop/cordis.patch.yml` 中追加启用条目:
 
 ```yaml
 - insert:
@@ -66,12 +66,12 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
       name: '@local/dsh-client-ui-queue-tools'
 ```
 
-3. **保存即生效,无需重启**:dsh web 对 `cordis.patch.yml` 内置热加载
+3. **保存即生效,无需重启**:DSH 桌面端对 `cordis.patch.yml` 内置热加载
    (`watchUserPatches`),条目增删/配置修改保存后数秒内事务性生效(host 与
    client 半都重新装载),**不中断会话** —— 前提是文件内容确有真实变化
    (增删行、改 `config`);`Entry.update` 对 options 做深比较,只改注释、
    或写回一份内容等价的文件都**不会**触发重挂。
-   **修改本补丁源码后需重启 dsh web** 才生效。
+   **修改本补丁源码后需重启 DSH 桌面端** 才生效(`scripts/restart-desktop.ps1`)。
 
 ## 已知坑:host 半可能不在册(拖拽排序报"排序失败")
 
@@ -83,7 +83,7 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 - 自查(host 端):连接服务把每个 RPC 通道挂成 `webServer` 的 prefix 路由,
   路由表里应当能看到 `/queue`;缺失即 host 半不在册。
 - 自查(浏览器侧):已注册通道对未授权裸请求回 **401**,不存在的位置回 **405**。
-- 恢复:**重启 dsh web**(`restart-dsh.ps1`);改写 patch 文件后不要指望热重载
+- 恢复:**重启 DSH 桌面端**(`scripts/restart-desktop.ps1`);改写 patch 文件后不要指望热重载
   能把"已有行"的 host 半带回来(新增行可以,已有行可能只保住条目)。
 - 报错文案已改进:传输层失败(通道不可达)现在提示「排序服务未加载(重启 dsh
   后恢复)」,只有真正的 `queue-item-not-found` 才说"这条消息可能已经开始发送"。
@@ -102,10 +102,10 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 
 ## 卸载
 
-1. 删除 `~/.dsh/profiles/web/cordis.patch.yml` 中的 `ui-queue-tools` 条目;
+1. 删除 `~/.dsh/profiles/desktop/cordis.patch.yml` 中的 `ui-queue-tools` 条目;
 2. 删除 `~/.dsh/profiles/node_modules/@local/dsh-client-ui-queue-tools`
    链接;
-3. 重启 dsh web(官方停靠栏恢复)。
+3. 重启 DSH 桌面端(官方停靠栏恢复)。
 
 ## 注意事项
 

@@ -20,11 +20,11 @@
 # 1. 建立指向本目录的目录联接(junction)
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-plugin-session-cleanup" -Target "$repo\patches\session-cleanup"
 
-# 2. 在 ~/.dsh/profiles/web/cordis.patch.yml 中追加启用条目
+# 2. 在 ~/.dsh/profiles/desktop/cordis.patch.yml 中追加启用条目
 ```
 
 ```yaml
-# ~/.dsh/profiles/web/cordis.patch.yml
+# ~/.dsh/profiles/desktop/cordis.patch.yml
 - insert:
     - id: session-cleanup
       name: '@local/dsh-plugin-session-cleanup'
@@ -40,12 +40,12 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 > 已迁移为包名形式(插件管理页按 `@local/...` 显示)。若迁移前安装过,
 > 记得删除 home 层的旧条目,避免重复加载。
 
-3. **保存即生效,无需重启**:dsh web 对 `cordis.patch.yml` 内置热加载
+3. **保存即生效,无需重启**:DSH 桌面端对 `cordis.patch.yml` 内置热加载
    (`watchUserPatches`),条目增删/配置修改保存后数秒内事务性生效(host 与
    client 半都重新装载),**不中断会话** —— 前提是文件内容确有真实变化
    (增删行、改 `config`);`Entry.update` 对 options 做深比较,只改注释、
    或写回一份内容等价的文件都**不会**触发重挂。
-   **修改本补丁源码后需重启 dsh web** 才生效。
+   **修改本补丁源码后需重启 DSH 桌面端** 才生效(`scripts/restart-desktop.ps1`)。
 
 启动时立即执行一次清理,之后按 `intervalMinutes` 周期执行。
 
@@ -74,7 +74,7 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 配置来源(优先级从低到高):schema 默认值 < 组合层条目配置
 (`cordis.patch.yml` 的 `config`)< 设置文档用户层。**推荐在界面配置**:
 
-1. 打开 dsh Web → **设置** → **插件** → **插件配置** 标签页;
+1. 打开 DSH 桌面端 → **设置** → **插件** → **插件配置** 标签页;
 2. 找到 **会话清理** 卡片,展开即可编辑全部字段;
 3. 修改后点 **保存** —— 配置写入 `~/.dsh/settings.yaml`(namespace
    `session-cleanup`),**即时生效**(定时器按新间隔重建,保存即触发一次
@@ -141,7 +141,7 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 
 ## 卸载
 
-1. 删除 `~/.dsh/profiles/web/cordis.patch.yml` 中的 `session-cleanup` 条目
+1. 删除 `~/.dsh/profiles/desktop/cordis.patch.yml` 中的 `session-cleanup` 条目
    (**热生效**:数秒后清理任务停止、`/session-cleanup` 路由注销);
 2. 删除 `~/.dsh/profiles/node_modules/@local/dsh-plugin-session-cleanup`
    链接。

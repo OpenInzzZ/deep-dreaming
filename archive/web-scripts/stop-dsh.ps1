@@ -1,4 +1,4 @@
-# stop-dsh.ps1 — stop the running dsh web service (command-line companion to
+﻿# stop-dsh.ps1 — stop the running dsh web service (command-line companion to
 # the "中断服务" button in Settings -> Other).
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File .\scripts\stop-dsh.ps1            # stop

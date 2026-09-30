@@ -41,9 +41,8 @@
 //
 // Why the binding step exists (dsh 0.1.5 / Memorix 1.9): Memorix isolates
 // memory per git-backed project, and DSH starts ONE MCP server for the whole
-// process with the process cwd (`~/.dsh/profiles/web` when the web app is
-// launched from its profile) — dsh-mcp-client cannot send per-session
-// workspace roots. Memorix therefore refuses every project-scoped tool until
+// process with the process cwd (the desktop app's own runtime directory, not a
+// project checkout) — dsh-mcp-client cannot send per-session workspace roots. Memorix therefore refuses every project-scoped tool until
 // a session binds a root:
 //
 //   memorix_session_start({ projectRoot: "<session workspace root>" })

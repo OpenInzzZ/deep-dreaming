@@ -1,4 +1,4 @@
-# patch-cli.ps1 — Patch the newest npx-cached dsh CLI to add `--clean`.
+﻿# patch-cli.ps1 — Patch the newest npx-cached dsh CLI to add `--clean`.
 #
 # Why this exists: `dsh web --clean` boots the profile's bundle layers only and
 # skips the user patch layers (the profile's cordis.patch.yml, the home layer

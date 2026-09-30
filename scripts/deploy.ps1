@@ -14,7 +14,7 @@ function Read-Utf8([string]$Path) {
     return [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
 }
 
-$dev = Split-Path -Parent $PSScriptRoot          # D:\GitHub\deep-dreaming
+$dev = Split-Path -Parent $PSScriptRoot          # <repo root, this checkout>
 $dshHome = Join-Path $env:USERPROFILE '.dsh'     # ~/.dsh
 
 # 0. Sync the desktop lifecycle scripts to ~/.dsh/scripts/.
@@ -129,7 +129,7 @@ if (Test-Path $homePatch) {
 #    provide @deepseek-ai are kept as-is.
 $depPlugins = @('dsh-project-memory', 'session-cleanup', 'ui-settings-model-reasoning', 'ui-queue-tools', 'temp-session', 'whale-background')
 if (-not (Test-Path $modulesBase)) {
-    Write-Host '  [!] ~/.dsh/profiles/node_modules not found; run `dsh plugin --profile web add` first' -ForegroundColor Yellow
+    Write-Host "  [!] ~/.dsh/profiles/node_modules not found; run ``dsh plugin --profile $Profile add`` first" -ForegroundColor Yellow
 } else {
     foreach ($p in $depPlugins) {
         $link = Join-Path $dev "patches\$p\node_modules"

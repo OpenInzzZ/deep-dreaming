@@ -49,7 +49,7 @@
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-whale-background" -Target "<repo>\patches\whale-background"
 ```
 
-然后在 `~/.dsh/profiles/web/cordis.patch.yml` 添加:
+然后在 `~/.dsh/profiles/desktop/cordis.patch.yml` 添加:
 
 ```yaml
 - insert:
@@ -57,10 +57,10 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
       name: '@local/dsh-client-whale-background'
 ```
 
-条目热生效(数秒);本补丁**源码**改动需重启 dsh web。验证路由是否在服务:
+条目热生效(数秒);本补丁**源码**改动需重启 DSH 桌面端。验证路由是否在服务:
 
 ```powershell
-Invoke-WebRequest http://127.0.0.1:3080/whale-background.png -UseBasicParsing | Select-Object StatusCode, RawContentLength
+Invoke-WebRequest http://127.0.0.1:19387/whale-background.png -UseBasicParsing | Select-Object StatusCode, RawContentLength
 # 期望 200 且约 816 KB(image/png)
 ```
 

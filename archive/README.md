@@ -26,6 +26,11 @@
 | `ui-settings-balance/` | 只读「账户余额」页：充值 / 赠金余额，经宿主 `deepseekAccount` 读取 | **重复建设**：桌面端自带的「账号与余额」页（`@deepseek-ai/dsh-client-ui-settings-account`）已提供同样两行，另有「更多账号信息」「查询用量」和**充值按钮**。用户补丁只做出一个功能子集，还在 sidebar 上多了一个近义入口，因此退役 |
 | `ui-settings-plugin-manager/` | 设置「插件管理」标签页：整份 loader 条目清单 + 分类/启用状态/运行状态三个过滤器 + 每行的启停开关 | **启停与官方重复**：官方 `pluginManager.setPluginEnabled` 写的是同一层、同一 YAML 形状，入口另有侧栏「插件」页、agent 工具 `plugin_manager` 与 `dsh plugin` CLI。归档前已修好它两处真实故障（写死 `profiles/web`；把 loader `entryId` 当补丁行 id 导致永不匹配却回报成功）并补了测试，但既然官方覆盖了核心能力，仍选择整体退役 |
 
+> `ui-settings-other/` 归档时按新归属拆分过：它的 5 个生命周期脚本与 `scripts/patch-cli.ps1`
+> 一起并入 `web-scripts/`（逐字节相同，因此归档目录里不再留副本），4 个资产分别落到仓库级
+> `assets/favicon-128.png`、`patches/whale-background/assets/whale-girl-transparent.png`
+> 与 `assets/`（见下表），归档目录内只保留补丁代码与文档。
+
 > 教训（也已写进 `AGENTS.md` 的「Adding a New Patch」）：**做 UI 补丁前先在 DSH 源码检出里
 > grep 一遍**（`packages/client/ui-*`），确认官方没做过同一件事。
 

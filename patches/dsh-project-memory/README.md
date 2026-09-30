@@ -16,7 +16,7 @@
    会在 `~/.dsh/cordis.patch.yml` 写入一行 `@deepseek-ai/dsh-mcp-client`
    (serverName `memorix`,stdio,`memorix serve --mode lite`)。
    `scripts/install.ps1` 已包含这两步(幂等)。
-3. **重启 dsh web** 后,工具以 `mcp__memorix__<工具名>` 出现在会话里。
+3. **重启 DSH 桌面端** 后,工具以 `mcp__memorix__<工具名>` 出现在会话里。
 
 `dsh-mcp-client` 也支持热加载:只改 `~/.dsh/cordis.patch.yml` 时无需重启,
 新增行会在数秒内装载(日志里能看到 `[memorix] MCP Server running on stdio`)。
@@ -24,14 +24,14 @@
 ## 项目绑定(本桥接存在的首要原因)
 
 Memorix 的记忆**按项目(git 仓库)隔离**,而 DSH 全进程只启动**一个** MCP
-实例、且它的工作目录是 dsh 进程的 cwd(web 场景下通常是
-`~/.dsh/profiles/web`,不是一个 git 仓库)——`dsh-mcp-client` 不会向 MCP
+实例、且它的工作目录是 dsh 进程的 cwd(桌面端即应用的运行目录,而不是任何 git
+仓库)——`dsh-mcp-client` 不会向 MCP
 服务器发送每个会话的工作区 root。因此未绑定时 Memorix 会**拒绝一切项目级
 工具**:
 
 ```
 Cannot search the current project yet.
-No git project could be resolved from "C:\Users\<user>\.dsh\profiles\web".
+No git project could be resolved from "<dsh 进程的 cwd>".
 ```
 
 绑定方式是会话级的一次调用,`projectRoot` 必须是本会话的工作区根目录:
@@ -108,7 +108,7 @@ primitives 的 `DisclosureRow`):
 
 折叠行 = 动作图标 + 标题 + 状态点 + 一行摘要;展开可见结果全文。
 **默认全部折叠**(含执行中的卡片,摘要显示「运行中…」),点击行展开。
-修改 `client.js` 后需重启 dsh web 生效(与其它补丁源码一致)。
+修改 `client.js` 后需重启 DSH 桌面端生效(与其它补丁源码一致)。
 
 会话开始的**召回提示**本身以官方 context notice 形态注入
 (`source.form = 'notice'` + `summary`),折叠为一行摘要,并落在用户本轮之内,
@@ -120,9 +120,9 @@ primitives 的 `DisclosureRow`):
 不可见,导入一次即可(幂等,可重复运行):
 
 ```powershell
-# 在需要迁移的项目根目录执行(记忆按 git 项目绑定)
-node D:\GitHub\deep-dreaming\scripts\migrate-dsh-memory.mjs
-node D:\GitHub\deep-dreaming\scripts\migrate-dsh-memory.mjs --dry-run   # 先看要导入哪些
+# 在本仓库根目录执行(要迁移别的项目时,把它的根目录作为第一个参数)
+node scripts/migrate-dsh-memory.mjs
+node scripts/migrate-dsh-memory.mjs --dry-run   # 先看要导入哪些
 ```
 
 脚本经**真实 MCP stdio 通道**(与 dsh 用的是同一条:`memorix serve --mode
@@ -136,7 +136,7 @@ narrative。**旧笔记不会被删除**,确认导入成功后可自行归档/�
 
 只剩两个行为开关,存储层参数已归 Memorix(`memorix.toml` /
 `~/.memorix/config.toml`)。默认配置即开即用;覆盖方式是在
-`~/.dsh/profiles/web/cordis.patch.yml` 追加:
+`~/.dsh/profiles/desktop/cordis.patch.yml` 追加:
 
 ```yaml
 - id: project-memory
@@ -155,8 +155,8 @@ narrative。**旧笔记不会被删除**,确认导入成功后可自行归档/�
 
 ```powershell
 # 仓库根执行(或直接用 scripts\install.ps1 完成全部步骤)
-corepack pnpm --dir "$env:USERPROFILE\.dsh\profiles\web" add "$((Resolve-Path .).Path)\patches\dsh-project-memory"
-# 再把 "dsh-project-memory" 追加进 ~/.dsh/profiles/web/package.json 的 dsh.profile.bundles
+corepack pnpm --dir "$env:USERPROFILE\.dsh\profiles\desktop" add "$((Resolve-Path .).Path)\patches\dsh-project-memory"
+# 再把 "dsh-project-memory" 追加进 ~/.dsh/profiles/desktop/package.json 的 dsh.profile.bundles
 ```
 
 插件目录还需要一个指向宿主依赖的 junction(插件 import `@deepseek-ai/dsh-llm`
@@ -167,13 +167,13 @@ New-Item -ItemType Junction -Path "patches\dsh-project-memory\node_modules" -Tar
 # scripts\deploy.ps1 会自动补齐/修复该链接
 ```
 
-> ⚠️ **不要**再在 `~/.dsh/profiles/web/cordis.patch.yml` 里手工 insert
+> ⚠️ **不要**再在 `~/.dsh/profiles/desktop/cordis.patch.yml` 里手工 insert
 > `project-memory` 条目 —— bundle 层已提供该行(自带 config 默认值),
 > 用户层再 insert 同名行会导致下次启动
 > `duplicate loader entry id: project-memory` 硬失败。
 
-最后重启 `dsh web`(bundle 层变更需重启)。卸载:
-`dsh plugin --profile web remove dsh-project-memory` 并从 bundles 列表移除。
+最后重启 DSH 桌面端(bundle 层变更需重启)。卸载:
+`dsh plugin --profile desktop remove dsh-project-memory` 并从 bundles 列表移除。
 
 ## 测试
 

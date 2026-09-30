@@ -292,7 +292,7 @@ if ($null -eq $discovery) {
     }
     if (-not $discovery.summary.healthy) {
         Write-Host '  [WARN] the store has unusable projections; patches that import those packages will fail to load.' -ForegroundColor Yellow
-        Write-Host '         Rebuild it with the CLI that created it: dsh plugin --profile web install' -ForegroundColor Yellow
+        Write-Host "         Rebuild it with the CLI that created it: dsh plugin --profile $Profile install" -ForegroundColor Yellow
     }
 }
 

@@ -51,7 +51,7 @@ dsh 发起会话必须绑定一个工作区(没有工作区时对话输入框是
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-temp-session" -Target "$repo\patches\temp-session"
 ```
 
-2. 在 `~/.dsh/profiles/web/cordis.patch.yml` 中追加启用条目:
+2. 在 `~/.dsh/profiles/desktop/cordis.patch.yml` 中追加启用条目:
 
 ```yaml
 - insert:
@@ -62,11 +62,11 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
         # title: '临时会话'            # 可选:工作区显示标题
 ```
 
-条目增删 / 配置修改保存后**数秒热生效**;修改本补丁源码后需重启 dsh web。
+条目增删 / 配置修改保存后**数秒热生效**;修改本补丁源码后需重启 DSH 桌面端。
 
 ## 卸载
 
-1. 删除 `~/.dsh/profiles/web/cordis.patch.yml` 中的 `temp-session` 条目
+1. 删除 `~/.dsh/profiles/desktop/cordis.patch.yml` 中的 `temp-session` 条目
    (热生效:按钮消失,`/temp-session` 通道注销);
 2. 删除 `~/.dsh/profiles/node_modules/@local/dsh-client-ui-temp-session` 链接;
 3. 可选:删除 `~/.dsh/tmp-workspaces/`(已绑定会话的工作区记录保留在 dsh

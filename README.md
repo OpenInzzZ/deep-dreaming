@@ -42,8 +42,8 @@ deep-dreaming/
 
 | 补丁 | 作用 | 部署方式 | 使用文档 |
 | --- | --- | --- | --- |
-| [dsh-project-memory](patches/dsh-project-memory/) | 跨会话项目记忆:**Memorix 桥接**(存储/检索/去重/成熟度都在 Memorix)——注入提示词引导,并在会话第一轮召回既有记忆(带上本会话工作区根目录与项目绑定步骤),记忆存取由 Memorix 经 MCP(`mcp__memorix__*`)完成;记忆工具调用以**可折叠「记忆阶段」卡片**展示,**不产生额外对话轮次** | 作为 **bundle** 安装:`dsh plugin --profile web add`(或 `pnpm add`)进 profile 并登记到 `dsh.profile.bundles` + Memorix 全局安装与 `memorix setup --agent dsh --global` | [README](patches/dsh-project-memory/README.md) |
-| [session-cleanup](patches/session-cleanup/) | 按天数/容量定期清理归档会话,跳过活跃会话 | junction 链接到 profile node_modules + `~/.dsh/profiles/web/cordis.patch.yml` 条目 | [README](patches/session-cleanup/README.md) |
+| [dsh-project-memory](patches/dsh-project-memory/) | 跨会话项目记忆:**Memorix 桥接**(存储/检索/去重/成熟度都在 Memorix)——注入提示词引导,并在会话第一轮召回既有记忆(带上本会话工作区根目录与项目绑定步骤),记忆存取由 Memorix 经 MCP(`mcp__memorix__*`)完成;记忆工具调用以**可折叠「记忆阶段」卡片**展示,**不产生额外对话轮次** | 作为 **bundle** 安装:`dsh plugin --profile desktop add`(或 `pnpm add`)进 profile 并登记到 `dsh.profile.bundles` + Memorix 全局安装与 `memorix setup --agent dsh --global` | [README](patches/dsh-project-memory/README.md) |
+| [session-cleanup](patches/session-cleanup/) | 按天数/容量定期清理归档会话,跳过活跃会话 | junction 链接到 profile node_modules + `~/.dsh/profiles/desktop/cordis.patch.yml` 条目 | [README](patches/session-cleanup/README.md) |
 | [ui-queue-tools](patches/ui-queue-tools/) | 排队消息增强:hover 预览全文 + 上移/下移排序(host 半经 Inbox.splice 重排) | junction 链接到 profile node_modules + `~/.dsh/profiles/desktop/cordis.patch.yml` 条目 | [README](patches/ui-queue-tools/README.md) |
 | [ui-settings-model-reasoning](patches/ui-settings-model-reasoning/) | 设置「模型」页扩展:给自定义(llm-pi-ai)路由逐模型配置**思考开关 + 思考等级(档位与发送值)**,写回 `reasoningEfforts`,模型菜单随之出现「推理等级」 | junction 链接到 profile node_modules + `~/.dsh/profiles/desktop/cordis.patch.yml` 条目 | [README](patches/ui-settings-model-reasoning/README.md) |
 | [temp-session](patches/temp-session/) | 侧边栏底部「临时会话」按钮:一键发起绑定**用户级临时目录**的会话,不关联任何项目 | junction 链接到 profile node_modules + `~/.dsh/profiles/desktop/cordis.patch.yml` 条目 | [README](patches/temp-session/README.md) |
@@ -100,7 +100,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 ## 部署不变量(必读)
 
 - **一个 loader 行只能有一个来源。** `dsh-project-memory` 声明了 `dsh.bundle`,它的行由 bundle 层(包自带 `cordis.patch.yml`)提供;profile 层**不能**再写 `- id: project-memory`。两层若同时提供同一个 id,`applyEntryPatches` 不会去重,Loader 会 fail-loud 抛 `TypeError: duplicate loader entry id`,dsh 直接起不来。`install.ps1` 会**先**删掉 profile 行再装 bundle(若 bundle 步骤失败则把行恢复回去);`deploy.ps1` 检测到两者并存会报 FAIL。
-  注意 `dsh plugin add` / `dsh plugin update --profile web` 会自行把声明了 `dsh.bundle` 的依赖补进 `dsh.profile.bundles`,所以不要"为了保险"两边都写。
+  注意 `dsh plugin add` / `dsh plugin update --profile desktop` 会自行把声明了 `dsh.bundle` 的依赖补进 `dsh.profile.bundles`,所以不要"为了保险"两边都写。
 - 其余 7 个补丁都是目录包:junction + profile 层 `- insert:` 行。
 - **不要在 `patches/` 下做递归扫描**:`patches/<p>/node_modules` 是指向 `~/.dsh/profiles/node_modules` 的 junction,而 profile 里的 `@local/*` 又指回 `patches/*`,形成环;`Get-ChildItem -Recurse` 之类的命令不会结束。
 
@@ -135,12 +135,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 
 ## 热插拔(启停/改配置免重启)
 
-dsh web 对 profile 的 `cordis.patch.yml` 内置热加载(`watchUserPatches`,
+DSH 桌面端对 profile 的 `cordis.patch.yml` 内置热加载(`watchUserPatches`,
 每个长期存活的 surface 无条件启用):
 
 - **增删插件条目、修改条目 `config` → 保存文件后数秒内事务性生效**,
   host 半与 client 半都会重新装载/卸载,**无需重启 dsh**;
-- 用户层 patch 文件位置有两处,都会被监视:`~/.dsh/profiles/web/cordis.patch.yml`
+- 用户层 patch 文件位置有两处,都会被监视:`~/.dsh/profiles/desktop/cordis.patch.yml`
   (profile 层)与 `~/.dsh/cordis.patch.yml`(home 层,Memorix 的 MCP 行在这里)。
   实测:home 层新增 `@deepseek-ai/dsh-mcp-client` 行后,运行中的 dsh 数秒内就
   拉起了 `memorix serve`(日志 `[memorix] MCP Server running on stdio`),
