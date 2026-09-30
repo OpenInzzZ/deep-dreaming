@@ -78,8 +78,49 @@ if (Test-Path $profilePatch) {
 #      cordis.patch.yml row, so inserting that same row from the profile layer
 #      composes TWO entries with the same id, and the boot aborts fail-loud with
 #      `TypeError: duplicate loader entry id: <id>` (cordis-plugin-loader).
+#      The reverse direction also fails the check: every bundle-declaring patch
+#      MUST be registered as a profile dependency + dsh.profile.bundles entry,
+#      otherwise its row has no owner and the plugin silently never loads.
 $profilePkgPath = Join-Path $dshHome "profiles\$Profile\package.json"
 $profileNodeModules = Join-Path $dshHome "profiles\$Profile\node_modules"
+$bundlePatchDirs = @('session-cleanup', 'ui-settings-model-reasoning', 'ui-queue-tools', 'temp-session', 'whale-background', 'dsh-project-memory')
+$profileDeps = @()
+$profileBundles = @()
+if (Test-Path $profilePkgPath) {
+    $manifest = Read-Utf8 $profilePkgPath | ConvertFrom-Json
+    if ($null -ne $manifest.dependencies) { $profileDeps = @($manifest.dependencies.PSObject.Properties.Name) }
+    if ($null -ne $manifest.dsh -and $null -ne $manifest.dsh.profile) { $profileBundles = @($manifest.dsh.profile.bundles) }
+}
+foreach ($dir in $bundlePatchDirs) {
+    $checked++
+    $repoManifestPath = Join-Path $dev "patches\$dir\package.json"
+    $repoBundleYml = Join-Path $dev "patches\$dir\cordis.patch.yml"
+    if (-not (Test-Path $repoManifestPath)) {
+        Write-Host "  [FAIL] patches\$dir\package.json missing" -ForegroundColor Red
+        $failed++
+        continue
+    }
+    $repoManifest = Read-Utf8 $repoManifestPath | ConvertFrom-Json
+    if ($null -eq $repoManifest.dsh -or $null -eq $repoManifest.dsh.bundle) {
+        Write-Host "  [FAIL] patches\$dir declares no dsh.bundle - it can never own a loader row" -ForegroundColor Red
+        $failed++
+        continue
+    }
+    if (-not (Test-Path $repoBundleYml)) {
+        Write-Host "  [FAIL] patches\$dir\cordis.patch.yml missing (dsh.bundle.patch points at it)" -ForegroundColor Red
+        $failed++
+        continue
+    }
+    $pkgName = $repoManifest.name
+    $depOk = $profileDeps -contains $pkgName
+    $bundleOk = $profileBundles -contains $pkgName
+    if ($depOk -and $bundleOk) {
+        Write-Host "  [OK] $pkgName -> bundle row owned by patches\$dir (dependency + dsh.profile.bundles)"
+    } else {
+        Write-Host "  [FAIL] $pkgName not registered (dependency=$depOk bundle=$bundleOk) - run scripts/install.ps1" -ForegroundColor Red
+        $failed++
+    }
+}
 if ((Test-Path $profilePatch) -and (Test-Path $profilePkgPath)) {
     $manifest = Read-Utf8 $profilePkgPath | ConvertFrom-Json
     $bundles = @($manifest.dsh.profile.bundles)
@@ -218,11 +259,13 @@ if ($Profile -eq 'desktop') {
 }
 
 Write-Host ''
-if ($failed -gt 0) { Write-Host "Deploy check FAILED ($failed broken link(s))." -ForegroundColor Red; exit 1 }
+if ($failed -gt 0) { Write-Host "Deploy check FAILED ($failed problem(s) found)." -ForegroundColor Red; exit 1 }
 Write-Host "Deploy check done ($checked reference(s) verified)." -ForegroundColor Green
-Write-Host "  - cordis.patch.yml entry changes hot-apply within seconds (no restart)." -ForegroundColor DarkGray
+Write-Host "  - Hot within seconds: profile cordis.patch.yml edits AND dsh.profile.bundles" -ForegroundColor DarkGray
+Write-Host "    changes (bundle registration/stripped rows picked up by the running app; measured)." -ForegroundColor DarkGray
 if ($Profile -eq 'desktop') {
-    Write-Host "  - Plugin SOURCE changes need the desktop app restarted (restart-desktop.ps1); bundle/profile manifest changes too." -ForegroundColor DarkGray
+    Write-Host "  - Restart (restart-desktop.ps1) for: plugin SOURCE changes and a bundle's own" -ForegroundColor DarkGray
+    Write-Host "    cordis.patch.yml row-structure changes (bundle files are not HMR-watched)." -ForegroundColor DarkGray
 } else {
     Write-Host "  - The web profile is legacy (see archive/web-scripts/README.md); source changes need its own restart." -ForegroundColor DarkGray
 }

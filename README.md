@@ -20,17 +20,18 @@ deep-dreaming/
 │   ├── ui-settings-model-reasoning/  # 设置「模型」页扩展:自定义(llm-pi-ai)模型的思考开关 + 思考等级 + verify
 │   ├── ui-queue-tools/           # 排队消息增强:hover 全文预览 + 上下移排序 + verify
 │   ├── temp-session/             # 侧边栏一键发起不绑定项目的临时会话 + verify
-│   └── whale-background/         # 会话区域鲸鱼娘背景图(目录包插件)
+│   └── whale-background/         # 会话区域鲸鱼娘背景图(bundle 补丁)
 ├── assets/                       # 品牌资产(鲸鱼娘 favicon;不归任何补丁,由 deploy.ps1 同步到 ~/.dsh/assets)
 ├── archive/                      # 已退役的脚本 / 资产 / 补丁(只读保留,不再部署)
 ├── scripts/
-│   ├── install.ps1               # 一键安装:建全部 junction + 合并 patch 条目 + 安装 bundle + Memorix + 部署校验(幂等)
-│   ├── deploy.ps1                # 只读校验:同步脚本与资产 + 核对 patch 层引用与 junction + 体检宿主依赖仓库
+│   ├── install.ps1               # 一键安装:建 junction 兜底 + 6 个补丁全部装成 bundle(先剥遗留行) + Memorix + 部署校验(幂等)
+│   ├── deploy.ps1                # 只读校验:同步脚本与资产 + bundle 登记/行属主 + junction + 体检宿主依赖仓库
 │   ├── start-desktop.ps1         # 启动桌面端(已在运行则聚焦窗口)
 │   ├── restart-desktop.ps1       # 重启桌面端(改补丁源码后必须;需 -Force)
 │   ├── desktop-install.mjs       # 发现桌面端安装 + 体检共享依赖仓库(只读,含单元测试)
 │   ├── migrate-icon-names.mjs    # 把 `…Outline16/14` 图标名迁移到 0.2.0-rc.2 的 `…OutlineRegular/Medium`
 │   ├── verify-plugin-meta.mjs    # 复刻官方 readPluginMeta,证明「设置 → 内置插件」会显示我们的标题/描述
+│   ├── verify-bundle-rows.mjs    # 校验每个补丁的 dsh.bundle 声明与包内 cordis.patch.yml 行结构
 │   ├── migrate-dsh-memory.mjs    # 把旧版 .dsh-memory/ 笔记导入 Memorix(幂等,可 --dry-run)
 │   ├── run-tests.mjs             # 跑完整个测试矩阵(npm test)
 │   └── test-deps.mjs             # 验证脚本的 react / jsdom 解析(仓库 node_modules → NODE_PATH → profile)
@@ -43,26 +44,27 @@ deep-dreaming/
 | 补丁 | 作用 | 部署方式 | 使用文档 |
 | --- | --- | --- | --- |
 | [dsh-project-memory](patches/dsh-project-memory/) | 跨会话项目记忆:**Memorix 桥接**(存储/检索/去重/成熟度都在 Memorix)——注入提示词引导,并在会话第一轮召回既有记忆(带上本会话工作区根目录与项目绑定步骤),记忆存取由 Memorix 经 MCP(`mcp__memorix__*`)完成;记忆工具调用以**可折叠「记忆阶段」卡片**展示,**不产生额外对话轮次** | 作为 **bundle** 安装:`dsh plugin --profile desktop add`(或 `pnpm add`)进 profile 并登记到 `dsh.profile.bundles` + Memorix 全局安装与 `memorix setup --agent dsh --global` | [README](patches/dsh-project-memory/README.md) |
-| [session-cleanup](patches/session-cleanup/) | 按天数/容量定期清理归档会话,跳过活跃会话 | junction 链接到 profile node_modules + `~/.dsh/profiles/desktop/cordis.patch.yml` 条目 | [README](patches/session-cleanup/README.md) |
-| [ui-queue-tools](patches/ui-queue-tools/) | 排队消息增强:hover 预览全文 + 上移/下移排序(host 半经 Inbox.splice 重排) | junction 链接到 profile node_modules + `~/.dsh/profiles/desktop/cordis.patch.yml` 条目 | [README](patches/ui-queue-tools/README.md) |
-| [ui-settings-model-reasoning](patches/ui-settings-model-reasoning/) | 设置「模型」页扩展:给自定义(llm-pi-ai)路由逐模型配置**思考开关 + 思考等级(档位与发送值)**,写回 `reasoningEfforts`,模型菜单随之出现「推理等级」 | junction 链接到 profile node_modules + `~/.dsh/profiles/desktop/cordis.patch.yml` 条目 | [README](patches/ui-settings-model-reasoning/README.md) |
-| [temp-session](patches/temp-session/) | 侧边栏底部「临时会话」按钮:一键发起绑定**用户级临时目录**的会话,不关联任何项目 | junction 链接到 profile node_modules + `~/.dsh/profiles/desktop/cordis.patch.yml` 条目 | [README](patches/temp-session/README.md) |
-| [whale-background](patches/whale-background/) | 会话区域背景:在对话滚动区居中偏右显示鲸鱼娘透明图(13% 透明度),资源缺失时自动跳过而不影响启动 | junction 链接到 profile node_modules + `~/.dsh/profiles/desktop/cordis.patch.yml` 条目 | [README](patches/whale-background/README.md) |
+| [session-cleanup](patches/session-cleanup/) | 按天数/容量定期清理归档会话,跳过活跃会话 | **bundle**:包内 `cordis.patch.yml` 行 + `install.ps1` pnpm link 进 profile 并登记 `dsh.profile.bundles` | [README](patches/session-cleanup/README.md) |
+| [ui-queue-tools](patches/ui-queue-tools/) | 排队消息增强:hover 预览全文 + 上移/下移排序(host 半经 Inbox.splice 重排) | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/ui-queue-tools/README.md) |
+| [ui-settings-model-reasoning](patches/ui-settings-model-reasoning/) | 设置「模型」页扩展:给自定义(llm-pi-ai)路由逐模型配置**思考开关 + 思考等级(档位与发送值)**,写回 `reasoningEfforts`,模型菜单随之出现「推理等级」 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/ui-settings-model-reasoning/README.md) |
+| [temp-session](patches/temp-session/) | 侧边栏底部「临时会话」按钮:一键发起绑定**用户级临时目录**的会话,不关联任何项目 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/temp-session/README.md) |
+| [whale-background](patches/whale-background/) | 会话区域背景:在对话滚动区居中偏右显示鲸鱼娘透明图(13% 透明度),资源缺失时自动跳过而不影响启动 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/whale-background/README.md) |
 
 ## 快速部署
 
 **推荐一条命令**(任何机器克隆后即可,路径自动推导,无需改动):
 
 ```powershell
-# 在仓库根目录执行:建全部 junction + 合并 patch 条目 + 安装
-# dsh-project-memory bundle + 安装并接线 Memorix + 部署校验
-# (幂等,可重复运行)
+# 在仓库根目录执行:建 junction 兜底 + 把 6 个补丁全部装成 bundle
+# (pnpm link + 登记 dsh.profile.bundles,先剥离 profile 层遗留行)
+# + 安装并接线 Memorix + 部署校验(幂等,可重复运行)
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
-# 完成后重启桌面端以装载 host 半(会结束当前会话):
+# 一般无需重启:profile manifest 与用户层都会热应用(几秒内)。
+# 若插件页卡片或某条 host 路由缺失,再重启(会结束当前会话):
 powershell -ExecutionPolicy Bypass -File .\scripts\restart-desktop.ps1 -Force
 ```
 
-`install.ps1` 还会:幂等安装 **Memorix**(`npm install -g memorix` + `memorix setup --agent dsh --global`,写进 `~/.dsh/cordis.patch.yml`,用 `-SkipMemorix` 跳过)、把 `dsh-project-memory` 收敛为唯一的 bundle 属主(见下节不变量)、并用桌面端自带的 CLI(`resources\runtime\cli\bin\dsh.cmd plugin --profile desktop add`)装 bundle。所有脚本读写配置文件都走显式 UTF-8(Windows PowerShell 5.1 的 `Get-Content`/`Set-Content` 默认按 ANSI 解码,会把中文注释写成乱码)。
+`install.ps1` 还会:剥离 profile 层遗留的 `- insert:` 行(bundle 装失败时原样恢复该行,保证补丁始终有属主)、幂等安装 **Memorix**(`npm install -g memorix` + `memorix setup --agent dsh --global`,写进 `~/.dsh/cordis.patch.yml`,用 `-SkipMemorix` 跳过)、并用桌面端自带的 CLI(`resources\runtime\cli\bin\dsh.cmd plugin --profile desktop add`)装 bundle。所有脚本读写配置文件都走显式 UTF-8(Windows PowerShell 5.1 的 `Get-Content`/`Set-Content` 默认按 ANSI 解码,会把中文注释写成乱码)。
 
 动手前它会**只读体检**「共享宿主依赖仓库」`~/.dsh/profiles/node_modules`,并报告桌面端安装与版本——补丁的宿主端 `import '@deepseek-ai/*'` 只能在这里被解析,仓库坏掉时补丁会以 `MODULE_NOT_FOUND` 装不上。
 
@@ -71,16 +73,24 @@ powershell -ExecutionPolicy Bypass -File .\scripts\restart-desktop.ps1 -Force
 ```powershell
 $repo = (Resolve-Path .).Path          # 在仓库根执行;其它位置请指向克隆目录
 
-# 1. 目录包插件:建立 junction 链接 + profile patch 条目
+# 1. 全部补丁都是 bundle:包内自带 cordis.patch.yml 行,install.ps1 负责
+#    pnpm link 进 profile + 登记 dsh.profile.bundles(下面的 junction 只是解析兜底)
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-plugin-session-cleanup" -Target "$repo\patches\session-cleanup"
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-settings-model-reasoning" -Target "$repo\patches\ui-settings-model-reasoning"
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-queue-tools" -Target "$repo\patches\ui-queue-tools"
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-temp-session" -Target "$repo\patches\temp-session"
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-whale-background" -Target "$repo\patches\whale-background"
 
-# 2. 组合包插件(dsh-project-memory):用桌面端自带 CLI 装进 profile
-& "D:\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add "$repo\patches\dsh-project-memory"
-# (该包声明了 dsh.bundle,CLI 会自动把它登记进 dsh.profile.bundles;bundle 层变更需重启桌面端生效)
+# 2. 逐个装成 bundle:用桌面端自带 CLI(包声明了 dsh.bundle,CLI 自动登记 dsh.profile.bundles)
+#    装之前先删掉 profile 层同 id 的 - insert: 行,否则两层同 id 会让启动 fail-loud
+$cli = "D:\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
+& $cli plugin --profile desktop add "$repo\patches\session-cleanup"
+& $cli plugin --profile desktop add "$repo\patches\ui-settings-model-reasoning"
+& $cli plugin --profile desktop add "$repo\patches\ui-queue-tools"
+& $cli plugin --profile desktop add "$repo\patches\temp-session"
+& $cli plugin --profile desktop add "$repo\patches\whale-background"
+& $cli plugin --profile desktop add "$repo\patches\dsh-project-memory"
+# (bundle 层变更由 HMR 热应用;若卡片/路由缺失再重启桌面端)
 
 # 2.5 项目记忆的后端:Memorix 全局安装 + 写入 MCP 行(install.ps1 已含)
 npm install -g memorix
@@ -99,9 +109,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 
 ## 部署不变量(必读)
 
-- **一个 loader 行只能有一个来源。** `dsh-project-memory` 声明了 `dsh.bundle`,它的行由 bundle 层(包自带 `cordis.patch.yml`)提供;profile 层**不能**再写 `- id: project-memory`。两层若同时提供同一个 id,`applyEntryPatches` 不会去重,Loader 会 fail-loud 抛 `TypeError: duplicate loader entry id`,dsh 直接起不来。`install.ps1` 会**先**删掉 profile 行再装 bundle(若 bundle 步骤失败则把行恢复回去);`deploy.ps1` 检测到两者并存会报 FAIL。
+- **一个 loader 行只能有一个来源。** 每个补丁都声明了 `dsh.bundle`,它的行由 bundle 层(包自带 `cordis.patch.yml`)提供;profile 层**不能**再写同 id 的 `- insert:` 行。两层若同时提供同一个 id,`applyEntryPatches` 不会去重,Loader 会 fail-loud 抛 `TypeError: duplicate loader entry id`,dsh 直接起不来。`install.ps1` 会**先**剥离 profile 遗留行再装 bundle(若 bundle 安装失败则把该行原样恢复回去);`deploy.ps1` 检测到「bundle 已声明但未登记」或「profile 层插入了已在 `dsh.profile.bundles` 里的名字」都会报 FAIL。
   注意 `dsh plugin add` / `dsh plugin update --profile desktop` 会自行把声明了 `dsh.bundle` 的依赖补进 `dsh.profile.bundles`,所以不要"为了保险"两边都写。
-- 其余 7 个补丁都是目录包:junction + profile 层 `- insert:` 行。
 - **不要在 `patches/` 下做递归扫描**:`patches/<p>/node_modules` 是指向 `~/.dsh/profiles/node_modules` 的 junction,而 profile 里的 `@local/*` 又指回 `patches/*`,形成环;`Get-ChildItem -Recurse` 之类的命令不会结束。
 
 ## 故障恢复
@@ -165,13 +174,18 @@ DSH 桌面端对 profile 的 `cordis.patch.yml` 内置热加载(`watchUserPatche
     `{ ok, ... }` JSON 信封即在册,落进 SPA 兜底(非 JSON 的 404/405)即不在册。
   - `install.ps1` 因此只在内容真的变化时才写该文件(无变化时 mtime 不变,不再触发
     无谓的整层重载)。
+- **profile manifest(`package.json`)改动热应用**(2026-09-24 实测:`install.ps1`
+  通过桌面 CLI 把 6 个补丁登记进 `dsh.profile.bundles` 并剥离 profile 层遗留行,
+  运行中的宿主数秒内挂上 bundle 行,四条 host 路由全部 200,无需重启)。
 - **补丁源码(仓库文件)改动不热加载**:模块级 HMR 对 `node_modules` 下的补丁不生效;
   改完源码需**重启桌面端**(`scripts/restart-desktop.ps1`,会结束当前会话,请在空闲时进行);
 - **client 半源码改动会被重新下发**:client-modules 的 HMR 会让该行改用新的
   bundle rev(实测改 `patches/temp-session/lib/client.js` 后,index 的
   `__DSH_BOOT__` 里该行 rev 从批次 rev 变成独立的 `73afc512e22f`),已打开的页面
   刷新即得新代码 —— 这也是能在不重启的情况下验证客户端修复的原因。
-- bundle / profile manifest(`package.json` 的 `dsh.*`)改动需重启。
+- **包内 `cordis.patch.yml`(bundle 层文件)不在监视范围**:改它的行结构需重启
+  (或触碰任一被监视文件触发重读);补丁**源码**改动同理需重启
+  (`scripts/restart-desktop.ps1`,会结束当前会话,请在空闲时进行)。
 
 ## 测试
 

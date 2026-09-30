@@ -15,7 +15,8 @@ capability" —— 同一路由下各模型的档位不一致,提供方级别的
 | --- | --- |
 | 省略 | 跟随内置目录能力(自定义模型 = 无) |
 | `false` | 明确为非推理模型,模型菜单不出现「推理等级」 |
-| `{off: null, low: low, ...}` | 开启思考;`off` 档 = 不发送思考参数,其余档发送各自的值 |
+| `{off: null, low: low, ...}` | 开启思考;`off` 档留空 = 不发送思考参数,其余档发送各自的值 |
+| `{off: none, high: high, ...}` | `off` 档也可带显式值(如 `none`):选中「关闭」时照样上线 —— 供默认就会思考、必须显式传参才关的网关用 |
 
 官方把这块留给 `settings.yaml` 手写。本补丁用官方预留的外部扩展位
 (`settings.models.provider-card`,按 settings 命名空间分发)把 UI 补上。
@@ -26,9 +27,9 @@ capability" —— 同一路由下各模型的档位不一致,提供方级别的
    **思考配置**。
 2. 每个模型一行:**思考** 开关 + 状态(未配置 / 思考已关闭 / 思考已开启)。
    打开开关即进入档位编辑(默认档位:`关闭/低/中/高/最高`)。
-3. 「档位」展开后,逐档勾选,并为每个思考档填写**发送值**(关闭档固定为
-   「不发送参数」;发送值默认与档位同名,例如 `low` 就填 `low` ——
-   具体拼写以提供方网关为准)。
+3. 「档位」展开后,逐档勾选,并为每个档位(含**关闭**档)填写**发送值**
+   (发送值默认与档位同名,例如 `low` 就填 `low` —— 具体拼写以提供方网关
+   为准;关闭档留空即「不发送参数」,占位符会提示)。
 4. 点 **保存**,写入 `settings.yaml`;模型菜单立即出现「推理等级」。
    失败(校验/权限拒绝)会在卡片内提示:配置未生效 —— 此时草稿保留在界面上,
    可直接改完重试,或点「放弃」回到已落库的状态。
@@ -38,11 +39,12 @@ capability" —— 同一路由下各模型的档位不一致,提供方级别的
 - **扩展位**:`settings.models.provider-card`(keyed,`entryKey` = 提供方的
   settings 命名空间);本补丁以 `key: 'llm-pi-ai'` 注册,一次注册覆盖所有
   pi-ai 提供方卡片。
-- **数据通道**:官方设置传输面 —— `ctx.settingsScope.bind({namespace:
-  'llm-pi-ai'})`:读走共享 describe 镜像(`getSnapshot()`/`subscribe()`),写走
-  该 scope 的路径操作(`scope.mutate([{op:'set',path,value}])`,带 revision
-  栅栏);底层的 `remote.settings` 调用由 scope 控制器持有,所以本补丁 inject
-  的是 `settingsScope`。不新增 RPC 通道,宿主始终是唯一事实来源。
+- **数据通道**:官方设置传输面 —— `ctx.configForms.get('llm-pi-ai')`(0.1.7-alpha.1
+  起由 `settingsScope.bind({namespace})` 改名而来):读走共享 describe 镜像
+  (`getSnapshot()`/`subscribe()`),写走该 scope 的路径操作
+  (`scope.mutate([{op:'set',path,value}])`,带 revision 栅栏);底层的
+  `remote.settings` 调用由 scope 控制器持有,所以本补丁 inject 的是
+  `configForms`。不新增 RPC 通道,宿主始终是唯一事实来源。
 - **写入形状**:一条 `set` 路径操作覆盖 `providers.<路由>.models` **整个数组**
   (路径操作不能按数组下标深入 —— `applyPathOp` 会把数组展开成普通对象)。
   未改动的模型原样透传。
@@ -67,5 +69,6 @@ node patches/ui-settings-model-reasoning/tests/load-smoke.mjs
 node patches/ui-settings-model-reasoning/verify-model-reasoning.mjs
 ```
 
-修改 `lib/*.js` 后需重启 dsh(源码变更不热更);`cordis.patch.yml` 条目变更
-数秒热生效。
+修改 `lib/*.js` 后需重启 dsh(源码变更不热更);包内 `cordis.patch.yml` 的行
+结构变更也需重启(bundle 层文件不在 HMR 监视范围)。装载方式见仓库根
+`scripts/install.ps1`(全部补丁统一装成 bundle:pnpm link + `dsh.profile.bundles`)。

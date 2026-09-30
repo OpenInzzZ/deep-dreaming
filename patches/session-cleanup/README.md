@@ -4,47 +4,39 @@
 (`$DSH_HOME/sessions`,默认 `~/.dsh/sessions`),**跳过当前活跃会话**。
 防止长时间使用后 `sessions` 目录无限膨胀占用磁盘。
 
-- 插件类型:目录包插件(包名 `@local/dsh-plugin-session-cleanup`),通过
-  `cordis.patch.yml` 的 `insert` 装载,不修改 dsh 源码。
+- 插件类型:**bundle**(包名 `@local/dsh-plugin-session-cleanup`),loader 行由
+  包内 `cordis.patch.yml` 自带,通过 pnpm link 进 profile + 登记
+  `dsh.profile.bundles` 装载,不修改 dsh 源码。
 - 清理对象:`<sessions根>/<项目>/session-<n>/` 形态的归档目录;活跃会话
   由 `sessions` 服务实时列表识别并跳过。
 - 双重规则:超龄删除(带最少保留数保护)+ 总容量超限时按最旧优先删。
 
 ## 安装与部署
 
-与 ui-settings-* 插件相同的机制:实现来源在本仓库,部署侧建立 junction
-链接 + patch 条目。
+推荐仓库根一键:
 
 ```powershell
-# 在仓库根执行:\$repo = (Resolve-Path .).Path
-# 1. 建立指向本目录的目录联接(junction)
-New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-plugin-session-cleanup" -Target "$repo\patches\session-cleanup"
-
-# 2. 在 ~/.dsh/profiles/desktop/cordis.patch.yml 中追加启用条目
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
 
-```yaml
-# ~/.dsh/profiles/desktop/cordis.patch.yml
-- insert:
-    - id: session-cleanup
-      name: '@local/dsh-plugin-session-cleanup'
-      config:
-        maxAgeDays: 30
-        maxTotalMB: 1024
-        keepSessions: 5
-        intervalMinutes: 360
-        dryRun: false
+手工方式(路径用变量,不写死):
+
+```powershell
+# 在仓库根执行:$repo = (Resolve-Path .).Path
+# 先删掉 profile 层旧的 - insert: 行(若存在),避免两层同 id 启动中断
+& "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" `
+    plugin --profile desktop add "$repo\patches\session-cleanup"
 ```
 
-> 旧版本通过 `~/.dsh/cordis.patch.yml` 的 `file://` URL 直接加载单文件;
-> 已迁移为包名形式(插件管理页按 `@local/...` 显示)。若迁移前安装过,
-> 记得删除 home 层的旧条目,避免重复加载。
+CLI 检测到包声明的 `dsh.bundle` 后会自动完成 pnpm link + 登记
+`dsh.profile.bundles`;loader 行来自包内 `cordis.patch.yml`(见该文件)。
 
-3. **保存即生效,无需重启**:DSH 桌面端对 `cordis.patch.yml` 内置热加载
-   (`watchUserPatches`),条目增删/配置修改保存后数秒内事务性生效(host 与
-   client 半都重新装载),**不中断会话** —— 前提是文件内容确有真实变化
-   (增删行、改 `config`);`Entry.update` 对 options 做深比较,只改注释、
-   或写回一份内容等价的文件都**不会**触发重挂。
+> ⚠️ **不要**再往 `~/.dsh/profiles/desktop/cordis.patch.yml` 手工
+> `- insert:` 本插件的行 —— 两层同 id 会让下次启动 fail-loud 中断
+> (`TypeError: duplicate loader entry id`)。`scripts/deploy.ps1` 会检测这一状态。
+
+3. **配置热生效**:插件页/设置里的配置修改写入设置文档,数秒内生效;
+   改包内 `cordis.patch.yml` 的行结构则需重启(bundle 层文件不在 HMR 监视范围)。
    **修改本补丁源码后需重启 DSH 桌面端** 才生效(`scripts/restart-desktop.ps1`)。
 
 启动时立即执行一次清理,之后按 `intervalMinutes` 周期执行。
@@ -63,16 +55,17 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 
 **验证规则是否符合预期**(推荐先演练):
 
-1. 在 `cordis.patch.yml` 把 `dryRun` 改为 `true`,重启,观察日志 —— 只报告
-   将要删除的会话,不实际删除;
-2. 确认无误后改回 `false` 重启生效。
+1. 在**设置卡片**把 `dryRun` 保存为 `true`(即时生效),观察日志 —— 只报告
+   将要删除的会话,不实际删除;或改包内 `cordis.patch.yml` 的 `config.dryRun`
+   后重启(bundle 层文件不在 HMR 监视范围);
+2. 确认无误后改回 `false` 生效。
 
 **临时手动清理**:想立即触发一次,重启 dsh 即可(启动时自动清理一次)。
 
 ## 配置方式
 
 配置来源(优先级从低到高):schema 默认值 < 组合层条目配置
-(`cordis.patch.yml` 的 `config`)< 设置文档用户层。**推荐在界面配置**:
+(包内 `cordis.patch.yml` 的 `config`)< 设置文档用户层。**推荐在界面配置**:
 
 1. 打开 DSH 桌面端 → **设置** → **插件** → **插件配置** 标签页;
 2. 找到 **会话清理** 卡片,展开即可编辑全部字段;
@@ -141,10 +134,11 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 
 ## 卸载
 
-1. 删除 `~/.dsh/profiles/desktop/cordis.patch.yml` 中的 `session-cleanup` 条目
+1. 插件管理页「已安装」卡片卸载,或命令行:
+   `dsh plugin --profile desktop remove @local/dsh-plugin-session-cleanup`
    (**热生效**:数秒后清理任务停止、`/session-cleanup` 路由注销);
-2. 删除 `~/.dsh/profiles/node_modules/@local/dsh-plugin-session-cleanup`
-   链接。
+2. 可选:删除 `~/.dsh/profiles/node_modules/@local/dsh-plugin-session-cleanup`
+   解析兜底链接(源码留在仓库,重装即可恢复)。
 
 ## 测试
 

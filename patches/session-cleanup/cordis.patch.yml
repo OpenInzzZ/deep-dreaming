@@ -1,0 +1,18 @@
+# session-cleanup: 按天数/容量定期清理归档会话日志（bundle 层行）。
+#
+# 本包声明了 dsh.bundle（package.json -> dsh.bundle.patch），此文件由 dsh 在
+# 加载 profile 时自动作为 bundle 层合成；**不要**再往 profile 的
+# cordis.patch.yml 里 insert 同名行 —— 两层同 id 会让启动 fail-loud 抛
+# `TypeError: duplicate loader entry id`。
+#
+# 行上的 config 是组合层默认值；设置卡片的用户修改写在设置文档里，
+# 优先级高于这里（见 session-cleanup.mjs 的配置分层注释）。
+- insert:
+    - id: session-cleanup
+      name: '@local/dsh-plugin-session-cleanup'
+      config:
+        maxAgeDays: 30
+        maxTotalMB: 1024
+        keepSessions: 5
+        intervalMinutes: 360
+        dryRun: false

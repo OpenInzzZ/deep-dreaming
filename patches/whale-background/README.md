@@ -43,21 +43,21 @@
 
 ## 安装
 
-`scripts/install.ps1` 会自动建 junction 并补 patch 条目,或手工:
+`scripts/install.ps1` 会把全部补丁装成 bundle(junction 兜底 + pnpm link +
+登记 `dsh.profile.bundles`),或手工:
 
 ```powershell
-New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-whale-background" -Target "<repo>\patches\whale-background"
+# 在仓库根执行:$repo = (Resolve-Path .).Path
+# 先删掉 profile 层旧的 - insert: 行(若存在),避免两层同 id 启动中断
+& "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" `
+    plugin --profile desktop add "$repo\patches\whale-background"
 ```
 
-然后在 `~/.dsh/profiles/desktop/cordis.patch.yml` 添加:
+loader 行来自包内 `patches/whale-background/cordis.patch.yml`(勿在 profile 层
+重复 `- insert:` 同名行,两层同 id 会让下次启动 fail-loud 中断)。
 
-```yaml
-- insert:
-    - id: whale-background
-      name: '@local/dsh-client-whale-background'
-```
-
-条目热生效(数秒);本补丁**源码**改动需重启 DSH 桌面端。验证路由是否在服务:
+行结构改动需重启(bundle 层文件不在 HMR 监视范围);本补丁**源码**改动同样
+需重启 DSH 桌面端。验证路由是否在服务:
 
 ```powershell
 Invoke-WebRequest http://127.0.0.1:19387/whale-background.png -UseBasicParsing | Select-Object StatusCode, RawContentLength

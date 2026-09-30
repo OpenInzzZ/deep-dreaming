@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**deep-dreaming** is a personal DSH (DeepSeek Harness) user-level patch collection. Each patch extends DSH through the official Cordis plugin mechanism: directory patches are junction-linked into `~/.dsh/profiles/node_modules/@local/` and registered in a profile's `cordis.patch.yml`, while a *bundle* patch is installed into the profile and registered in `dsh.profile.bundles`.
+**deep-dreaming** is a personal DSH (DeepSeek Harness) user-level patch collection. Each patch extends DSH through the official Cordis plugin mechanism and is deployed as a **bundle**: the package declares `dsh.bundle.patch`, ships its own `cordis.patch.yml` (the loader row lives there), and `install.ps1` links it into the profile with pnpm and registers it in `dsh.profile.bundles`. A profile-layer `- insert:` row for the same id is a migration leftover and must never coexist with the bundle row (see "One owner per loader row").
 
 - **Target: the DSH DESKTOP app** (Electron, `@deepseek-ai/dsh-desktop`). The profile is `~/.dsh/profiles/desktop`; the host is the packaged runtime `resources/app.asar/dsh` (currently **0.2.0-rc.2**), launched by `dsh-desktop-host` with `--no-open --port 19387`. `dsh web` (npx-cached CLI, ports 3080-3100) is **legacy and no longer maintained**: its lifecycle scripts are archived under `archive/web-scripts/` — see `archive/README.md`.
 - **Repo**: `D:\GitHub\deep-dreaming` (clonable anywhere; no hardcoded absolute paths)
@@ -30,7 +30,7 @@ deep-dreaming/
 ├── README.md                      # Project overview + patch catalog + deploy guide
 ├── package.json                   # Test-only dev deps (react / react-dom / jsdom); `npm test`
 ├── scripts/
-│   ├── install.ps1                # One-shot: junctions + patch entries + memory bundle + Memorix setup
+│   ├── install.ps1                # One-shot: junctions + bundle installs (pnpm link + dsh.profile.bundles, strips legacy rows first) + Memorix setup + deploy check
 │   ├── deploy.ps1                 # Read-only check: junctions/entries/row ownership + store health + script/asset sync
 │   ├── start-desktop.ps1          # Start the DSH desktop app (focus the window when already running)
 │   ├── restart-desktop.ps1        # Restart the desktop app (source changes need it); -Force required
@@ -101,13 +101,18 @@ Every patch is a Cordis plugin with a host half and optionally a client (browser
     "./locale/*.json": "./locale/*.json"
   },
   "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
     "client": {
       "inject": ["@deepseek-ai/dsh-client-connection", ...],
       "platform": "web"
     }
-  }
+  },
+  "files": ["lib", "client.js", "cordis.patch.yml", "locale", "README.md"]
 }
 ```
+
+- **`dsh.bundle.patch` is mandatory for every patch in this repo.** It points at the package's own `cordis.patch.yml`, which carries the one `- insert:` loader row for the patch (id + name + optional config defaults). The bundle layer owns that row; the profile layer must not duplicate it.
+- Keep `cordis.patch.yml` inside `files` when the field is present: a `file:`-protocol install packs only `files`, and a row that falls out of the package silently unloads the plugin.
 
 ### Plugin Display Metadata
 
@@ -174,8 +179,9 @@ Every patch ships `locale/en.json` + `locale/zh.json` so the plugin management p
 
 ### Hot-swap
 - `cordis.patch.yml` changes are watched by `watchUserPatches` — edits take effect in seconds without restart. The whole user layer is unloaded and remounted transactionally; running sessions and the durable inbox survive.
+- The **profile manifest** (`~/.dsh/profiles/desktop/package.json`) is watched too: registering a bundle in `dsh.profile.bundles` (or `install.ps1` stripping a legacy row) hot-applies on the running app — measured end-to-end, no restart needed for the migration.
 - Only a **data** change re-applies: `Entry.update` deep-compares options, so a comment-only rewrite (or writing back an equivalent file) parses to the same patch list and mounts nothing. Edit rows / `config`; there is no manual "reload" button any more (the old one only touched a comment line and therefore never reloaded anything).
-- **Patch source code changes require a restart** (`scripts/restart-desktop.ps1`). Modules under `node_modules` are not HMR-watched.
+- **Not watched:** a bundle's own `cordis.patch.yml` (it lives in `patches/`, outside the watched set) and patch source files. Row-structure edits inside a bundle yml and any source change need a restart (`scripts/restart-desktop.ps1`); a reload triggered by any watched file re-reads the bundle layers as a side effect.
 
 ### Restarting
 - The desktop app owns its lifecycle: the host is an Electron child process on `127.0.0.1:19387`, and **the current session runs inside it**. `scripts/restart-desktop.ps1` therefore refuses to act without `-Force`, and the running session dies with the old host — that is expected, not a failure.
@@ -187,12 +193,13 @@ Every patch ships `locale/en.json` + `locale/zh.json` so the plugin management p
 - To boot the desktop profile without its user layer today, move `~/.dsh/profiles/desktop/cordis.patch.yml` aside and restart the app. (The packaged CLI does support `--dump-config` / `--dump-default-config` for inspection — see `resources/runtime/cli/bin/dsh.cmd`.)
 
 ### Junction Links
-- Directory-package patches are linked via NTFS junctions:
+- Every patch is installed as a **bundle** (see "Patch Architecture"): `install.ps1` links it into the profile with pnpm and registers it in `dsh.profile.bundles`; the bundle's own `cordis.patch.yml` (declared as `dsh.bundle.patch`) supplies its loader row.
   ```
-  ~/.dsh/profiles/node_modules/@local/<name> → <repo>/patches/<dir>
+  ~/.dsh/profiles/desktop/node_modules/<name> -> <repo>/patches/<dir>   (pnpm link:)
+  ~/.dsh/profiles/node_modules/@local/<name>  -> <repo>/patches/<dir>   (install.ps1 junction, resolution fallback)
   ```
-- Bundle patches (like `dsh-project-memory`) are installed via `pnpm add` into the profile and registered in `dsh.profile.bundles`; the bundle's own `cordis.patch.yml` (declared as `dsh.bundle.patch`) supplies its loader row.
-- **One owner per loader row.** `dsh-project-memory` declares `dsh.bundle`, so `dsh plugin add` / `dsh plugin update --profile desktop` reconciles it *into* `dsh.profile.bundles` automatically. If the profile layer also inserts `id: project-memory`, both layers contribute the same row id and the boot aborts fail-loud with `TypeError: duplicate loader entry id: project-memory`. `install.ps1` converges on the bundle owner (it strips the profile row first, and restores it if the bundle step fails); `deploy.ps1` fails the check when both are present.
+  Keep both: the pnpm link answers `resolveBundleDir` from the profile manifest, the `@local` junction keeps bare-name resolution working from any anchor under `~/.dsh/profiles` even if the profile-local link is missing (e.g. before the first `pnpm install`).
+- **One owner per loader row.** Each package declares `dsh.bundle`, so `dsh plugin add` / `dsh plugin update --profile desktop` reconciles it *into* `dsh.profile.bundles` automatically. If the profile layer also inserts the same row id, both layers contribute it and the boot aborts fail-loud with `TypeError: duplicate loader entry id: <id>`. `install.ps1` converges on the bundle owner (it strips the profile row first, and restores it if the bundle step fails); `deploy.ps1` fails the check when a bundle-declaring patch is not registered, or when the profile layer inserts a row whose name is also in `dsh.profile.bundles`.
 
 ### Host Dependencies
 - Patches import `@deepseek-ai/*` (host packages). Node resolves from the real repo path, so the repo needs a junction:
@@ -212,6 +219,7 @@ Each patch includes its own tests co-located in its directory. `npm install` onc
 # Infrastructure (discovery + store health)
 node scripts/desktop-install.test.mjs
 node scripts/verify-plugin-meta.mjs
+node scripts/verify-bundle-rows.mjs
 
 # Pure logic tests (no DSH runtime needed)
 node patches/session-cleanup/session-cleanup.test.mjs
@@ -258,7 +266,7 @@ The bridge owns no storage, no tools and no settings namespace — Memorix's own
 3. **Don't use the `/api` RPC channel** — it's owned by the Typert gateway. Register your own fenced route.
 4. **Client code: no JSX, no TypeScript, no imports** — only `require()` from the frozen module table.
 5. **Don't hardcode paths** — use `homedir()`, `import.meta.url`, `fileURLToPath`, `$PSScriptRoot` in scripts.
-6. **One owner per loader row** — `dsh-project-memory` is a *bundle* (pnpm-installed + `dsh.profile.bundles`); every other patch is a directory patch (junction + `cordis.patch.yml` row). A bundle that is also inserted by the profile layer aborts the boot with `duplicate loader entry id`. `dsh plugin add/update` re-adds a `dsh.bundle`-declaring dependency to `dsh.profile.bundles` on its own, so never "fix" things by writing both. Details in "Junction Links".
+6. **One owner per loader row** — every patch is a *bundle* (declares `dsh.bundle`, ships its own `cordis.patch.yml`, pnpm-linked + listed in `dsh.profile.bundles`); its loader row lives only in the package. A profile-layer `- insert:` row for the same id composes a second entry and aborts the boot with `duplicate loader entry id`. `dsh plugin add/update` re-adds a `dsh.bundle`-declaring dependency to `dsh.profile.bundles` on its own, so never "fix" things by writing both. Details in "Junction Links".
 7. **Source changes need restart** — editing patch code under `patches/` does NOT hot-reload. Only `cordis.patch.yml` edits hot-reload. Restart via `scripts/restart-desktop.ps1`.
 8. **Live settings rebuild resources** — when a settings change (or `applies: live`) rebuilds a timer, monitor or route, dispose the old one before creating the new one, and let the disposer survive an unload in progress. Cordis disposes effects in **reverse** registration order, so a "disposed" flag set by a later-registered effect is still `false` while an earlier one runs.
 9. **Never read or write these files with a bare `Get-Content` / `Set-Content`** — Windows PowerShell 5.1 decodes a no-BOM UTF-8 file with the ANSI code page, so every Chinese comment comes back as mojibake (and a full read-modify-write rewrites it that way permanently; this already happened once to the live `cordis.patch.yml`). Use `-Encoding UTF8` on reads, and `[System.IO.File]::WriteAllText($path, $text, [System.Text.UTF8Encoding]::new($false))` for writes. `scripts/install.ps1` and `scripts/deploy.ps1` define `Read-Utf8` / `Write-Utf8` helpers for exactly this. **The same decoding applies to a `.ps1` file's own source**, so pick one of two shapes: a script that prints non-ASCII (e.g. `scripts/start-desktop.ps1`'s Chinese console lines) **must carry a UTF-8 BOM** — `scripts/start-desktop.ps1` and `scripts/restart-desktop.ps1` both do — while a no-BOM script must stay **pure ASCII** (`scripts/install.ps1`, `scripts/deploy.ps1`, and the archived `update-dsh.ps1`), because PS 5.1 otherwise decodes it as ANSI and even a string literal reaches the console as mojibake (one em dash in a `Log "..."` line was enough; measured). The archived `archive/web-scripts/{stop-dsh,patch-cli}.ps1` had been missing it since the web era and were fixed when they were archived. Also note `"$A-$B"` parses as a drive-qualified variable: write `"${A}-${B}"`.
@@ -283,16 +291,16 @@ The bridge owns no storage, no tools and no settings namespace — Memorix's own
 ## Adding a New Patch
 
 1. Create `patches/<name>/` with:
-   - `package.json` (follow conventions above)
+   - `package.json` (follow conventions above — including the mandatory `dsh.bundle.patch`)
+   - `cordis.patch.yml` (the package's own loader row: one `- insert:` block with id + name)
    - `lib/index.js` (host half: `export function apply(ctx, config)`)
    - `lib/client.js` (optional, client half)
+   - `locale/en.json` + `locale/zh.json`
    - `README.md`
    - Tests
-2. Add to `scripts/install.ps1`:
-   - Junction link mapping in `$links`
-   - Patch entry in `$entries`
-3. Run `scripts/deploy.ps1` to validate (junctions, entries, row ownership, host dependency links, script/asset sync).
-4. For a bundle patch (a package that ships its own `cordis.patch.yml` + `dsh.bundle.patch`): register it in `dsh.profile.bundles` only — never also insert its row in the profile layer. For a directory patch: junction + `cordis.patch.yml` row only.
+2. Add to `scripts/install.ps1` (`$bundlePatchDirs`) and `scripts/deploy.ps1` (`$bundlePatchDirs`) so both scripts install and verify it, and add its host-dependency dir to `deploy.ps1`'s `$depPlugins`.
+3. Run `scripts/install.ps1` (pnpm-links the package, registers `dsh.profile.bundles`, strips any stale profile row) and then `scripts/deploy.ps1` to validate (junctions, bundle registration, row ownership, host dependency links, script/asset sync).
+4. **Never** also insert the patch's row in the profile layer — the bundle owns it; a second owner aborts the boot with `duplicate loader entry id`.
 5. If the patch has a browser half that needs host data or actions, copy `createRpcRoute` from `patches/ui-queue-tools/lib/index.js` and register it inside a dependency that **declares `webServer`** (`inject: ['webServer', …]` or `ctx.inject(['webServer', …])`) — never read the carrier with `ctx.get` during activation, and do **not** register a `connection.rpc` channel (see "Client ↔ Host transport").
 6. **Check what DSH already ships before building UI.** The desktop app's own bundles already cover a lot (account page with balances, theme, shortcuts, plugin inventory…). A user patch that re-renders an existing view adds a second sidebar entry and drifts out of sync with the official copy — that is exactly how the retired `ui-settings-balance` failed. Grep the DSH source checkout (`packages/client/ui-*`) for the feature first.
 

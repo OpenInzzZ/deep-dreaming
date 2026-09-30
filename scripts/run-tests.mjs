@@ -27,6 +27,7 @@ const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 const CHECKS = [
   { path: 'scripts/desktop-install.test.mjs', label: 'desktop-install: discovery + store alignment' },
   { path: 'scripts/verify-plugin-meta.mjs', label: 'plugin metadata: locale titles/descriptions resolve' },
+  { path: 'scripts/verify-bundle-rows.mjs', label: 'bundle rows: dsh.bundle declarations + cordis.patch.yml structure' },
   { path: 'patches/session-cleanup/session-cleanup.test.mjs', label: 'session-cleanup: cleanup rules' },
   { path: 'patches/session-cleanup/verify-session-cleanup.mjs', label: 'session-cleanup: settings + card' },
   { path: 'patches/session-cleanup/tests/load-smoke.mjs', label: 'session-cleanup: real Cordis load' },

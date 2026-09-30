@@ -1,0 +1,9 @@
+# ui-queue-tools: 排队消息 hover 预览 + 拖动排序（bundle 层行）。
+#
+# 本包声明了 dsh.bundle（package.json -> dsh.bundle.patch），此文件由 dsh 在
+# 加载 profile 时自动作为 bundle 层合成；**不要**再往 profile 的
+# cordis.patch.yml 里 insert 同名行 —— 两层同 id 会让启动 fail-loud 抛
+# `TypeError: duplicate loader entry id`。
+- insert:
+    - id: ui-queue-tools
+      name: '@local/dsh-client-ui-queue-tools'

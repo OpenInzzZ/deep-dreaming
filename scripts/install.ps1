@@ -1,10 +1,12 @@
 # install.ps1 - one-shot user install for a fresh clone of deep-dreaming.
 #
 # Targets the DSH **desktop** app (Electron) by default: it links every patch into
-# the profile, merges the patch-layer entries, aligns the shared host-dependency
-# store to the installation that actually loads the patches, installs the
-# dsh-project-memory bundle with the desktop's own CLI, wires Memorix, and runs the
-# deploy check. Run from ANY machine after cloning - no hardcoded repo paths inside:
+# the shared store, aligns the shared host-dependency store to the installation
+# that actually loads the patches, installs every patch as a BUNDLE (pnpm link +
+# dsh.profile.bundles registration, its loader row living in the package's own
+# cordis.patch.yml; legacy profile-layer insert rows are stripped first and
+# restored if an install fails), wires Memorix, and runs the deploy check.
+# Run from ANY machine after cloning - no hardcoded repo paths inside:
 #
 #   powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 #
@@ -13,7 +15,7 @@
 #   -InstallRoot <dir>  DSH desktop installation root (default: auto-detect)
 #   -SkipMemoryBundle   skip the dsh-project-memory install + bundles step
 #   -SkipMemorix        skip the Memorix global install + dsh setup step
-#   -Force              overwrite existing junctions/entries (default: keep)
+#   -Force              overwrite existing junctions (default: keep)
 param(
     [string]$Profile = 'desktop',
     [string]$InstallRoot = '',
@@ -37,6 +39,54 @@ function Read-Utf8([string]$Path) {
 function Write-Utf8([string]$Path, [string]$Text) {
     # UTF8Encoding($false) => no BOM, which is what the dsh patch watcher expects.
     [System.IO.File]::WriteAllText($Path, $Text, [System.Text.UTF8Encoding]::new($false))
+}
+
+# Run a native command and judge it by its exit code. Under
+# $ErrorActionPreference = 'Stop', piping native STDERR into the pipeline turns
+# the first stderr line into a terminating NativeCommandError (AGENTS pitfall),
+# so flip to 'Continue' locally and discard output instead of failing on it.
+function Invoke-Native([string]$FilePath, [string[]]$ArgumentList) {
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $FilePath @ArgumentList 2>&1 | Out-Null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+}
+
+# Current bundle-registration state of the profile manifest: which package names
+# are profile dependencies (drive the plugin-page card) and which are listed in
+# dsh.profile.bundles (make the bundle layer mount its loader row). Both are
+# required for a bundle to fully own its row.
+function Read-BundleState([string]$Path) {
+    $json = if (Test-Path $Path) { Read-Utf8 $Path | ConvertFrom-Json } else { $null }
+    $deps = @()
+    $bundles = @()
+    if ($null -ne $json) {
+        if ($null -ne $json.dependencies) { $deps = @($json.dependencies.PSObject.Properties.Name) }
+        if ($null -ne $json.dsh -and $null -ne $json.dsh.profile) { $bundles = @($json.dsh.profile.bundles) }
+    }
+    return @{ Deps = $deps; Bundles = $bundles }
+}
+
+# Append one package to dsh.profile.bundles, creating the object path when the
+# manifest lacks it. `dsh plugin add` does this itself; this covers the pnpm
+# fallback path and is a no-op once the entry is there.
+function Add-BundleRegistration([string]$Path, [string]$ProfileName, [string]$PackageName) {
+    $json = if (Test-Path $Path) { Read-Utf8 $Path | ConvertFrom-Json } else { $null }
+    if ($null -eq $json) {
+        $json = [pscustomobject]@{ name = "dsh-profile-$ProfileName"; private = $true; dependencies = @{} }
+    }
+    if ($null -eq $json.dsh) { $json | Add-Member -NotePropertyName dsh -NotePropertyValue ([pscustomobject]@{}) }
+    if ($null -eq $json.dsh.profile) { $json.dsh | Add-Member -NotePropertyName profile -NotePropertyValue ([pscustomobject]@{}) }
+    if ($null -eq $json.dsh.profile.bundles) { $json.dsh.profile | Add-Member -NotePropertyName bundles -NotePropertyValue @() }
+    $list = @($json.dsh.profile.bundles) + $PackageName
+    $json.dsh.profile.bundles = @($list | Select-Object -Unique)
+    Write-Utf8 $Path ($json | ConvertTo-Json -Depth 8)
 }
 
 $dev = Split-Path -Parent $PSScriptRoot                  # this repo (auto-derived)
@@ -230,40 +280,18 @@ foreach ($l in $links) {
     Write-Host "  [OK] linked $($l.n)"
 }
 
-# --- 2. merge patch-layer entries (idempotent; keeps existing user rows) ------
-# The session-cleanup row carries the documented defaults.
-$entries = @(
-    @{ id = 'session-cleanup'; name = '@local/dsh-plugin-session-cleanup'; config = "`n        maxAgeDays: 30`n        maxTotalMB: 1024`n        keepSessions: 5`n        intervalMinutes: 360`n        dryRun: false" },
-    @{ id = 'ui-settings-model-reasoning'; name = '@local/dsh-client-ui-settings-model-reasoning'; config = '' },
-    @{ id = 'ui-queue-tools';             name = '@local/dsh-client-ui-queue-tools';             config = '' },
-    @{ id = 'temp-session';               name = '@local/dsh-client-ui-temp-session';             config = '' },
-    @{ id = 'whale-background';           name = '@local/dsh-client-whale-background';           config = '' }
-)
-$patchOriginal = Read-Utf8 $patchFile
-$patchContent = $patchOriginal
-foreach ($e in $entries) {
-    if ($patchContent -match "(?m)^\s*- id:\s*['`"]?$([regex]::Escape($e.id))['`"]?\s*$") {
-        Write-Host "  [OK] entry $($e.id) (already present)"
-        continue
-    }
-    $split = Split-Lines $patchContent
-    $block = "- insert:$($split.Eol)    - id: $($e.id)$($split.Eol)      name: '$($e.name)'"
-    if ($e.config -ne '') { $block += "$($split.Eol)      config:$($e.config -replace "`n", $split.Eol)" }
-    $patchContent = $patchContent.TrimEnd() + $split.Eol + $block + $split.Eol
-    Write-Host "  [OK] added entry $($e.id)"
-}
-# Write ONLY on a real change. dsh watches this file (watchUserPatches) and
-# re-applies the whole user layer on every write; a gratuitous rewrite is not
-# free -- a rewrite can leave the HOST half of an already-present row
-# unregistered until the next restart (the client half keeps loading, so the row
-# still looks present in the UI). Write-Utf8 rather than Set-Content: on Windows
-# PowerShell 5.1 the latter adds a BOM and this file is read back as UTF-8.
-if ($patchContent -eq $patchOriginal) {
-    Write-Host '  [OK] patch file unchanged (not rewritten: a needless write would reload the user layer)'
-} else {
-    Write-Utf8 $patchFile $patchContent
-    Write-Host '  [i] patch file rewritten -> the running dsh reloads the user layer; restart it before relying on host-side channels'
-}
+# --- 2. Strip legacy profile-layer insert rows (migration to bundle patches) ---
+# Every patch now declares `dsh.bundle` and ships its own cordis.patch.yml, so
+# its loader row belongs to the BUNDLE layer. A leftover profile-layer insert
+# for the same id composes TWO entries, and `applyEntryPatches` does not
+# de-duplicate: the Loader aborts fail-loud with
+# `TypeError: duplicate loader entry id: <id>` and dsh will not start.
+# The strip happens per patch inside step 3 (immediately before that patch's
+# bundle install) so a crash between the two steps can only ever leave ONE
+# patch without a row, and the removed block is stashed for restore on failure.
+$bundlePatchDirs = @('session-cleanup', 'ui-settings-model-reasoning', 'ui-queue-tools', 'temp-session', 'whale-background', 'dsh-project-memory')
+$removedRows = @{}
+$failed = 0
 
 # --- 2.5. Report the shared host-dependency store (READ-ONLY) -----------------
 # `~/.dsh/profiles/node_modules` is what answers every patch's host-side
@@ -296,95 +324,128 @@ if ($null -eq $discovery) {
     }
 }
 
-# --- 3. dsh-project-memory: EXACTLY ONE owner of the loader row ---------------
-# The package declares `dsh.bundle` and ships its own cordis.patch.yml with the
-# row `id: project-memory`, so it belongs to the BUNDLE layer. The profile layer
-# must never carry the same row at the same time: `applyEntryPatches` appends
-# bare `insert:` rows without de-duplicating, and the Loader then aborts the
-# whole boot with `TypeError: duplicate loader entry id: project-memory`.
-# Order matters: strip the profile row FIRST (a hot reload may unmount the
-# plugin for a moment - still never a duplicate-id boot failure), then install
-# the bundle. If the bundle step fails, the row is restored.
-if (-not $SkipMemoryBundle) {
-    $bundlesJson = if (Test-Path $profilePkg) { (Read-Utf8 $profilePkg | ConvertFrom-Json) } else { $null }
-    $inBundles = $bundlesJson -ne $null -and @($bundlesJson.dsh.profile.bundles) -contains 'dsh-project-memory'
-
-    # Pull the same entry out of step 2's merge if a previous run wrote it there.
-    $patchContent = Read-Utf8 $patchFile
-    $pruned = Remove-InsertRow -Content $patchContent -Id 'project-memory'
-    $rowPruned = $pruned.Removed -gt 0
-    if ($rowPruned) {
-        Write-Utf8 $patchFile $pruned.Content
-        Write-Host '  [FIX] removed the profile-layer row for project-memory (the bundle layer owns it)'
+# --- 3. Install every patch as a bundle (EXACTLY ONE owner per loader row) ----
+# A patch owns its row when the package is BOTH a profile dependency (the
+# plugin-page card and pnpm-managed node_modules entry) AND listed in
+# dsh.profile.bundles (the loader mounts the package's cordis.patch.yml layer).
+# Per patch: strip the legacy profile row FIRST (stash it), install, verify
+# both halves; a failure restores the stripped row so the patch keeps loading
+# as a directory patch - never leave a row with no owner, and never leave a
+# profile row next to the bundle row that now carries the same id.
+# Preferred path: the desktop app ships its own CLI (`resources\runtime\cli\bin\dsh.cmd`)
+# whose `dsh plugin --profile <name> add` runs pnpm with the bundled runtime and
+# reconciles `dsh.profile.bundles` for a package that declares `dsh.bundle` - exactly
+# the one owner each row needs. The pnpm fallback only adds the dependency, so
+# the bundle registration is appended manually afterwards.
+$desktopCli = $null
+if ($null -ne $discovery -and $discovery.ok) {
+    $candidate = Join-Path $discovery.installation.installRoot 'resources\runtime\cli\bin\dsh.cmd'
+    if (Test-Path $candidate) { $desktopCli = $candidate }
+}
+if (-not $desktopCli -and $InstallRoot -ne '') {
+    $candidate = Join-Path $InstallRoot 'resources\runtime\cli\bin\dsh.cmd'
+    if (Test-Path $candidate) { $desktopCli = $candidate }
+}
+foreach ($dir in $bundlePatchDirs) {
+    if ($dir -eq 'dsh-project-memory' -and $SkipMemoryBundle) { continue }
+    $manifestPath = Join-Path $dev "patches\$dir\package.json"
+    if (-not (Test-Path $manifestPath)) { continue }
+    $pkgName = (Read-Utf8 $manifestPath | ConvertFrom-Json).name
+    $rowId = $null
+    $bundleYml = Join-Path $dev "patches\$dir\cordis.patch.yml"
+    if (Test-Path $bundleYml) {
+        $idMatch = [regex]::Match((Read-Utf8 $bundleYml), '(?m)^\s*-\s+id:\s*[''"]?([^''"\r\n]+)')
+        if ($idMatch.Success) { $rowId = $idMatch.Groups[1].Value.Trim() }
     }
 
-    if (-not $inBundles) {
-        # Preferred path: the desktop app ships its own CLI (`resources\runtime\cli\bin\dsh.cmd`)
-        # whose `dsh plugin --profile <name> add` runs pnpm with the bundled runtime and
-        # reconciles `dsh.profile.bundles` for a package that declares `dsh.bundle` - exactly
-        # the one owner this row needs. The pnpm fallback below only rewrites the manifest.
-        $desktopCli = $null
-        if ($null -ne $discovery -and $discovery.ok) {
-            $candidate = Join-Path $discovery.installation.installRoot 'resources\runtime\cli\bin\dsh.cmd'
-            if (Test-Path $candidate) { $desktopCli = $candidate }
+    # Strip the legacy profile row BEFORE anything can mount the bundle row:
+    # a profile row + bundle row for the same id aborts the next boot.
+    if ($null -ne $rowId) {
+        $pruned = Remove-InsertRow -Content (Read-Utf8 $patchFile) -Id $rowId
+        if ($pruned.Removed -gt 0) {
+            Write-Utf8 $patchFile $pruned.Content
+            $removedRows[$rowId] = @{ Text = $pruned.RemovedText; At = $pruned.RemovedAt }
+            Write-Host "  [FIX] removed legacy profile-layer row '$rowId' for $pkgName (the bundle layer owns it now)"
         }
-        if (-not $desktopCli -and $InstallRoot -ne '') {
-            $candidate = Join-Path $InstallRoot 'resources\runtime\cli\bin\dsh.cmd'
-            if (Test-Path $candidate) { $desktopCli = $candidate }
-        }
-        $ok = $false
+    }
+
+    # Already fully a bundle? (idempotent re-run; the row above is gone either way)
+    $state = Read-BundleState $profilePkg
+    if (($state.Deps -contains $pkgName) -and ($state.Bundles -contains $pkgName)) {
+        Write-Host "  [OK] $pkgName already installed as a bundle"
+        continue
+    }
+
+    $spec = Join-Path $dev "patches\$dir"
+    $installed = $false
+    if (-not ($state.Deps -contains $pkgName)) {
         if ($desktopCli) {
-            Write-Host "  [..] installing dsh-project-memory bundle via the desktop CLI (profile $Profile)..."
-            try {
-                & $desktopCli plugin --profile $Profile add (Join-Path $dev 'patches\dsh-project-memory') 2>&1 | Out-Null
-                $ok = $LASTEXITCODE -eq 0
-            } catch { }
-            if (-not $ok) {
-                Write-Host '  [WARN] desktop CLI install failed; run manually:' -ForegroundColor Yellow
-                Write-Host "    `"$desktopCli`" plugin --profile $Profile add `"$dev\patches\dsh-project-memory`""
-            }
-        }
-        if (-not $ok) {
-            foreach ($pnpm in @('corepack pnpm', 'pnpm')) {
-                try {
-                    & $pnpm --dir $profileDir add (Join-Path $dev 'patches\dsh-project-memory') 2>&1 | Out-Null
-                    $ok = $LASTEXITCODE -eq 0
-                    if ($ok) { break }
-                } catch { }
-            }
-        }
-        if (-not $ok) {
-            Write-Host "  [WARN] bundle install failed; run manually:" -ForegroundColor Yellow
-            if ($desktopCli) {
-                Write-Host "    `"$desktopCli`" plugin --profile $Profile add `"$dev\patches\dsh-project-memory`""
-            } else {
-                Write-Host "    corepack pnpm --dir `"$profileDir`" add `"$dev\patches\dsh-project-memory`""
-            }
-            if ($rowPruned) {
-                # Never leave the plugin with no owner at all: put the exact block
-                # back where it was.
-                Write-Utf8 $patchFile (Restore-InsertRow -Content (Read-Utf8 $patchFile) -Block $pruned.RemovedText -Index $pruned.RemovedAt)
-                Write-Host '  [WARN] restored the profile-layer row so the plugin keeps loading' -ForegroundColor Yellow
+            Write-Host "  [..] installing $pkgName via the desktop CLI (profile $Profile)..."
+            $installed = Invoke-Native $desktopCli @('plugin', '--profile', $Profile, 'add', $spec)
+            if (-not $installed) {
+                Write-Host '  [WARN] desktop CLI install failed; trying pnpm directly' -ForegroundColor Yellow
             }
         } else {
-            # `dsh plugin add` reconciles bundles itself; this append covers the pnpm
-            # fallback and is a no-op once the entry is already there.
-            $bundlesJson = if (Test-Path $profilePkg) { (Read-Utf8 $profilePkg | ConvertFrom-Json) } else { $null }
-            $nowInBundles = $null -ne $bundlesJson -and @($bundlesJson.dsh.profile.bundles) -contains 'dsh-project-memory'
-            if ($nowInBundles) {
-                Write-Host '  [OK] dsh-project-memory installed and registered as a bundle'
+            Write-Host '  [WARN] desktop CLI not found (DSH desktop app not running?); trying pnpm directly' -ForegroundColor Yellow
+        }
+        if (-not $installed) {
+            # corepack ships with the repo's Node install; plain `pnpm` may not be on PATH.
+            $installed = Invoke-Native 'corepack' @('pnpm', '--dir', $profileDir, 'add', $spec)
+            if (-not $installed) { $installed = Invoke-Native 'pnpm' @('--dir', $profileDir, 'add', $spec) }
+        }
+        if (-not $installed) {
+            Write-Host "  [WARN] could not install $pkgName; run manually:" -ForegroundColor Yellow
+            if ($desktopCli) {
+                Write-Host "    `"$desktopCli`" plugin --profile $Profile add `"$spec`""
             } else {
-                if ($bundlesJson -eq $null) {
-                    $bundlesJson = [pscustomobject]@{ name = "dsh-profile-$Profile"; private = $true; dependencies = @{}; dsh = [pscustomobject]@{ profile = [pscustomobject]@{ bundles = @() } } }
-                }
-                $bundles = @($bundlesJson.dsh.profile.bundles) + 'dsh-project-memory'
-                $bundlesJson.dsh.profile.bundles = @($bundles | Select-Object -Unique)
-                Write-Utf8 $profilePkg ($bundlesJson | ConvertTo-Json -Depth 8)
-                Write-Host '  [OK] dsh-project-memory added to dsh.profile.bundles'
+                Write-Host "    corepack pnpm --dir `"$profileDir`" add `"$spec`""
             }
         }
     } else {
-        Write-Host '  [OK] dsh-project-memory already in dsh.profile.bundles'
+        # Dependency already present but the bundle layer not registered (an
+        # interrupted earlier run): registering needs no pnpm run at all.
+        $installed = $true
+    }
+
+    # Register the bundle layer only when the dependency really is there - a
+    # bundle entry without its pnpm link would mount a row that cannot import
+    # its host packages, and pairing it with the restored profile row would
+    # resurrect the duplicate-id abort.
+    $state = Read-BundleState $profilePkg
+    if ($installed -and ($state.Deps -contains $pkgName) -and -not ($state.Bundles -contains $pkgName)) {
+        Add-BundleRegistration $profilePkg $Profile $pkgName
+    }
+
+    # Verify both halves; restore the stripped row when the bundle could not be
+    # fully installed - a row with no owner must never be left behind, and a
+    # profile row + bundle row combination must never be left either.
+    $state = Read-BundleState $profilePkg
+    $inDeps = $state.Deps -contains $pkgName
+    $inBundles = $state.Bundles -contains $pkgName
+    if ($inDeps -and $inBundles) {
+        # pnpm's protocol decides whether the link is live: `link:` points at the
+        # repo (source edits need a restart to flush the module cache), `file:`
+        # copies into the store (source edits need a reinstall). Warn loudly on
+        # the copy so live development never silently goes stale.
+        $depValue = $null
+        $manifestJson = Read-Utf8 $profilePkg | ConvertFrom-Json
+        if ($null -ne $manifestJson.dependencies) {
+            $prop = $manifestJson.dependencies.PSObject.Properties[$pkgName]
+            if ($null -ne $prop) { $depValue = [string]$prop.Value }
+        }
+        if ($depValue -like 'file:*') {
+            Write-Host "  [WARN] $pkgName was installed as a file: copy, not a link: - source edits will NOT be live" -ForegroundColor Yellow
+        }
+        Write-Host "  [OK] $pkgName installed and registered as a bundle"
+    } else {
+        Write-Host "  [FAIL] ${pkgName}: not fully installed (dependency=$inDeps bundle=$inBundles)" -ForegroundColor Red
+        $failed++
+        if ($null -ne $rowId -and $removedRows.ContainsKey($rowId)) {
+            $stash = $removedRows[$rowId]
+            Write-Utf8 $patchFile (Restore-InsertRow -Content (Read-Utf8 $patchFile) -Block $stash.Text -Index $stash.At)
+            $removedRows.Remove($rowId)
+            Write-Host "  [WARN] restored the profile-layer row '$rowId' so the patch keeps loading" -ForegroundColor Yellow
+        }
     }
 }
 
@@ -442,13 +503,21 @@ if (-not $SkipMemorix) {
 }
 
 # --- 4. deploy check (junctions for host deps + script/assets sync) ------------
+# deploy.ps1 is the read-only verifier for the whole wiring (junctions, bundle
+# ownership, store health); propagate its exit code so callers see the failure.
 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dev 'scripts\deploy.ps1') -Profile $Profile
+if ($LASTEXITCODE -ne 0) { $failed++ }
 
 Write-Host ''
+if ($failed -gt 0) {
+    Write-Host "Install finished with $failed FAILURE(s) - see the messages above." -ForegroundColor Red
+    exit 1
+}
 if ($Profile -eq 'desktop') {
-    Write-Host 'Install done. Restart the DSH desktop app so the host halves pick up the new rows:' -ForegroundColor Green
+    Write-Host 'Install done. The profile manifest and patch layer hot-apply within seconds' -ForegroundColor Green
+    Write-Host '(bundle registration + row strip are picked up by the running app; restart only'
+    Write-Host ' if a plugin page card or host route is missing afterwards):'
     Write-Host "  powershell -ExecutionPolicy Bypass -File `"$env:USERPROFILE\.dsh\scripts\restart-desktop.ps1`""
-    Write-Host '  (or quit the app from its tray and start it again)'
 } else {
     Write-Host "Install done. NOTE: the '$Profile' profile is the legacy web target." -ForegroundColor Yellow
     Write-Host 'Its lifecycle scripts now live in archive/web-scripts/ and are no longer deployed;'

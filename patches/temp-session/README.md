@@ -44,16 +44,22 @@ dsh 发起会话必须绑定一个工作区(没有工作区时对话输入框是
 
 ## 部署(加载到 dsh)
 
-1. 建立指向本目录的目录联接(junction):
+推荐仓库根一键:`powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1`。
+
+手工方式(路径用变量,不写死):
 
 ```powershell
-# 在仓库根执行:\$repo = (Resolve-Path .).Path
-New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-temp-session" -Target "$repo\patches\temp-session"
+# 在仓库根执行:$repo = (Resolve-Path .).Path
+# 先删掉 profile 层旧的 - insert: 行(若存在),避免两层同 id 启动中断
+& "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" `
+    plugin --profile desktop add "$repo\patches\temp-session"
 ```
 
-2. 在 `~/.dsh/profiles/desktop/cordis.patch.yml` 中追加启用条目:
+CLI 检测到包声明的 `dsh.bundle` 后会自动完成 pnpm link + 登记
+`dsh.profile.bundles`;loader 行来自包内 `cordis.patch.yml`:
 
 ```yaml
+# patches/temp-session/cordis.patch.yml(包内,勿在 profile 层重复 insert)
 - insert:
     - id: temp-session
       name: '@local/dsh-client-ui-temp-session'
@@ -62,13 +68,15 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
         # title: '临时会话'            # 可选:工作区显示标题
 ```
 
-条目增删 / 配置修改保存后**数秒热生效**;修改本补丁源码后需重启 DSH 桌面端。
+行结构改动需重启(bundle 层文件不在 HMR 监视范围);修改本补丁源码同样需重启。
 
 ## 卸载
 
-1. 删除 `~/.dsh/profiles/desktop/cordis.patch.yml` 中的 `temp-session` 条目
+1. 插件管理页「已安装」卡片卸载,或命令行:
+   `dsh plugin --profile desktop remove @local/dsh-client-ui-temp-session`
    (热生效:按钮消失,`/temp-session` 通道注销);
-2. 删除 `~/.dsh/profiles/node_modules/@local/dsh-client-ui-temp-session` 链接;
+2. 可选:删除 `~/.dsh/profiles/node_modules/@local/dsh-client-ui-temp-session`
+   解析兜底链接;
 3. 可选:删除 `~/.dsh/tmp-workspaces/`(已绑定会话的工作区记录保留在 dsh
    存储里,目录删掉后该工作区路径失效,可右键删除工作区)。
 

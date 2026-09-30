@@ -50,28 +50,26 @@
 
 ## 部署(加载到 dsh)
 
-与 ui-settings-* 插件相同的机制:
+推荐仓库根一键:`powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1`。
+
+手工方式(路径用变量,不写死):
 
 ```powershell
-# 在仓库根执行:\$repo = (Resolve-Path .).Path
-# 1. 建立指向本目录的目录联接(junction)
-New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-queue-tools" -Target "$repo\patches\ui-queue-tools"
+# 在仓库根执行:$repo = (Resolve-Path .).Path
+# 先删掉 profile 层旧的 - insert: 行(若存在),避免两层同 id 启动中断
+& "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" `
+    plugin --profile desktop add "$repo\patches\ui-queue-tools"
 ```
 
-2. 在 `~/.dsh/profiles/desktop/cordis.patch.yml` 中追加启用条目:
+CLI 检测到包声明的 `dsh.bundle` 后会自动完成 pnpm link + 登记
+`dsh.profile.bundles`;loader 行来自包内 `cordis.patch.yml`(见该文件)。
 
-```yaml
-- insert:
-    - id: ui-queue-tools
-      name: '@local/dsh-client-ui-queue-tools'
-```
+> ⚠️ **不要**再往 profile 的 `cordis.patch.yml` 手工 `- insert:` 本插件的行 ——
+> 两层同 id 会让下次启动 fail-loud 中断(`TypeError: duplicate loader entry id`),
+> `scripts/deploy.ps1` 会检测这一状态。
 
-3. **保存即生效,无需重启**:DSH 桌面端对 `cordis.patch.yml` 内置热加载
-   (`watchUserPatches`),条目增删/配置修改保存后数秒内事务性生效(host 与
-   client 半都重新装载),**不中断会话** —— 前提是文件内容确有真实变化
-   (增删行、改 `config`);`Entry.update` 对 options 做深比较,只改注释、
-   或写回一份内容等价的文件都**不会**触发重挂。
-   **修改本补丁源码后需重启 DSH 桌面端** 才生效(`scripts/restart-desktop.ps1`)。
+行结构改动需重启(bundle 层文件不在 HMR 监视范围);**修改本补丁源码后需重启
+DSH 桌面端**才生效(`scripts/restart-desktop.ps1`)。
 
 ## 已知坑:host 半可能不在册(拖拽排序报"排序失败")
 
@@ -102,10 +100,9 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 
 ## 卸载
 
-1. 删除 `~/.dsh/profiles/desktop/cordis.patch.yml` 中的 `ui-queue-tools` 条目;
-2. 删除 `~/.dsh/profiles/node_modules/@local/dsh-client-ui-queue-tools`
-   链接;
-3. 重启 DSH 桌面端(官方停靠栏恢复)。
+1. 插件管理页「已安装」卡片卸载,或命令行:
+   `dsh plugin --profile desktop remove @local/dsh-client-ui-queue-tools`;
+2. 重启 DSH 桌面端(官方停靠栏恢复;源码仍在仓库,重装 `install.ps1` 即回)。
 
 ## 注意事项
 

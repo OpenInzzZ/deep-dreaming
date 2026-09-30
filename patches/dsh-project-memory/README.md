@@ -172,7 +172,8 @@ New-Item -ItemType Junction -Path "patches\dsh-project-memory\node_modules" -Tar
 > 用户层再 insert 同名行会导致下次启动
 > `duplicate loader entry id: project-memory` 硬失败。
 
-最后重启 DSH 桌面端(bundle 层变更需重启)。卸载:
+bundle 登记(profile manifest)属 HMR 监视范围,一般**数秒热生效**;若插件页
+卡片缺失再重启桌面端。卸载:
 `dsh plugin --profile desktop remove dsh-project-memory` 并从 bundles 列表移除。
 
 ## 测试

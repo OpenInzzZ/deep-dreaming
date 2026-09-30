@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Project Memory",
+    "description": "Auto-recalls the current project's memories on a session's first turn and injects prompt guidance for when to use Memorix; storage and search stay in Memorix."
+  }
+}
