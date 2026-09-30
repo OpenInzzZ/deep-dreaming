@@ -109,6 +109,19 @@ console.log('exports contract OK:', JSON.stringify(exports_.inject), 'NS =', exp
   if (on.enabled !== true || on.levels.off !== null || on.levels.low !== 'low') throw new Error(`stateOf(map): ${JSON.stringify(on)}`)
   if (JSON.stringify(levelsToConfig(on)) !== '{"off":null,"low":"low"}') throw new Error(`levelsToConfig(map): ${JSON.stringify(levelsToConfig(on))}`)
   if (levelsToConfig(off) !== false) throw new Error('levelsToConfig(disabled) must be false')
+  // pi-ai keeps a declared off value in the map for dispatch (adapter.spec's
+  // `off: none` promise) and rejects an empty string on any level.
+  const offWired = stateOf({ off: 'none', high: 'high' })
+  if (offWired.levels.off !== 'none') throw new Error(`stateOf must keep the off wire: ${JSON.stringify(offWired)}`)
+  if (JSON.stringify(levelsToConfig(offWired)) !== '{"off":"none","high":"high"}') {
+    throw new Error(`levelsToConfig must write the off wire: ${JSON.stringify(levelsToConfig(offWired))}`)
+  }
+  if (stateOf({ off: '', high: 'high' }).levels.off !== null) throw new Error('stored off: "" must heal to null on read')
+  if (levelsToConfig({ enabled: true, levels: { off: '', high: 'high' } }).off !== null) {
+    throw new Error('staged off: "" must write null')
+  }
+  if (validState({ enabled: true, levels: { off: '', high: 'high' } }) !== false) throw new Error('off: "" must be invalid in validState')
+  if (validState({ enabled: true, levels: { off: 'none', high: 'high' } }) !== true) throw new Error('off with a wire must be valid')
   if (validState({ enabled: true, levels: { off: null } }) !== false) throw new Error('off-only state must be invalid')
   if (validState({ enabled: true, levels: { off: null, low: ' ' } }) !== true) throw new Error('non-empty wire must be valid')
   if (validState({ enabled: true, levels: { off: null, low: '' } }) !== false) throw new Error('empty wire must be invalid')
@@ -117,6 +130,7 @@ console.log('exports contract OK:', JSON.stringify(exports_.inject), 'NS =', exp
   if (JSON.stringify(grown.levels) !== '{"off":null,"medium":"medium"}') throw new Error(`withLevel default wire: ${JSON.stringify(grown.levels)}`)
   const wired = withWire(grown, 'medium', 'mid')
   if (wired.levels.medium !== 'mid') throw new Error(`withWire: ${JSON.stringify(wired.levels)}`)
+  if (withWire(wired, 'off', '').levels.off !== null) throw new Error('clearing the off input must stage null')
   const dropped = withLevel(wired, 'off', false)
   if ('off' in dropped.levels) throw new Error('withLevel(false) must drop the level')
   const models = [{ id: 'a', name: 'A' }, { id: 'b', name: 'B', reasoningEfforts: false }]
@@ -263,7 +277,7 @@ const modelSwitch = (name) => rowOf(name).querySelector('.mr-row [role="switch"]
 const levels = (name) => rowOf(name).querySelectorAll('.mr-level')
 const wireOf = (name, level) => {
   const levelRow = [...levels(name)].find((row) => row.querySelector('.mr-level-name').textContent === t('level.' + level))
-  return levelRow.querySelector('.mr-wire') ?? levelRow.querySelector('.mr-off')
+  return levelRow.querySelector('.mr-wire')
 }
 const saveButton = () => rootHost.querySelector('.mr-save')
 const discardButton = () => rootHost.querySelector('.mr-discard')
@@ -316,13 +330,35 @@ console.log('save OK: one models-array path op, untouched models pass through')
 
 // wire values: switch astra on, edit the low wire, save -> the edited value rides the op
 await act(async () => { click(modelSwitch('gpt-6-astra')) })
+// Every level — `off` included — renders a wire input now: pi-ai keeps a
+// declared off value (e.g. `none`) in the map for dispatch.
+const offInput = wireOf('gpt-6-astra', 'off')
+if (offInput === null) throw new Error('the off row must render a wire input, not a fixed note')
+if (offInput.value !== '' || offInput.placeholder !== t('offNote')) {
+  throw new Error(`off input must start empty with the "sends nothing" placeholder: value=${JSON.stringify(offInput.value)} placeholder=${JSON.stringify(offInput.placeholder)}`)
+}
 await act(async () => { setNativeValue(wireOf('gpt-6-astra', 'low'), 'lowest') })
+await act(async () => { setNativeValue(offInput, 'none') })
 await act(async () => { click(saveButton()) })
 const astra = mutations[mutations.length - 1][0].value.find((model) => model.id === 'gpt-6-astra')
 if (astra.reasoningEfforts.low !== 'lowest' || astra.reasoningEfforts.max !== 'max') {
   throw new Error(`wire edit not carried: ${JSON.stringify(astra.reasoningEfforts)}`)
 }
-console.log('wire OK: edited wire value rides the saved map')
+if (astra.reasoningEfforts.off !== 'none') {
+  throw new Error(`off wire edit must ride the saved map: ${JSON.stringify(astra.reasoningEfforts)}`)
+}
+console.log('wire OK: edited wire values (incl. off) ride the saved map')
+
+// clearing the off input stages null (pi-ai's "supported, send nothing")
+// A landed save collapses the editor, so re-expand the row first.
+await act(async () => { click(rowOf('gpt-6-astra').querySelector('.mr-expand')) })
+await act(async () => { setNativeValue(wireOf('gpt-6-astra', 'off'), '') })
+await act(async () => { click(saveButton()) })
+const offCleared = mutations[mutations.length - 1][0].value.find((model) => model.id === 'gpt-6-astra')
+if (offCleared.reasoningEfforts.off !== null) {
+  throw new Error(`cleared off input must write null: ${JSON.stringify(offCleared.reasoningEfforts)}`)
+}
+console.log('off OK: off edits round-trip (value rides, clearing writes null)')
 
 // discard: a staged edit reverts to the stored state
 await act(async () => { click(modelSwitch('deepseek-v4-pro')) })

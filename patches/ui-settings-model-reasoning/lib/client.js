@@ -72,7 +72,6 @@ const CSS = [
   '.mr-level{display:flex;align-items:center;gap:10px}',
   '.mr-level-name{flex:none;width:44px;font-size:12px;color:var(--dsw-alias-label-secondary)}',
   '.mr-wire{flex:1;min-width:0}',
-  '.mr-off{flex:1;font-size:12px;color:var(--dsw-alias-label-caption)}',
   '.mr-foot{display:flex;align-items:center;gap:8px}',
   '.mr-error{flex:1;font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary)}',
   '.mr-spacer{flex:1}',
@@ -171,7 +170,10 @@ function stateOf(reasoningEfforts) {
     for (const level of LEVELS) {
       if (!(level in reasoningEfforts)) continue;
       const wire = reasoningEfforts[level];
-      levels[level] = wire === null ? null : String(wire);
+      // pi-ai lets `off` carry a wire value (e.g. `none`, the README promise
+      // the adapter test pins) and rejects an empty string on any level, so a
+      // stored `off: ''` collapses to the "send nothing" spelling on read.
+      levels[level] = wire === null || (level === 'off' && wire === '') ? null : String(wire);
     }
     return { enabled: true, levels, configured: true };
   }
@@ -184,7 +186,13 @@ function levelsToConfig(state) {
   const config = {};
   for (const level of LEVELS) {
     if (!(level in state.levels)) continue;
-    config[level] = level === 'off' ? null : state.levels[level];
+    const wire = state.levels[level];
+    // `off` writes what it staged: null means "supported, send nothing" while
+    // a value (e.g. `none`) rides the wire — pi-ai keeps both in the map.
+    // Other levels must carry a value; validState gates that before a save.
+    config[level] = level === 'off'
+      ? (wire === null || wire === '' ? null : String(wire))
+      : wire;
   }
   return config;
 }
@@ -192,6 +200,12 @@ function levelsToConfig(state) {
 /** Whether a staged state satisfies the profile schema (≥1 thinking level, non-empty wires). */
 function validState(state) {
   if (state.enabled !== true) return true;
+  // pi-ai: only `off` may carry null (or a value like `none`); an empty string
+  // is rejected on every level, and at least one thinking level must exist.
+  if ('off' in state.levels) {
+    const off = state.levels.off;
+    if (off !== null && !(typeof off === 'string' && off.length > 0)) return false;
+  }
   const thinking = LEVELS.filter((level) => level !== 'off' && level in state.levels);
   if (thinking.length === 0) return false;
   return thinking.every((level) => typeof state.levels[level] === 'string' && state.levels[level].length > 0);
@@ -228,10 +242,13 @@ function withLevel(state, level, member) {
 
 /** Replace one level's wire value inside a staged state. */
 function withWire(state, level, wire) {
+  // Clearing the `off` input means "send nothing" — pi-ai spells that null;
+  // an empty string would be rejected by the profile schema.
+  const next = level === 'off' && wire === '' ? null : wire;
   const levels = {};
   for (const name of LEVELS) {
     if (!(name in state.levels)) continue;
-    levels[name] = name === level ? wire : state.levels[name];
+    levels[name] = name === level ? next : state.levels[name];
   }
   return { ...state, levels };
 }
@@ -366,16 +383,18 @@ function ModelReasoningCard({ provider, t, scope }) {
               onChange: (next2) => { edit(model, (current) => withLevel(current, level, next2)) },
             }, 'switch'),
             jsx('span', { className: 'mr-level-name', children: levelName(level) }, 'label'),
-            level === 'off'
-              ? jsx('span', { className: 'mr-off', children: t('offNote') }, 'off')
-              : jsx(Input, {
-                className: 'mr-wire',
-                value: member ? state.levels[level] : '',
-                placeholder: level,
-                disabled: readOnly || busy || !member,
-                'aria-label': t('aria.wire', { level: levelName(level) }),
-                onChange: (event) => { edit(model, (current) => withWire(current, level, event.target.value)) },
-              }, 'wire'),
+            // Every level edits a wire value, `off` included: pi-ai keeps a
+            // declared `off: none` in the map for dispatch (the README promise
+            // for gateways that think by default), and an empty box means the
+            // null spelling — supported, send nothing.
+            jsx(Input, {
+              className: 'mr-wire',
+              value: member ? state.levels[level] ?? '' : '',
+              placeholder: level === 'off' ? t('offNote') : level,
+              disabled: readOnly || busy || !member,
+              'aria-label': t('aria.wire', { level: levelName(level) }),
+              onChange: (event) => { edit(model, (current) => withWire(current, level, event.target.value)) },
+            }, 'wire'),
           ] }, level);
         }) }, 'levels'),
       ] }, String(model.id));
