@@ -1,0 +1,23 @@
+# mcp-servers: 一份配置挂多个外部 MCP 服务（bundle 层行）。
+#
+# 本包声明了 dsh.bundle（package.json -> dsh.bundle.patch），此文件由 dsh 在
+# 加载 profile 时自动作为 bundle 层合成。**不要**再往 profile 的
+# cordis.patch.yml 里 insert 同名行：两层同 id 会让启动 fail-loud 抛
+# `TypeError: duplicate loader entry id`。
+#
+# 服务清单是**配置**（`servers` 数组），不是 loader 行 —— 加一个服务在
+# 设置 → MCP 服务 里点一下就行，不用改本文件、不用重启桌面端。
+# 下面这份只是出厂默认值；设置页里改的值写在设置文档里，优先级更高。
+#
+# 每一项的 serverName 必须全局唯一：官方 client 会预留它，重名那条会被本包
+# 在挂载前去掉（见 lib/index.js 的 selectServers）。
+- insert:
+    - id: mcp-servers
+      name: '@local/dsh-client-mcp-servers'
+      config:
+        servers:
+          - serverName: idea
+            url: http://127.0.0.1:64342/stream
+            toolCallTimeoutMs: 90000
+            failOnStartupError: false
+            enabled: true

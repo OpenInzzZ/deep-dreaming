@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "MCP Servers",
+    "description": "Mounts external MCP servers into dsh: each server is a component below, with its own switch and its own endpoint/timeout settings. Connection and tool registration reuse the official MCP client; this patch only turns the config into a form."
+  }
+}

@@ -20,11 +20,12 @@ deep-dreaming/
 │   ├── ui-settings-model-reasoning/  # 设置「模型」页扩展:自定义(llm-pi-ai)模型的思考开关 + 思考等级 + verify
 │   ├── ui-queue-tools/           # 排队消息增强:hover 全文预览 + 上下移排序 + verify
 │   ├── temp-session/             # 侧边栏一键发起不绑定项目的临时会话 + verify
-│   └── whale-background/         # 会话区域鲸鱼娘背景图(bundle 补丁)
+│   ├── whale-background/         # 会话区域鲸鱼娘背景图(bundle 补丁)
+│   └── mcp-servers/              # 一张设置页管理多个外部 MCP 服务(含 IDEA 代码诊断),加服务不重启
 ├── assets/                       # 品牌资产(鲸鱼娘 favicon;不归任何补丁,由 deploy.ps1 同步到 ~/.dsh/assets)
 ├── archive/                      # 已退役的脚本 / 资产 / 补丁(只读保留,不再部署)
 ├── scripts/
-│   ├── install.ps1               # 一键安装:建 junction 兜底 + 6 个补丁全部装成 bundle(先剥遗留行) + Memorix + 部署校验(幂等)
+│   ├── install.ps1               # 一键安装:建 junction 兜底(含 @local 自引用)+ 7 个 bundle 补丁全部装成 bundle(先剥遗留行) + Memorix + 部署校验(幂等)
 │   ├── deploy.ps1                # 只读校验:同步脚本与资产 + bundle 登记/行属主 + junction + 体检宿主依赖仓库
 │   ├── start-desktop.ps1         # 启动桌面端(已在运行则聚焦窗口)
 │   ├── restart-desktop.ps1       # 重启桌面端(改补丁源码后必须;需 -Force)
@@ -49,13 +50,14 @@ deep-dreaming/
 | [ui-settings-model-reasoning](patches/ui-settings-model-reasoning/) | 设置「模型」页扩展:给自定义(llm-pi-ai)路由逐模型配置**思考开关 + 思考等级(档位与发送值)**,写回 `reasoningEfforts`,模型菜单随之出现「推理等级」 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/ui-settings-model-reasoning/README.md) |
 | [temp-session](patches/temp-session/) | 侧边栏底部「临时会话」按钮:一键发起绑定**用户级临时目录**的会话,不关联任何项目 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/temp-session/README.md) |
 | [whale-background](patches/whale-background/) | 会话区域背景:在对话滚动区居中偏右显示鲸鱼娘透明图(13% 透明度),资源缺失时自动跳过而不影响启动 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/whale-background/README.md) |
+| [mcp-servers](patches/mcp-servers/) | **MCP 服务接入**:一张设置页管理多个外部 MCP 服务,清单存在配置里,加/删服务不用改 yml、不用重启。出厂默认那条是 **IDEA 代码诊断**——模型改完代码直接调 `mcp__idea__lint_files` / `get_file_problems` 拿 IDE 实时检查结果(实测冷分析 3.6s、8 文件批量 4.9s、59 个工具),不必为「符号解析不了」跑一遍编译。宿主端对每项挂一个官方 `@deepseek-ai/dsh-mcp-client` 子 fiber(官方一个 entry 只连一个 server,且它的 `z.union` 展不开成表单);客户端半端注册 `settings.section` 页——**运行时没有任何插件贡献 `plugins.row.config`,官方根本没有通用配置编辑器** | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/mcp-servers/README.md) |
 
 ## 快速部署
 
 **推荐一条命令**(任何机器克隆后即可,路径自动推导,无需改动):
 
 ```powershell
-# 在仓库根目录执行:建 junction 兜底 + 把 6 个补丁全部装成 bundle
+# 在仓库根目录执行:建 junction 兜底(含 @local 自引用)+ 把 7 个 bundle 补丁全部装成 bundle
 # (pnpm link + 登记 dsh.profile.bundles,先剥离 profile 层遗留行)
 # + 安装并接线 Memorix + 部署校验(幂等,可重复运行)
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
@@ -112,6 +114,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 - **一个 loader 行只能有一个来源。** 每个补丁都声明了 `dsh.bundle`,它的行由 bundle 层(包自带 `cordis.patch.yml`)提供;profile 层**不能**再写同 id 的 `- insert:` 行。两层若同时提供同一个 id,`applyEntryPatches` 不会去重,Loader 会 fail-loud 抛 `TypeError: duplicate loader entry id`,dsh 直接起不来。`install.ps1` 会**先**剥离 profile 遗留行再装 bundle(若 bundle 安装失败则把该行原样恢复回去);`deploy.ps1` 检测到「bundle 已声明但未登记」或「profile 层插入了已在 `dsh.profile.bundles` 里的名字」都会报 FAIL。
   注意 `dsh plugin add` / `dsh plugin update --profile desktop` 会自行把声明了 `dsh.bundle` 的依赖补进 `dsh.profile.bundles`,所以不要"为了保险"两边都写。
 - **不要在 `patches/` 下做递归扫描**:`patches/<p>/node_modules` 是指向 `~/.dsh/profiles/node_modules` 的 junction,而 profile 里的 `@local/*` 又指回 `patches/*`,形成环;`Get-ChildItem -Recurse` 之类的命令不会结束。
+- **`~/.dsh/profiles/node_modules` 必须是按运行时版本物化的实目录。** 它曾经是 web 时代 npx 缓存留下的 **250 条指向 `%LOCALAPPDATA%\npm-cache\_npx\<hash>\node_modules` 的软链**:一次 `npm cache clean`(或缓存 GC)就能让全部补丁同时 `MODULE_NOT_FOUND`;而且那套包比打包运行时落后一个 minor(schemastery 3.18.2 vs 3.18.4)—— 这正是「卡片在、设置表单没有」的根因,因为 `.volatile()` 在 3.18.2 里不存在(可编辑分区只收 volatile 字段)。2026-10-13 已按运行时版本重物化:临时目录里 `npm i @deepseek-ai/dsh-llm@0.2.0-rc.2 @deepseek-ai/dsh-mcp-client@0.2.0-rc.2`(cordis / schemastery 交给 npm 自己解析,**不要手抄版本号**),旧目录**移出**到 `~/.dsh/store-npx-era-<ts>`(未删除),`@local/*` 链接按快照 `~/.dsh/store-snapshot-<ts>.tsv` 恢复。`deploy.ps1` 现在见到任何指向 `npm-cache\_npx` 的 store 条目就报 FAIL。
 
 ## 故障恢复
 
@@ -176,6 +179,7 @@ DSH 桌面端对 profile 的 `cordis.patch.yml` 内置热加载(`watchUserPatche
     无谓的整层重载)。
 - **profile manifest(`package.json`)改动热应用**(2026-09-24 实测:`install.ps1`
   通过桌面 CLI 把 6 个补丁登记进 `dsh.profile.bundles` 并剥离 profile 层遗留行,
+  —— 该数字是当时的实测样本;2026-10-13 起 bundle 数为 7(新增 `mcp-servers`),机制不变)
   运行中的宿主数秒内挂上 bundle 行,四条 host 路由全部 200,无需重启)。
 - **补丁源码(仓库文件)改动不热加载**:模块级 HMR 对 `node_modules` 下的补丁不生效;
   改完源码需**重启桌面端**(`scripts/restart-desktop.ps1`,会结束当前会话,请在空闲时进行);

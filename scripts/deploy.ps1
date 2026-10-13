@@ -83,7 +83,7 @@ if (Test-Path $profilePatch) {
 #      otherwise its row has no owner and the plugin silently never loads.
 $profilePkgPath = Join-Path $dshHome "profiles\$Profile\package.json"
 $profileNodeModules = Join-Path $dshHome "profiles\$Profile\node_modules"
-$bundlePatchDirs = @('session-cleanup', 'ui-settings-model-reasoning', 'ui-queue-tools', 'temp-session', 'whale-background', 'dsh-project-memory')
+$bundlePatchDirs = @('session-cleanup', 'ui-settings-model-reasoning', 'ui-queue-tools', 'temp-session', 'whale-background', 'dsh-project-memory', 'mcp-servers')
 $profileDeps = @()
 $profileBundles = @()
 if (Test-Path $profilePkgPath) {
@@ -112,6 +112,22 @@ foreach ($dir in $bundlePatchDirs) {
         continue
     }
     $pkgName = $repoManifest.name
+    # Every @local package named by this bundle's loader rows must resolve from
+    # the shared store: the Loader imports the row's `name`, and a row pointing at
+    # an unlinked package silently never mounts - no card component, no error.
+    # (The mcp-servers umbrella names one such component package per MCP server.)
+    foreach ($rm in [regex]::Matches((Read-Utf8 $repoBundleYml), "name:\s*'?(@local/[^'\r\n]+?)'?\s*(?:\r?\n|$)")) {
+        $rowName = $rm.Groups[1].Value.Trim()
+        if ($rowName -eq $pkgName) { continue }
+        $checked++
+        $rowManifest = Join-Path $modulesBase (($rowName -replace '/', '\') + '\package.json')
+        if (Test-Path $rowManifest) {
+            Write-Host "  [OK] $pkgName row '$rowName' resolves from the shared store"
+        } else {
+            Write-Host "  [FAIL] $pkgName row '$rowName' is not linked under $modulesBase - that component never mounts; run scripts/install.ps1" -ForegroundColor Red
+            $failed++
+        }
+    }
     $depOk = $profileDeps -contains $pkgName
     $bundleOk = $profileBundles -contains $pkgName
     if ($depOk -and $bundleOk) {
@@ -168,7 +184,7 @@ if (Test-Path $homePatch) {
 #    repo-side real path, so the repo tree must expose the host node_modules.
 #    Missing/dangling/empty-dir links are (re)created; real dirs that already
 #    provide @deepseek-ai are kept as-is.
-$depPlugins = @('dsh-project-memory', 'session-cleanup', 'ui-settings-model-reasoning', 'ui-queue-tools', 'temp-session', 'whale-background')
+$depPlugins = @('dsh-project-memory', 'session-cleanup', 'ui-settings-model-reasoning', 'ui-queue-tools', 'temp-session', 'whale-background', 'mcp-servers')
 if (-not (Test-Path $modulesBase)) {
     Write-Host "  [!] ~/.dsh/profiles/node_modules not found; run ``dsh plugin --profile $Profile add`` first" -ForegroundColor Yellow
 } else {
@@ -193,6 +209,32 @@ if (-not (Test-Path $modulesBase)) {
             New-Item -ItemType Junction -Path $link -Target $modulesBase | Out-Null
             Write-Host "  [OK] $p/node_modules created -> $modulesBase"
         }
+    }
+}
+
+# 3.4. The store must be a materialised tree, not a symlink farm into the npm
+#      _npx cache. Measured 2026-10-13: the store inherited from the web-era CLI
+#      was 250 symlinks into %LOCALAPPDATA%\npm-cache\_npx\<hash>\node_modules, so
+#      a single `npm cache clean` (or the cache GC) breaks EVERY patch at once with
+#      MODULE_NOT_FOUND - and that tree was a minor behind the packaged runtime
+#      (schemastery 3.18.2 vs 3.18.4), which is exactly what silently removed the
+#      settings forms: `.volatile()` did not exist there. Only our own @local
+#      junctions are allowed to point at the repo.
+if (Test-Path $modulesBase) {
+    $cacheNeedle = Join-Path $env:LOCALAPPDATA 'npm-cache\_npx'
+    $bad = @()
+    foreach ($dir in @($modulesBase, (Join-Path $modulesBase '@deepseek-ai'))) {
+        if (-not (Test-Path $dir)) { continue }
+        $bad += @(Get-ChildItem $dir -Force -ErrorAction SilentlyContinue | Where-Object {
+            $_.LinkType -and (($_.Target -join ';') -like "*$cacheNeedle*")
+        })
+    }
+    $checked++
+    if ($bad.Count -gt 0) {
+        Write-Host "  [FAIL] $($bad.Count) store entries are symlinks into the npm _npx cache - one cache clean breaks every patch; re-materialise the store at the runtime version (AGENTS.md 'Host Dependencies')" -ForegroundColor Red
+        $failed++
+    } else {
+        Write-Host "  [OK] store is a materialised tree (no npm-cache symlinks)"
     }
 }
 

@@ -47,7 +47,8 @@ deep-dreaming/
 │   ├── ui-settings-model-reasoning/ # Thinking switch + effort levels per custom llm-pi-ai model
 │   ├── ui-queue-tools/            # Queue message preview + reorder
 │   ├── temp-session/              # Sidebar button for ad-hoc temp sessions
-│   └── whale-background/          # Whale-girl background image in chat area
+│   ├── whale-background/          # Whale-girl background image in chat area
+│   └── mcp-servers/               # One settings page over a list of external MCP servers; mounts the official MCP client once per entry
 ├── assets/                        # Brand asset synced to ~/.dsh/assets (whale favicon; no patch owns it)
 ├── archive/                       # Retired material, kept read-only (see archive/README.md)
 │   ├── README.md                  # What is archived and why
@@ -111,7 +112,7 @@ Every patch is a Cordis plugin with a host half and optionally a client (browser
 }
 ```
 
-- **`dsh.bundle.patch` is mandatory for every patch in this repo.** It points at the package's own `cordis.patch.yml`, which carries the one `- insert:` loader row for the patch (id + name + optional config defaults). The bundle layer owns that row; the profile layer must not duplicate it.
+- **`dsh.bundle.patch` is mandatory for every patch in this repo.** It points at the package's own `cordis.patch.yml`, which carries the patch's `- insert:` loader row(s) (id + name + optional config defaults). The bundle layer owns those rows; the profile layer must not duplicate them. A bundle MAY declare several rows — the plugin page renders them as the card's 「包含的组件」, each with its own switch (official precedent: `agent-team-profile`). Every `@local/…` name a row carries must resolve from the shared store, and `scripts/deploy.ps1` FAILs when it does not (a row pointing at an unlinked package silently never mounts).
 - Keep `cordis.patch.yml` inside `files` when the field is present: a `file:`-protocol install packs only `files`, and a row that falls out of the package silently unloads the plugin.
 
 ### Plugin Display Metadata
@@ -157,9 +158,12 @@ Every patch ships `locale/en.json` + `locale/zh.json` so the plugin management p
 
 ### Settings
 - **There is no `ctx.settings.register` in 0.2.0-rc.2.** The host half just exports its `Config` schema; the Host derives the entry's settings section from it, and the section's namespace **is the loader entry id** (`ctx.configForms.get(entryId)` on the client).
+- **A settings section exists only for `volatile` fields, and volatile fields are `{ get }` accessors.** `settings/src/index.ts` throws `Plugin entry "<ns>" has no volatile fields` when `volatileForm(Config)` is empty, and `Config field "x" is not volatile` per write path (`:386`, `:388`) — an unmarked field means *card present, form silently absent*. Mark them with `.volatile()` (needs schemastery **3.18.4**; the shared store used to project 3.18.2 from an npx cache, which is why patches could not mark anything — see "Host Dependencies"). The second half of the trap: after `.volatile()`, the validated config value is a `{ get }` box, not the plain value — unwrap before handing it to anything else, exactly like the official `plainOptions()` (`llm-deepseek/src/config.ts:65`); `patches/mcp-servers/lib/index.js`'s `plainConfig()` is that unwrap. Passing the box downstream fails validation (`expected { serverName: string … }`).
+- **A `z.union` config gets no settings card, and schemastery schemas are *called*, not `.parse()`d.** The section is derived from `plugin.Config`, but a union cannot be flattened into a form, so mounting such a package directly (`@deepseek-ai/dsh-mcp-client` is `stdio | streamable-http`) yields **no UI at all** — wrap it and export a flat `Config` instead (`patches/mcp-servers/lib/index.js`). Validation is `Config(value)` → the filled object, throwing on a bound violation; there is no `.parse()` method (measured: `host.Config.parse is not a function`).
 - Host-side editing goes through the resolved entry config (composition layer) plus the Host's own `settings` document; there is no per-plugin registration step to wait for.
 - Client-side reads/writes use `ctx.configForms.get(entryId)`: `getSnapshot()` / `subscribe(listener)` to read, and `set(field, value)` / `unset(field)` / `mutate(ops)` to write (`ops` is a `SettingsPathOpView[]` of `{ op: 'set' | 'unset', path: [...], value }`). The provider already carries `remote.settings` on its **own** fiber, so a consumer must not declare that Remote itself.
 - For a page rather than a form, register on the shipped `settings.section` slot with `{ name, id, order, label: () => t('nav') }`.
+- **The shipped runtime has no generic plugin-config editor.** The keyed `plugins.row.config` slot is declared and consumed by `ui-plugin-manager` but contributed by nobody in 0.2.0-rc.2 (checked in the checkout and in `resources/app.asar`), so a bundle row's detail page renders no form even when that entry serves a namespace. The Host still answers `settings.describe` / `mutate` — only the UI is missing, so a patch that needs an editing surface registers its own `settings.section` page (`patches/mcp-servers/lib/client.js` is the working example).
 - A patch is free to keep its own fenced route as the data path (that is what `session-cleanup` does), which keeps the card working no matter how the Host wires settings.
 
 ### Theme Tokens
@@ -208,6 +212,8 @@ Every patch ships `locale/en.json` + `locale/zh.json` so the plugin management p
   ```
 - That link makes the tree **cyclic**: `patches/<p>/node_modules` reaches `@local/*`, which points back at `patches/*`, whose `node_modules` links back again. Never run a recursive scan (`Get-ChildItem -Recurse`, `dir /s`, recursive globs) over `patches/` — it does not terminate. Read files by exact path.
 - `scripts/deploy.ps1` auto-fixes missing host dependency links.
+- **The store must be a materialised tree at the runtime's version, not an npx cache.** Measured 2026-10-13: `~/.dsh/profiles/node_modules` was **250 symlinks into `%LOCALAPPDATA%\npm-cache\_npx\<hash>\node_modules`** left by the web-era CLI — one `npm cache clean` (or the cache GC) breaks every patch at once with `MODULE_NOT_FOUND`, and the tree was a minor behind the packaged runtime (schemastery 3.18.2, `dsh-mcp-client` 0.1.5-rc.3), which is what silently removed every patch's settings form (`.volatile()` did not exist there). Re-materialised by installing the runtime-matched roots in a temp dir — `npm i @deepseek-ai/dsh-llm@0.2.0-rc.2 @deepseek-ai/dsh-mcp-client@0.2.0-rc.2` — and letting npm resolve `cordis` / `schemastery` itself (do not hand-copy versions), moving the old dir out to `~/.dsh/store-npx-era-<ts>` (kept, not deleted), moving the new tree into place, then restoring the `@local/*` junctions from the snapshot `~/.dsh/store-snapshot-<ts>.tsv`. `deploy.ps1` now FAILs when any store entry points into `npm-cache\_npx`.
+- **Known gap in that check**: `desktop-install.mjs`'s `defaultCandidates()` only guesses `%LOCALAPPDATA%\Programs\DeepSeek Harness` and `%ProgramFiles%\DeepSeek Harness`. A custom install root (this machine: `D:\Programs\DeepSeek Harness`) is discovered *only while the app runs*, via its process command line — with the app stopped the version probe prints "DSH desktop app not found" and skips. The general fix is a registry `InstallLocation` candidate (HKCU/HKLM Uninstall entries); until then run the store version check with the app started, or pass `-InstallRoot`.
 
 ---
 
@@ -230,6 +236,8 @@ node patches/dsh-project-memory/tests/plugin.smoke.mjs
 node patches/ui-settings-model-reasoning/tests/load-smoke.mjs
 node patches/ui-queue-tools/tests/load-smoke.mjs
 node patches/whale-background/tests/load-smoke.mjs
+node patches/mcp-servers/tests/load-smoke.mjs
+node patches/mcp-servers/tests/client-contract.mjs
 
 # Client contract tests (jsdom-optional)
 node patches/dsh-project-memory/tests/client-contract.mjs
@@ -283,8 +291,10 @@ The bridge owns no storage, no tools and no settings namespace — Memorix's own
     - **The client settings service was renamed `settingsScope` → `configForms`** (0.1.7-alpha.1), and its entry point changed from `bind({ namespace })` to `get(entryId)`. Declaring the old name is not a soft failure: Cordis keeps the entry pending on a service nobody provides, so that half never activates. The returned face is compatible — `getSnapshot()` / `subscribe()` / `mutate(ops)` are unchanged, and `mutate` takes the same `SettingsPathOpView[]` (`{ op: 'set', path: [...], value }`) that the Host validates.
     - **`settings.plugin.item` is not a slot any more.** The shipped shell declares `settings.section` (page level: `{ name, id, order, label: () => t('nav') }`) and `settings.plugins.tab` (inside the plugins page). `settings.plugin.item` survives only inside a *comment* in the shipped `slot-contract.d.ts`, so a card registered there waits for a declaration that never comes and renders nowhere.
     - **`SessionSnapshot.queue` was removed.** `pendingSubmissions` replaced it and the pending list moved to the `inbox` Session projection, read through the slot's `useProjection` prop (`useProjection('inbox')['next-turn']` — the same list the reorder endpoint splices). The old read yielded `undefined`, and the next `.filter(...)` threw during render, so `ui-queue-tools`' dock disappeared entirely rather than degrading. Rows also stopped carrying a pre-flattened `{ preview, text }`: they now carry model-facing `content` blocks and every consumer folds its own text (only an all-text message is editable).
-    - Verify against the **installed** package, not the source checkout alone: `Select-String` the real `lib/client.js` under `~/.dsh/profiles/node_modules/@deepseek-ai/…` for the old name. That is what settles "is this still wired": source-hit counts of 0 for the new name and N for the old one is the proof. Live host halves are equally cheap to check — POST each patch's endpoint with an `Origin` header; a live prefix route answers 200 while a retired one falls into the SPA fallback with 405.
+    - Verify against the **packaged runtime**, and treat the store copy as a separate question. `~/.dsh/profiles/node_modules/@deepseek-ai/…` answers what *patches* import, but it is a projection that can lag the app (measured: store `dsh-mcp-client` 0.1.5-rc.3 / schemastery 3.18.2 while the app was 0.2.0-rc.2 / 3.18.4) — reasoning about host *behavior* from it produced a wrong conclusion twice (an "installed SettingsProvider needs explicit `register()`" claim, and a "patches cannot mark volatile" claim, both refuted by the asar and by the running app). For runtime truth grep the packaged tree: `Select-String` inside `resources\app.asar` works (it is a concatenated archive), e.g. count hits of `streamable-http` / `has no volatile fields`. Live checks remain decisive — POST each patch's endpoint with an `Origin` header; a live prefix route answers 200 while a retired one falls into the SPA fallback with 405.
     - A `Server-Timing`-style guard belongs in the patch's own verify script: assert the *source* no longer contains the retired name, and self-test the guard by reintroducing the old line and watching it fail.
+
+17. **A settings form needs `.volatile()`, and `.volatile()` boxes the value.** Two halves, both silent: (a) the Host derives the section from `volatileForm(Config)`, so a Config whose fields are unmarked yields **a card with no form** and a write error `has no volatile fields` (`settings/src/index.ts:386`, per-path check at `:388`); (b) once marked, the validated value is a `{ get }` accessor, so anything that consumes the config must unwrap it first (official idiom: `plainOptions()` in `llm-deepseek/src/config.ts:65`) — handing the box to another schema fails with `expected { serverName: string … }`. `patches/mcp-servers` has both pinned: every form field asserts `meta.volatile === true`, and the load-smoke feeds the *boxed* config to `toMcpConfig()` exactly as `apply()` receives it. (`.volatile()` itself needs schemastery ≥ 3.18.4 — see "Host Dependencies" for why the store mattered here.)
 
 ---
 
@@ -316,3 +326,4 @@ The bridge owns no storage, no tools and no settings namespace — Memorix's own
 | ui-queue-tools | `lib/index.js` | `lib/client.js` | `/queue` | (none) |
 | temp-session | `lib/index.js` | `lib/client.js` | `/temp-session` | (none) |
 | whale-background | `lib/index.js` | `lib/client.js` | (none) | (none) |
+| mcp-servers | `lib/index.js` (mounts `@deepseek-ai/dsh-mcp-client` as one child fiber per `servers` entry) | `lib/client.js` | (none — outbound MCP clients; and its settings page rides the shared `configForms`) | `mcp-servers` (the entry id; `servers` is a `.volatile()` array so the page can edit it) |

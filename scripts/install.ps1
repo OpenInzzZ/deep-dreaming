@@ -280,6 +280,33 @@ foreach ($l in $links) {
     Write-Host "  [OK] linked $($l.n)"
 }
 
+# --- 1b. the mcp-servers umbrella ----------------------------------------------
+# A bundle is registered by `dsh plugin add` below, but its loader row names
+# packages that must resolve by bare @local name from anywhere under
+# ~/.dsh/profiles — that is what the store junction provides, and it is the only
+# way a patch can import another patch package (`@local/dsh-client-mcp-servers`).
+$mcpLinkDirs = @('mcp-servers')
+foreach ($dir in $mcpLinkDirs) {
+    $componentManifest = Join-Path $dev "patches\$dir\package.json"
+    if (-not (Test-Path $componentManifest)) { continue }
+    $componentName = (Read-Utf8 $componentManifest | ConvertFrom-Json).name
+    $target = Join-Path $dev "patches\$dir"
+    # $localDir is already .../profiles/node_modules/@local, so link by the BARE
+    # package name (mirrors the $links table above).
+    $path = Join-Path $localDir ($componentName -replace '^@local/', '')
+    if (Test-Path $path) {
+        $item = Get-Item $path -Force
+        if ($item.LinkType -eq 'Junction' -and $item.Target -eq $target) {
+            Write-Host "  [OK] $componentName (already linked)"
+            continue
+        }
+        if (-not $Force) { Write-Host "  [WARN] $componentName exists but differs; use -Force to replace" -ForegroundColor Yellow; continue }
+        Remove-Item $path -Force
+    }
+    New-Item -ItemType Junction -Path $path -Target $target | Out-Null
+    Write-Host "  [OK] linked $componentName"
+}
+
 # --- 2. Strip legacy profile-layer insert rows (migration to bundle patches) ---
 # Every patch now declares `dsh.bundle` and ships its own cordis.patch.yml, so
 # its loader row belongs to the BUNDLE layer. A leftover profile-layer insert
@@ -289,7 +316,7 @@ foreach ($l in $links) {
 # The strip happens per patch inside step 3 (immediately before that patch's
 # bundle install) so a crash between the two steps can only ever leave ONE
 # patch without a row, and the removed block is stashed for restore on failure.
-$bundlePatchDirs = @('session-cleanup', 'ui-settings-model-reasoning', 'ui-queue-tools', 'temp-session', 'whale-background', 'dsh-project-memory')
+$bundlePatchDirs = @('session-cleanup', 'ui-settings-model-reasoning', 'ui-queue-tools', 'temp-session', 'whale-background', 'dsh-project-memory', 'mcp-servers')
 $removedRows = @{}
 $failed = 0
 
