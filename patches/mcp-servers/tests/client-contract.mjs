@@ -136,7 +136,7 @@ const zhKeys = Object.keys(dict.zh).sort()
 const enKeys = Object.keys(dict.en).sort()
 assert.deepEqual(zhKeys, enKeys, 'a key missing from one language renders the raw key')
 assert.ok(zhKeys.every((key) => String(dict.zh[key]).trim() !== '' && String(dict.en[key]).trim() !== ''))
-for (const key of ['nav', 'title', 'add', 'edit', 'remove', 'save', 'enabled', 'errorName', 'errorDuplicate', 'errorUrl', 'errorTimeout']) {
+for (const key of ['nav', 'title', 'add', 'edit', 'remove', 'save', 'enabled', 'headers', 'errorName', 'errorDuplicate', 'errorUrl', 'errorHeaders', 'errorTimeout']) {
   assert.ok(zhKeys.includes(key), `the page needs the copy key '${key}'`)
 }
 
@@ -148,7 +148,7 @@ const servers = [
 assert.deepEqual(exported.serversOf(undefined), [], 'a namespace that never loaded reads as an empty list')
 assert.deepEqual(exported.serversOf({ servers }), servers)
 
-const ok = { serverName: 'new-one', url: 'https://example.com/mcp', toolCallTimeoutMs: '' }
+const ok = { serverName: 'new-one', url: 'https://example.com/mcp', headers: '', toolCallTimeoutMs: '' }
 assert.equal(exported.validateDraft(ok, servers, -1), null, 'a fresh, unique, http endpoint must pass')
 assert.equal(exported.validateDraft({ ...ok, serverName: 'bad name!' }, servers, -1), 'errorName')
 assert.equal(exported.validateDraft({ ...ok, serverName: 'idea' }, servers, -1), 'errorDuplicate',
@@ -157,11 +157,29 @@ assert.equal(exported.validateDraft({ ...ok, serverName: 'idea' }, servers, 0), 
 assert.equal(exported.validateDraft({ ...ok, url: 'ftp://example.com' }, servers, -1), 'errorUrl')
 assert.equal(exported.validateDraft({ ...ok, toolCallTimeoutMs: '500' }, servers, -1), 'errorTimeout')
 
+// Headers: blank is fine, a JSON object of strings is fine, anything else is refused
+// before it can reach the Host. An authenticated server (DBX) needs this key, and a
+// wrong shape here would otherwise become a silent 401 at connect time.
+assert.equal(exported.validateDraft({ ...ok, headers: 'not json' }, servers, -1), 'errorHeaders')
+assert.equal(exported.validateDraft({ ...ok, headers: '["Bearer x"]' }, servers, -1), 'errorHeaders', 'an array is not a header map')
+assert.equal(exported.validateDraft({ ...ok, headers: '{"X-Count": 3}' }, servers, -1), 'errorHeaders', 'header values must be strings')
+assert.equal(exported.validateDraft({ ...ok, headers: '{"Authorization": "Bearer x"}' }, servers, -1), null)
+assert.deepEqual(exported.parseHeaders('   '), { ok: true }, 'blank input carries no value, so the Host default {} wins')
+assert.deepEqual(exported.parseHeaders('{"Authorization": "Bearer x"}'), { ok: true, value: { Authorization: 'Bearer x' } })
+
 // A blank timeout is OMITTED, not sent as '' or 0: the Host default must win.
+// Blank headers are likewise omitted, never written as an empty object.
 assert.deepEqual(exported.serverOf({ ...ok, toolCallTimeoutMs: '  ' }), {
   serverName: 'new-one', url: 'https://example.com/mcp', failOnStartupError: false, enabled: true,
 })
 assert.equal(exported.serverOf({ ...ok, toolCallTimeoutMs: '30000' }).toolCallTimeoutMs, 30000)
+assert.deepEqual(exported.serverOf({ ...ok, headers: '{"Authorization": "Bearer x"}' }).headers, { Authorization: 'Bearer x' })
+assert.equal(exported.serverOf({ ...ok, headers: '' }).headers, undefined, 'blank headers must be omitted, not sent as {}')
+
+// The edit form round-trips stored headers back into the textarea.
+assert.equal(exported.draftOf({ ...ok, headers: { Authorization: 'Bearer x' } }).headers, '{"Authorization":"Bearer x"}')
+assert.equal(exported.draftOf({ ...ok, headers: {} }).headers, '', 'an empty map pre-fills as blank, not as {}')
+assert.equal(exported.emptyDraft().headers, '')
 
 assert.deepEqual(exported.replaceAt(servers, 5, { serverName: 'appended' }).map((row) => row.serverName), ['idea', 'dbx', 'appended'], 'index out of range appends (that is how Add works)')
 assert.deepEqual(exported.replaceAt(servers, 1, { serverName: 'replaced' }).map((row) => row.serverName), ['idea', 'replaced'])
@@ -174,7 +192,7 @@ assert.ok(!source.includes('settingsScope'), 'the client service is configForms 
 assert.ok(source.includes('data-plugin-css'), 'the stylesheet must carry the loader cleanup attributes')
 // Width must reach the primitive itself: `.ms-control input` does not style it.
 const inputBlocks = source.match(/jsx\(Input, \{[^}]*\}/gu) ?? []
-assert.ok(inputBlocks.length >= 3, `expected the three editor inputs, got ${inputBlocks.length}`)
+assert.ok(inputBlocks.length >= 4, `expected the four editor inputs (name, url, headers, timeout), got ${inputBlocks.length}`)
 for (const block of inputBlocks) {
   assert.ok(/className: 'ms-input'/u.test(block), `every Input needs the width class: ${block.slice(0, 60)}…`)
 }

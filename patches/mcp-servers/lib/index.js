@@ -34,6 +34,14 @@ const ServerSchema = z.object({
   serverName: z.string(),
   /** Streamable HTTP 端点。 */
   url: z.string(),
+  /**
+   * 额外请求头。官方 client 的 streamable 分支本来就有这一项
+   * （`dsh-mcp-client/lib/index.js:795` 的 `headers: z.dict(String).default({})`，
+   * `:46` 把它塞进 `requestInit`），要带鉴权的服务（如 DBX 的 bearer token）靠它。
+   * 这里必须显式声明：我们自己这份 ServerSchema 才是 `plainConfig()` 之后的校验关卡，
+   * 没声明的键在进 `toMcpConfig()` 之前就被丢掉了。
+   */
+  headers: z.dict(String).default({}),
   // IDEA 实测：冷分析一个新文件 3.6s、热复用 0.13s、8 文件批量 4.9s。
   toolCallTimeoutMs: z.number().min(1000).default(90000),
   // false = 对方没起着时静默不激活（桌面端常常比被连的应用先起来）。
@@ -63,9 +71,22 @@ export function plainConfig(config) {
   return Object.fromEntries(Object.entries(config ?? {}).map(([key, value]) => [key, isVolatile(value) ? value.get() : value]))
 }
 
-/** 一条服务 -> 官方 client 认得的 streamable 配置（含它自己的默认值）。 */
+/**
+ * 一条服务 -> 官方 client 认得的 streamable 配置（含它自己的默认值）。
+ *
+ * `headers` 必须换成一份**可变**副本：`.volatile()` 字段校验出来的对象是冻结的，
+ * 而官方 `z.dict(String)` 会**原地写入**它补默认值，撞上冻结就抛
+ * `Cannot assign to read only property '<name>' of object '#<Object>'` ——
+ * 外层 union 把它归成普通的 "expected … but got …"，看不出真正原因。
+ * 空 headers 不触发（没有键要写），所以只有填了鉴权头的服务会挂，这个坑在
+ * 上次改动前不存在（那时 `headers` 没被声明，进 `toMcpConfig()` 前就被丢了）。
+ */
 export function toMcpConfig(server) {
-  return mcpClient.Config({ ...server, transport: 'streamable-http' })
+  return mcpClient.Config({
+    ...server,
+    transport: 'streamable-http',
+    headers: { ...(server?.headers ?? {}) },
+  })
 }
 
 /**

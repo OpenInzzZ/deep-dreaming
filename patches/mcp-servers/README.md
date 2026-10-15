@@ -58,11 +58,24 @@ config:
 |------|------|------|
 | `serverName` | — | 工具名前缀；`[A-Za-z0-9_-]{1,32}`，全局唯一 |
 | `url` | — | Streamable HTTP 端点 |
+| `headers` | `{}` | 额外请求头；需要鉴权的服务在这里放 `Authorization` 等 |
 | `toolCallTimeoutMs` | `90000` | 单次工具调用超时（官方默认 60s） |
 | `failOnStartupError` | `false` | `false` = 对方没起着时静默不激活；`true` = 启动即报错 |
 | `enabled` | `true` | 本包自己的闸门：关掉就不挂 |
 
 `transport` 固定 `streamable-http`，不放进表单（填成 stdio 却没有 `command` 是死配置）。
+
+### `headers` 必须复制一份再交给官方 schema
+
+官方 `z.dict(String)` 补默认值时是**原地写入**输入对象，而 `.volatile()` 字段校验出来的
+元素是**冻结**的（`Object.isFrozen` 为真）。两者一撞就抛
+`Cannot assign to read only property '<name>' of object '#<Object>'`，外层 union 只会报
+一句笼统的 `expected { transport?: "stdio", … } but got {…}`。所以 `toMcpConfig()` 里
+`headers: { ...(server?.headers ?? {}) }` 这层复制是**承重**的，不是装饰。
+
+空 headers 不触发（没有键要写），只有配了鉴权头的服务才会挂 —— 这个坑因此很隐蔽。
+`tests/load-smoke.mjs` 对此的断言**必须走 `Config` 往返**（`viaConfig()`），
+只写字面量的测试会全绿却漏掉它。
 
 ## 已接入的服务：IDEA 代码诊断
 
@@ -98,6 +111,19 @@ config:
 
 1. 打开 设置 → MCP 服务 → 添加服务，填名称与端点，保存即挂。
 2. 想让它成为**出厂默认**（换机也要有），再往 `cordis.patch.yml` 的 `servers` 里加一条。
+3. 需要鉴权（如 DBX）就在 `headers` 里填 JSON 对象，例如
+   `{"Authorization": "Bearer <token>"}`；地址栏只填到 `/mcp`，**不要多写一个斜杠**。
+
+## 已接入的服务：DBX 数据库工具
+
+`http://127.0.0.1:5225/mcp`，广播 **25** 个工具（`dbx_list_connections`、`dbx_execute_query`、
+`dbx_describe_table` 等）。两个本机事实（2026-10-15 实测）：
+
+- **必须带 bearer token**：匿名请求是 `401`；token 在
+  `%APPDATA%\com.dbx.app\mcp-http-token`（64 位 hex）。
+- **token 不轮换**：该文件 10-13 写入后未变，期间 dbx.exe 重启过（`mcp-bridge-port`
+  会换，5225 是真正提供 MCP 的那个端口）。所以直接写进配置即可，不需要动态读。
+- 路径少一个斜杠都不行：`/mcp` 是 200，`//mcp` 是 404（`--path-as-is` 实测）。
 
 ## 验证
 

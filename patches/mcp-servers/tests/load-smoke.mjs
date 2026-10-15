@@ -105,6 +105,27 @@ assert.equal(mapped.transport, 'streamable-http', 'transport must be pinned, nev
 assert.equal(mapped.command, undefined, 'a streamable config must not carry the stdio branch keys')
 assert.deepEqual(mapped.reconnect, { enabled: true, initialDelayMs: 500, maxDelayMs: 30000, maxAttempts: 10 }, 'the OFFICIAL schema must fill its own reconnect policy')
 assert.deepEqual(mapped.headers, {}, 'the official schema defaults headers to {}')
+// Headers must survive the round trip: this patch has its own ServerSchema, so a
+// key it does not declare is dropped before toMcpConfig() ever sees it — that is
+// exactly how an authenticated server (DBX) stayed at 401 while looking configured.
+//
+// These cases go through `Config` — the REAL path `apply()` takes — rather than a
+// bare literal, because the two are NOT equivalent here: a `.volatile()` field
+// validates into a FROZEN element, and the official `z.dict(String)` writes its
+// default IN PLACE, so a non-empty headers map blows up with
+// "Cannot assign to read only property …" and the union reports only a generic
+// mismatch. Measured: the literal form passes while the frozen form throws, which
+// is why this bug survived the first test pass.
+const viaConfig = (servers) => host.plainConfig(host.Config({ servers })).servers
+const authed = host.toMcpConfig(viaConfig([{ serverName: 'dbx', url: 'http://127.0.0.1:5225/mcp', headers: { Authorization: 'Bearer t0ken' } }])[0])
+assert.deepEqual(authed.headers, { Authorization: 'Bearer t0ken' }, 'configured headers must reach the official transport requestInit')
+assert.deepEqual(host.toMcpConfig(viaConfig([{ serverName: 'idea', url: IDEA_URL }])[0]).headers, {},
+  'an entry with no headers must still validate to the {} default')
+assert.ok(Object.isFrozen(viaConfig([{ serverName: 'x', url: 'http://127.0.0.1:1/mcp' }])[0]),
+  'the validated element really is frozen — if this ever stops being true, the copy in toMcpConfig() is no longer load-bearing')
+// A literal still has to work (the live-mount block below passes one).
+assert.deepEqual(host.toMcpConfig({ serverName: 'dbx', url: 'http://127.0.0.1:5225/mcp', headers: { Authorization: 'Bearer t0ken' } }).headers,
+  { Authorization: 'Bearer t0ken' }, 'the literal form must keep working too')
 
 // --- 6. mount for real when IDEA is listening ------------------------------------
 const listening = await new Promise((resolve) => {

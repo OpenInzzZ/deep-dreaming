@@ -62,6 +62,8 @@ const zh = {
   nameHint: '字母、数字、下划线或短横线，最长 32 个字符，且不能与其它服务重名。',
   url: '服务地址',
   urlHint: 'Streamable HTTP 端点，例如 http://127.0.0.1:64342/stream',
+  headers: '请求头（JSON）',
+  headersHint: '留空表示不带额外头。需要鉴权的服务写在这里，例如 {"Authorization": "Bearer <token>"}。',
   timeout: '单次调用超时（毫秒）',
   timeoutHint: '留空按 90000 处理；IDEA 冷分析一个文件约 3.6 秒。',
   enabled: '启用',
@@ -69,6 +71,7 @@ const zh = {
   errorName: '名称不合法：只允许字母、数字、下划线、短横线，且不超过 32 个字符。',
   errorDuplicate: '名称已被另一个服务使用。',
   errorUrl: '地址必须以 http:// 或 https:// 开头。',
+  errorHeaders: '请求头必须是 JSON 对象，且每个值都是字符串，例如 {"Authorization": "Bearer ..."}。',
   errorTimeout: '超时至少 1000 毫秒。',
   stateOn: '运行中',
   stateOff: '已停用',
@@ -92,6 +95,8 @@ const en = {
   nameHint: 'Letters, digits, underscore or dash, up to 32 characters, unique across servers.',
   url: 'Endpoint',
   urlHint: 'A Streamable HTTP endpoint, e.g. http://127.0.0.1:64342/stream',
+  headers: 'Request headers (JSON)',
+  headersHint: 'Blank means no extra headers. An authenticated server\u2019s headers go here, e.g. {"Authorization": "Bearer <token>"}.',
   timeout: 'Per-call timeout (ms)',
   timeoutHint: 'Blank means 90000; a cold IDEA analysis of one file takes about 3.6s.',
   enabled: 'Enabled',
@@ -99,6 +104,7 @@ const en = {
   errorName: 'Invalid name: letters, digits, underscore and dash only, at most 32 characters.',
   errorDuplicate: 'Another server already uses this name.',
   errorUrl: 'The endpoint must start with http:// or https://.',
+  errorHeaders: 'Request headers must be a JSON object whose values are all strings, e.g. {"Authorization": "Bearer ..."}.',
   errorTimeout: 'The timeout must be at least 1000 ms.',
   stateOn: 'Running',
   stateOff: 'Disabled',
@@ -113,20 +119,46 @@ function serversOf(value) {
   return Array.isArray(value?.servers) ? value.servers : [];
 }
 
-/** An empty draft for the add form. */
+/** An empty draft for the add form. `headers` is the JSON text the user types. */
 function emptyDraft() {
-  return { serverName: '', url: '', toolCallTimeoutMs: '', failOnStartupError: false, enabled: true };
+  return { serverName: '', url: '', headers: '', toolCallTimeoutMs: '', failOnStartupError: false, enabled: true };
 }
 
 /** Pre-fill the edit form from a stored server (blank timeout means "use the default"). */
 function draftOf(server) {
+  const headers = server?.headers;
   return {
     serverName: server?.serverName ?? '',
     url: server?.url ?? '',
+    headers: headers && Object.keys(headers).length > 0 ? JSON.stringify(headers) : '',
     toolCallTimeoutMs: server?.toolCallTimeoutMs === undefined ? '' : String(server.toolCallTimeoutMs),
     failOnStartupError: server?.failOnStartupError === true,
     enabled: server?.enabled !== false,
   };
+}
+
+/**
+ * Parse the headers textarea.
+ *
+ * @returns `{ ok: true, value }` with an omitted `value` for blank input (so the
+ *   Host default `{}` wins), or `{ ok: false }` when the text is not a JSON
+ *   object of strings. Returning a flag — not a thrown error — keeps the caller
+ *   in charge of which copy key to show.
+ */
+function parseHeaders(text) {
+  const raw = String(text ?? '').trim();
+  if (raw === '') return { ok: true };
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false };
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return { ok: false };
+  for (const value of Object.values(parsed)) {
+    if (typeof value !== 'string') return { ok: false };
+  }
+  return { ok: true, value: parsed };
 }
 
 /**
@@ -140,6 +172,7 @@ function validateDraft(draft, servers, index) {
   if (!NAME_PATTERN.test(draft.serverName ?? '')) return 'errorName';
   if (servers.some((row, at) => at !== index && row?.serverName === draft.serverName)) return 'errorDuplicate';
   if (!/^https?:\/\//.test(draft.url ?? '')) return 'errorUrl';
+  if (!parseHeaders(draft.headers).ok) return 'errorHeaders';
   const text = String(draft.toolCallTimeoutMs ?? '').trim();
   if (text !== '' && (!Number.isFinite(Number(text)) || Number(text) < 1000)) return 'errorTimeout';
   return null;
@@ -148,11 +181,13 @@ function validateDraft(draft, servers, index) {
 /** Turn a draft into a stored server entry (blank timeout is omitted so the Host default applies). */
 function serverOf(draft) {
   const text = String(draft.toolCallTimeoutMs ?? '').trim();
+  const headers = parseHeaders(draft.headers);
   return {
     serverName: draft.serverName.trim(),
     url: draft.url.trim(),
     failOnStartupError: draft.failOnStartupError === true,
     enabled: draft.enabled !== false,
+    ...(headers.ok && headers.value !== undefined ? { headers: headers.value } : {}),
     ...(text === '' ? {} : { toolCallTimeoutMs: Number(text) }),
   };
 }
@@ -228,6 +263,12 @@ function ServerForm({ t, draft, onChange, onSubmit, onCancel, saving }) {
       error: errorOf('errorUrl'),
       children: jsx(Input, { className: 'ms-input', value: draft.url, placeholder: 'http://127.0.0.1:64342/stream', disabled: saving, onChange: (event) => onChange({ ...draft, url: event.target.value, touched: true }) }),
     }, 'url'),
+    jsx(Field, {
+      label: t('headers'),
+      hint: t('headersHint'),
+      error: errorOf('errorHeaders'),
+      children: jsx(Input, { className: 'ms-input', value: draft.headers, placeholder: '{"Authorization": "Bearer ..."}', disabled: saving, onChange: (event) => onChange({ ...draft, headers: event.target.value, touched: true }) }),
+    }, 'headers'),
     jsx(Field, {
       label: t('timeout'),
       hint: t('timeoutHint'),
@@ -344,6 +385,6 @@ function apply(ctx) {
   document.head.appendChild(style);
 })();
 
-module.exports = { apply, inject, NS, ENTRY_ID, serversOf, emptyDraft, draftOf, validateDraft, serverOf, replaceAt, removeAt };
+module.exports = { apply, inject, NS, ENTRY_ID, serversOf, emptyDraft, draftOf, parseHeaders, validateDraft, serverOf, replaceAt, removeAt };
 return module.exports;
 }});
