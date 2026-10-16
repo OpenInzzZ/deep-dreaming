@@ -44,7 +44,7 @@ deep-dreaming/
 ├── patches/                       # One directory per patch
 │   ├── dsh-project-memory/        # Memorix bridge: guidance section + first-turn auto-recall
 │   ├── session-cleanup/           # Auto-clean archived sessions by age/size
-│   ├── ui-settings-model-reasoning/ # Thinking switch + effort levels per custom llm-pi-ai model
+│   ├── ui-settings-model-capabilities/ # Thinking switch + effort levels + image-input state per custom llm-pi-ai model
 │   ├── ui-queue-tools/            # Queue message preview + reorder
 │   ├── temp-session/              # Sidebar button for ad-hoc temp sessions
 │   ├── whale-background/          # Whale-girl background image in chat area
@@ -54,7 +54,7 @@ deep-dreaming/
 │   ├── README.md                  # What is archived and why
 │   ├── web-scripts/               # start/restart/stop/update-dsh.ps1, install-desktop-shortcut.ps1, patch-cli.ps1
 │   ├── assets/                    # Shortcut icon + an unreferenced source image
-│   └── patches/ui-settings-{other,balance,plugin-manager}/  # retired settings sections
+│   └── patches/ui-settings-{other,balance,plugin-manager,model-reasoning}/  # retired settings sections + the superseded reasoning patch
 └── .dsh-memory/                   # LEGACY memory notes (Markdown + YAML front matter), gitignored
     ├── development_code_specification/
     ├── general/
@@ -70,7 +70,7 @@ Every patch is a Cordis plugin with a host half and optionally a client (browser
 ### Host Half (`lib/index.js` or `<patch>.mjs`)
 
 - Exports `apply(ctx, config?)` — the Cordis entry point.
-- Exports `Config` — a `z.object({...})` schemastery schema for entry config validation. Required *when the entry takes config*; a config-less plugin may omit it (`session-cleanup` and `ui-settings-model-reasoning` have one; `ui-queue-tools` and `temp-session` do not need one).
+- Exports `Config` — a `z.object({...})` schemastery schema for entry config validation. Required *when the entry takes config*; a config-less plugin may omit it (`session-cleanup` and `ui-settings-model-capabilities` have one; `ui-queue-tools` and `temp-session` do not need one).
 - Optionally exports `inject` — an array of service names required before `apply` runs.
 - Registers its client↔host transport as a fenced prefix route on `webServer` (see "Client ↔ Host transport"); `ctx.connection.rpc.handle` is broken in this dsh version and must not be used.
 - Registers settings by exporting a `Config` schema — **there is no registration call in 0.2.0-rc.2** (see "Settings" below and pitfall 16).
@@ -233,7 +233,7 @@ node patches/session-cleanup/session-cleanup.test.mjs
 # Cordis load smoke tests (need host dependency links)
 node patches/session-cleanup/tests/load-smoke.mjs
 node patches/dsh-project-memory/tests/plugin.smoke.mjs
-node patches/ui-settings-model-reasoning/tests/load-smoke.mjs
+node patches/ui-settings-model-capabilities/tests/load-smoke.mjs
 node patches/ui-queue-tools/tests/load-smoke.mjs
 node patches/whale-background/tests/load-smoke.mjs
 node patches/mcp-servers/tests/load-smoke.mjs
@@ -244,7 +244,7 @@ node patches/dsh-project-memory/tests/client-contract.mjs
 
 # Integration verification
 node patches/session-cleanup/verify-session-cleanup.mjs
-node patches/ui-settings-model-reasoning/verify-model-reasoning.mjs
+node patches/ui-settings-model-capabilities/verify-model-capabilities.mjs
 node patches/ui-queue-tools/verify-queue-tools.mjs
 node patches/temp-session/verify-temp-session.mjs
 ```
@@ -322,7 +322,7 @@ The bridge owns no storage, no tools and no settings namespace — Memorix's own
 |-------|-----------|-------------|-------------|-------------------|
 | dsh-project-memory | `lib/index.js` | `client.js` | (none) | (none) |
 | session-cleanup | `session-cleanup.mjs` | `client.js` | `/session-cleanup` | `session-cleanup` (the entry id; no registration call in 0.2.0-rc.2) |
-| ui-settings-model-reasoning | `lib/index.js` | `lib/client.js` | (none — `configForms.get('llm-pi-ai')`) | `llm-pi-ai` (the provider entry id) |
+| ui-settings-model-capabilities | `lib/index.js` | `lib/client.js` | (none — `configForms.get('llm-pi-ai')`) | `llm-pi-ai` (the provider entry id) |
 | ui-queue-tools | `lib/index.js` | `lib/client.js` | `/queue` | (none) |
 | temp-session | `lib/index.js` | `lib/client.js` | `/temp-session` | (none) |
 | whale-background | `lib/index.js` | `lib/client.js` | (none) | (none) |

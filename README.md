@@ -17,7 +17,7 @@ deep-dreaming/
 ├── patches/                      # 全部补丁,一补丁一目录(代码 + 测试 + README)
 │   ├── dsh-project-memory/       # 跨会话项目记忆(Memorix 桥接,组合包插件)
 │   ├── session-cleanup/          # 会话日志自动清理(目录包插件)
-│   ├── ui-settings-model-reasoning/  # 设置「模型」页扩展:自定义(llm-pi-ai)模型的思考开关 + 思考等级 + verify
+│   ├── ui-settings-model-capabilities/  # 设置「模型」页扩展:自定义(llm-pi-ai)模型的思考开关/等级 + 图片输入三态 + verify
 │   ├── ui-queue-tools/           # 排队消息增强:hover 全文预览 + 上下移排序 + verify
 │   ├── temp-session/             # 侧边栏一键发起不绑定项目的临时会话 + verify
 │   ├── whale-background/         # 会话区域鲸鱼娘背景图(bundle 补丁)
@@ -47,7 +47,7 @@ deep-dreaming/
 | [dsh-project-memory](patches/dsh-project-memory/) | 跨会话项目记忆:**Memorix 桥接**(存储/检索/去重/成熟度都在 Memorix)——注入提示词引导,并在会话第一轮召回既有记忆(带上本会话工作区根目录与项目绑定步骤),记忆存取由 Memorix 经 MCP(`mcp__memorix__*`)完成;记忆工具调用以**可折叠「记忆阶段」卡片**展示,**不产生额外对话轮次** | 作为 **bundle** 安装:`dsh plugin --profile desktop add`(或 `pnpm add`)进 profile 并登记到 `dsh.profile.bundles` + Memorix 全局安装与 `memorix setup --agent dsh --global` | [README](patches/dsh-project-memory/README.md) |
 | [session-cleanup](patches/session-cleanup/) | 按天数/容量定期清理归档会话,跳过活跃会话 | **bundle**:包内 `cordis.patch.yml` 行 + `install.ps1` pnpm link 进 profile 并登记 `dsh.profile.bundles` | [README](patches/session-cleanup/README.md) |
 | [ui-queue-tools](patches/ui-queue-tools/) | 排队消息增强:hover 预览全文 + 上移/下移排序(host 半经 Inbox.splice 重排) | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/ui-queue-tools/README.md) |
-| [ui-settings-model-reasoning](patches/ui-settings-model-reasoning/) | 设置「模型」页扩展:给自定义(llm-pi-ai)路由逐模型配置**思考开关 + 思考等级(档位与发送值)**,写回 `reasoningEfforts`,模型菜单随之出现「推理等级」 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/ui-settings-model-reasoning/README.md) |
+| [ui-settings-model-capabilities](patches/ui-settings-model-capabilities/) | 设置「模型」页扩展:给自定义(llm-pi-ai)路由逐模型配置**能力**——**思考开关 + 思考等级(档位与发送值)**写回 `reasoningEfforts`(模型菜单随之出现「推理等级」),**图片输入三态**(跟随上游 / 仅文本 / 支持图片)写回 `input`,补上官方勾选框表达不了的「继承」状态 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/ui-settings-model-capabilities/README.md) |
 | [temp-session](patches/temp-session/) | 侧边栏底部「临时会话」按钮:一键发起绑定**用户级临时目录**的会话,不关联任何项目 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/temp-session/README.md) |
 | [whale-background](patches/whale-background/) | 会话区域背景:在对话滚动区居中偏右显示鲸鱼娘透明图(13% 透明度),资源缺失时自动跳过而不影响启动 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/whale-background/README.md) |
 | [mcp-servers](patches/mcp-servers/) | **MCP 服务接入**:一张设置页管理多个外部 MCP 服务,清单存在配置里,加/删服务不用改 yml、不用重启。出厂默认那条是 **IDEA 代码诊断**——模型改完代码直接调 `mcp__idea__lint_files` / `get_file_problems` 拿 IDE 实时检查结果(实测冷分析 3.6s、8 文件批量 4.9s、59 个工具),不必为「符号解析不了」跑一遍编译。宿主端对每项挂一个官方 `@deepseek-ai/dsh-mcp-client` 子 fiber(官方一个 entry 只连一个 server,且它的 `z.union` 展不开成表单);客户端半端注册 `settings.section` 页——**运行时没有任何插件贡献 `plugins.row.config`,官方根本没有通用配置编辑器** | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/mcp-servers/README.md) |
@@ -78,7 +78,7 @@ $repo = (Resolve-Path .).Path          # 在仓库根执行;其它位置请指�
 # 1. 全部补丁都是 bundle:包内自带 cordis.patch.yml 行,install.ps1 负责
 #    pnpm link 进 profile + 登记 dsh.profile.bundles(下面的 junction 只是解析兜底)
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-plugin-session-cleanup" -Target "$repo\patches\session-cleanup"
-New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-settings-model-reasoning" -Target "$repo\patches\ui-settings-model-reasoning"
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-settings-model-capabilities" -Target "$repo\patches\ui-settings-model-capabilities"
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-queue-tools" -Target "$repo\patches\ui-queue-tools"
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-temp-session" -Target "$repo\patches\temp-session"
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-whale-background" -Target "$repo\patches\whale-background"
@@ -87,7 +87,7 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 #    装之前先删掉 profile 层同 id 的 - insert: 行,否则两层同 id 会让启动 fail-loud
 $cli = "D:\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
 & $cli plugin --profile desktop add "$repo\patches\session-cleanup"
-& $cli plugin --profile desktop add "$repo\patches\ui-settings-model-reasoning"
+& $cli plugin --profile desktop add "$repo\patches\ui-settings-model-capabilities"
 & $cli plugin --profile desktop add "$repo\patches\ui-queue-tools"
 & $cli plugin --profile desktop add "$repo\patches\temp-session"
 & $cli plugin --profile desktop add "$repo\patches\whale-background"
@@ -214,8 +214,8 @@ node patches/session-cleanup/verify-session-cleanup.mjs          # settings 集�
 node patches/session-cleanup/tests/load-smoke.mjs                # 真实 Cordis 加载冒烟(Invalid effect 回归)
 node patches/dsh-project-memory/tests/plugin.smoke.mjs           # Memorix 桥接:Config 校验 + 提示词/事件流(无回顾轮次)
 node patches/dsh-project-memory/tests/client-contract.mjs        # 浏览器半契约(记忆折叠卡注册与渲染)
-node patches/ui-settings-model-reasoning/verify-model-reasoning.mjs  # 模型思考配置:契约 + jsdom 渲染/交互/保存 ops
-node patches/ui-settings-model-reasoning/tests/load-smoke.mjs        # 真实 Cordis 加载冒烟
+node patches/ui-settings-model-capabilities/verify-model-capabilities.mjs  # 模型能力卡片:契约 + jsdom 渲染/交互/保存 ops
+node patches/ui-settings-model-capabilities/tests/load-smoke.mjs          # 真实 Cordis 加载冒烟
 node patches/ui-queue-tools/verify-queue-tools.mjs               # 排队工具 host 契约 + jsdom 拖拽/预览交互
 node patches/ui-queue-tools/tests/load-smoke.mjs                 # 真实 Cordis 加载冒烟(静态 inject 声明 + 前缀路由)
 node patches/temp-session/verify-temp-session.mjs                # temp-session host + client 契约 + 点击流程

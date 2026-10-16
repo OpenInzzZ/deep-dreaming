@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Model Capabilities",
+    "description": "Configures per-model capabilities for every custom pi-ai model in Settings → Models: the thinking switch and its effort wire values, plus whether image input follows the installed catalog, is text-only, or is supported — no hand-editing of cordis.patch.yml."
+  }
+}

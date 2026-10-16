@@ -259,7 +259,7 @@ function Add-InsertRow([string]$Content, [string]$Id, [string]$Name) {
 # --- 1. profile-side junctions for the directory-package patches --------------
 $links = @(
     @{ n = 'dsh-plugin-session-cleanup';            d = 'session-cleanup' },
-    @{ n = 'dsh-client-ui-settings-model-reasoning'; d = 'ui-settings-model-reasoning' },
+    @{ n = 'dsh-client-ui-settings-model-capabilities'; d = 'ui-settings-model-capabilities' },
     @{ n = 'dsh-client-ui-queue-tools';             d = 'ui-queue-tools' },
     @{ n = 'dsh-client-ui-temp-session';             d = 'temp-session' },
     @{ n = 'dsh-client-whale-background';            d = 'whale-background' }
@@ -316,9 +316,64 @@ foreach ($dir in $mcpLinkDirs) {
 # The strip happens per patch inside step 3 (immediately before that patch's
 # bundle install) so a crash between the two steps can only ever leave ONE
 # patch without a row, and the removed block is stashed for restore on failure.
-$bundlePatchDirs = @('session-cleanup', 'ui-settings-model-reasoning', 'ui-queue-tools', 'temp-session', 'whale-background', 'dsh-project-memory', 'mcp-servers')
+$bundlePatchDirs = @('session-cleanup', 'ui-settings-model-capabilities', 'ui-queue-tools', 'temp-session', 'whale-background', 'dsh-project-memory', 'mcp-servers')
 $removedRows = @{}
 $failed = 0
+
+# --- 2.4. Retire renamed bundles (old package name -> current directory) -------
+# A renamed bundle leaves BOTH of its old owners in the profile: a dependency
+# (pnpm link or `file:` copy into the profile's node_modules) and a
+# `dsh.profile.bundles` entry. The old package directory is gone from the repo,
+# so the Loader cannot resolve the row it still owns and fails the whole profile
+# load. Retire the entry, the dependency and the stray junction HERE, before the
+# store is inspected, so an upgraded copy of the repo converges on one owner per
+# row exactly like a fresh clone does.
+$renamedBundles = @(
+    @{
+        Old   = '@local/dsh-client-ui-settings-model-reasoning'
+        RowId = 'ui-settings-model-reasoning'
+        New   = '@local/dsh-client-ui-settings-model-capabilities'
+    }
+)
+foreach ($rename in $renamedBundles) {
+    $active = $false
+    foreach ($dir in $bundlePatchDirs) {
+        $candidate = Join-Path $dev "patches\$dir\package.json"
+        if (-not (Test-Path $candidate)) { continue }
+        if ((Read-Utf8 $candidate | ConvertFrom-Json).name -eq $rename.New) { $active = $true; break }
+    }
+    if (-not $active) { continue }
+
+    $state = Read-BundleState $profilePkg
+    if (-not (($state.Deps -contains $rename.Old) -or ($state.Bundles -contains $rename.Old))) { continue }
+
+    $manifestJson = Read-Utf8 $profilePkg | ConvertFrom-Json
+    if ($null -ne $manifestJson.dependencies) {
+        $prop = $manifestJson.dependencies.PSObject.Properties[$rename.Old]
+        if ($null -ne $prop) { $manifestJson.dependencies.PSObject.Properties.Remove($rename.Old) }
+    }
+    if ($null -ne $manifestJson.dsh -and $null -ne $manifestJson.dsh.profile -and $null -ne $manifestJson.dsh.profile.bundles) {
+        $kept = @($manifestJson.dsh.profile.bundles | Where-Object { $_ -ne $rename.Old })
+        $manifestJson.dsh.profile.bundles = $kept
+    }
+    Write-Utf8 $profilePkg ($manifestJson | ConvertTo-Json -Depth 32)
+    Write-Host "  [FIX] retired renamed bundle '$($rename.Old)' from the profile"
+
+    $pruned = Remove-InsertRow -Content (Read-Utf8 $patchFile) -Id $rename.RowId
+    if ($pruned.Removed -gt 0) {
+        Write-Utf8 $patchFile $pruned.Content
+        Write-Host "  [FIX] removed legacy profile-layer row '$($rename.RowId)'"
+    }
+    foreach ($stray in @(
+        (Join-Path $profileDir ('node_modules\' + $rename.Old)),
+        (Join-Path $localDir ($rename.Old -replace '^@local/', ''))
+    )) {
+        if (Test-Path $stray) {
+            Remove-Item $stray -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "  [FIX] removed stray link $stray"
+        }
+    }
+}
 
 # --- 2.5. Report the shared host-dependency store (READ-ONLY) -----------------
 # `~/.dsh/profiles/node_modules` is what answers every patch's host-side

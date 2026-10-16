@@ -83,7 +83,7 @@ if (Test-Path $profilePatch) {
 #      otherwise its row has no owner and the plugin silently never loads.
 $profilePkgPath = Join-Path $dshHome "profiles\$Profile\package.json"
 $profileNodeModules = Join-Path $dshHome "profiles\$Profile\node_modules"
-$bundlePatchDirs = @('session-cleanup', 'ui-settings-model-reasoning', 'ui-queue-tools', 'temp-session', 'whale-background', 'dsh-project-memory', 'mcp-servers')
+$bundlePatchDirs = @('session-cleanup', 'ui-settings-model-capabilities', 'ui-queue-tools', 'temp-session', 'whale-background', 'dsh-project-memory', 'mcp-servers')
 $profileDeps = @()
 $profileBundles = @()
 if (Test-Path $profilePkgPath) {
@@ -184,7 +184,7 @@ if (Test-Path $homePatch) {
 #    repo-side real path, so the repo tree must expose the host node_modules.
 #    Missing/dangling/empty-dir links are (re)created; real dirs that already
 #    provide @deepseek-ai are kept as-is.
-$depPlugins = @('dsh-project-memory', 'session-cleanup', 'ui-settings-model-reasoning', 'ui-queue-tools', 'temp-session', 'whale-background', 'mcp-servers')
+$depPlugins = @('dsh-project-memory', 'session-cleanup', 'ui-settings-model-capabilities', 'ui-queue-tools', 'temp-session', 'whale-background', 'mcp-servers')
 if (-not (Test-Path $modulesBase)) {
     Write-Host "  [!] ~/.dsh/profiles/node_modules not found; run ``dsh plugin --profile $Profile add`` first" -ForegroundColor Yellow
 } else {

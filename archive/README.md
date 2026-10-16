@@ -1,11 +1,11 @@
-# archive/ — 以 Web 端为准的资产（已归档，不再维护）
+# archive/ — 已归档资产（不再维护）
 
-本目录保留**以 DSH Web 端为准**时期的脚本与资产。项目现在以 **DSH 桌面端**
-（Electron，`dsh-desktop`）为唯一目标：桌面端由应用自己管理生命周期与更新，
-下面这些东西没有对应的执行者了，因此归档保留、**不再部署、不再保证可运行**。
+本目录保留两类东西：**以 DSH Web 端为准**时期的脚本与资产（项目现在以 **DSH 桌面端**
+（Electron，`dsh-desktop`）为唯一目标），以及**已退役的补丁**（被后续补丁取代，或与官方
+能力重复）。它们一律**不再部署、不再保证可运行**。
 
-放在这里而不是删掉，是为了在需要时能读懂旧行为（例如排查历史故障、或把某段
-逻辑移植到桌面端）。
+放在这里而不是删掉，是为了在需要时能读懂旧行为（例如排查历史故障、或把某段逻辑移植到
+新补丁里）。
 
 ## `web-scripts/`
 
@@ -25,6 +25,7 @@
 | `ui-settings-other/` | Web 设置「其他」页：服务运行状态、创建桌面快捷方式、检查更新、重启服务（三阶段进度条）、favicon 覆盖；配套 Web 生命周期脚本 | 这些能力都以 **Web 端生命周期**为准。桌面端的运行状态、更新与重启由应用自己负责，快捷方式也无意义（应用本身就是入口）。曾一度改造为只读余额页 `ui-settings-balance` |
 | `ui-settings-balance/` | 只读「账户余额」页：充值 / 赠金余额，经宿主 `deepseekAccount` 读取 | **重复建设**：桌面端自带的「账号与余额」页（`@deepseek-ai/dsh-client-ui-settings-account`）已提供同样两行，另有「更多账号信息」「查询用量」和**充值按钮**。用户补丁只做出一个功能子集，还在 sidebar 上多了一个近义入口，因此退役 |
 | `ui-settings-plugin-manager/` | 设置「插件管理」标签页：整份 loader 条目清单 + 分类/启用状态/运行状态三个过滤器 + 每行的启停开关 | **启停与官方重复**：官方 `pluginManager.setPluginEnabled` 写的是同一层、同一 YAML 形状，入口另有侧栏「插件」页、agent 工具 `plugin_manager` 与 `dsh plugin` CLI。归档前已修好它两处真实故障（写死 `profiles/web`；把 loader `entryId` 当补丁行 id 导致永不匹配却回报成功）并补了测试，但既然官方覆盖了核心能力，仍选择整体退役 |
+| `ui-settings-model-reasoning/` | 设置「模型」页扩展：给自定义（`llm-pi-ai`）路由逐模型配置**思考开关 + 思考等级**，写回 `reasoningEfforts` | **被后续补丁取代**（不是失败）：迭代为 `patches/ui-settings-model-capabilities`，把同一条目扩成「模型能力」卡片——思考之外并入**图片输入三态**（跟随上游 / 仅文本 / 支持图片），补上官方勾选框无法表达的「继承」状态。loader 条目 id 与包名随之改名（`…-model-reasoning` → `…-model-capabilities`），旧行由 `scripts/install.ps1` 的 `$renamedBundles` 幂等注销 |
 
 > `ui-settings-other/` 归档时按新归属拆分过：它的 5 个生命周期脚本与 `scripts/patch-cli.ps1`
 > 一起并入 `web-scripts/`（逐字节相同，因此归档目录里不再留副本），4 个资产分别落到仓库级
