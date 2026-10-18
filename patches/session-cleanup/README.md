@@ -67,21 +67,23 @@ CLI 检测到包声明的 `dsh.bundle` 后会自动完成 pnpm link + 登记
 配置来源(优先级从低到高):schema 默认值 < 组合层条目配置
 (包内 `cordis.patch.yml` 的 `config`)< 设置文档用户层。**推荐在界面配置**:
 
-1. 打开 DSH 桌面端 → **设置** → **插件** → **插件配置** 标签页;
-2. 找到 **会话清理** 卡片,展开即可编辑全部字段;
-3. 修改后点 **保存** —— 配置写入 `~/.dsh/settings.yaml`(namespace
-   `session-cleanup`),**即时生效**(定时器按新间隔重建,保存即触发一次
-   清理);点 **恢复默认** 可整体回退到组合层配置。
+1. 打开 DSH 桌面端 → **设置** → **会话清理**;
+2. 展开即可编辑全部字段;
+3. 修改后点 **保存** —— 配置写入 profile 的配置文档(entry `session-cleanup`
+   的 `config`),**即时生效**(定时器按新间隔重建,保存即触发一次清理);
+   点 **恢复默认** 可整体回退到组合层配置。
 
 > 配置卡片经插件自身的 `/session-cleanup` 前缀路由读写(getConfig /
 > setConfig / resetConfig;`POST /session-cleanup/<endpoint>`,注册在
-> `webServer` 服务上,自带同源栅栏 + 只收 POST + 只收 `application/json`),
-> 不依赖 dsh 设置的暴露白名单(apiproxy),在
-> **设置 → 插件 → 插件配置** 页编辑(插件管理页仅负责插件启停,不承载
-> 配置卡片)。
+> `webServer` 服务上,自带同源栅栏 + 只收 POST + 只收 `application/json`)。
+> 宿主侧不再调用 `ctx.settings.register`(0.2.x 的 `SettingsForms` 没有这个
+> 方法):所有字段标 `.volatile()` 后由宿主的配置文档承载用户层,读走
+> `settings.describe()`,写走 `settings.update()` / `replace()`(命名空间就是
+> loader entry id `session-cleanup`),并监听 `settings/document-updated`
+> 重建定时器。
 >
-> 载体是**声明的依赖**:`ctx.inject(['webServer', 'sessions'], …)` 让激活等待
-> HTTP 载体就绪,而不是在回调里 `ctx.get('webServer')` 与载体绑定竞态 ——
+> 载体是**静态声明的依赖**(`export const inject = ['sessions', 'webServer']`),
+> 插件只在两者都绑定后激活;不在回调里 `ctx.get('webServer')` 与载体绑定竞态 ——
 > 后者会在载体尚未 listen 时读到 `undefined` 并静默跳过整个传输通道。
 >
 > 为什么不是 `ctx.connection.rpc.handle`:dsh 0.1.5-rc.1 的 Connection 注册表
@@ -90,18 +92,19 @@ CLI 检测到包声明的 `dsh.bundle` 后会自动完成 pnpm link + 登记
 > `owner.effect(() => owner.webServer.register(route))`,`owner` 从未声明
 > `webServer`),通道根本不会存在,浏览器请求会落到 SPA 兜底。迁移做法与
 > `ui-settings-other` 一致:`createRpcRoute(path, handle)` + `webServer.register`,
-> 且路由注册排在设置分区之前 —— inject 回调抛错会回滚它此前注册的全部
+> 且路由注册排在设置桥之前 —— inject 回调抛错会回滚它此前注册的全部
 > effect,传输先落地才不会被设置挂掉带走。
 
-> 手动编辑 `~/.dsh/settings.yaml` 同样生效(文件被监听,改动即重载):
+> 手动编辑 profile 配置文档同样生效(文件被监听,改动即重载):
 >
 > ```yaml
-> session-cleanup:
->   maxAgeDays: 30
->   maxTotalMB: 1024
->   keepSessions: 5
->   intervalMinutes: 360
->   dryRun: false
+> - id: session-cleanup
+>   config:
+>     maxAgeDays: 30
+>     maxTotalMB: 1024
+>     keepSessions: 5
+>     intervalMinutes: 360
+>     dryRun: false
 > ```
 
 ## 配置项
@@ -151,12 +154,13 @@ node patches/session-cleanup/tests/load-smoke.mjs          # 真实 Cordis 加�
 
 覆盖:超龄删除、`keepSessions` 保护、容量上限(含"超龄释放的空间已足够时不得
 再多删"的重复计数回归)、活跃会话跳过、演练模式、空项目目录清理;host 侧
-settings 注册与配置变更重建定时器、无 settings 时回退条目配置、apply 不返回
-thenable 的 P0 回归守卫、`/session-cleanup` 前缀路由随插件卸载注销、路由排在
-设置分区之前的顺序保证、isUnloading 卸载守卫,以及栅栏与端点(403 跨源 Origin /
-405 非 POST / 415 非 JSON / 404 端点段数 / 400 非 JSON body / 413 超 1MB /
-500 handler 抛错;getConfig 回退条目配置、setConfig/resetConfig 经设置 scope
-写入);client 侧配置卡片渲染、逐字段按宿主 schema 校验(`intervalMinutes`
+settings 文档读取(`describe`)/写入(`update`/`replace`)、配置变更重建定时器、
+无 settings 时回退条目配置、apply 不返回 thenable 的 P0 回归守卫、
+`/session-cleanup` 前缀路由随插件卸载注销、路由排在设置桥之前的顺序保证、
+isUnloading 卸载守卫,以及栅栏与端点(403 跨源 Origin / 405 非 POST / 415 非
+JSON / 404 端点段数 / 400 非 JSON body / 413 超 1MB / 500 handler 抛错;
+getConfig 回退条目配置、setConfig/resetConfig 经设置文档写入);client 侧配置
+卡片渲染、逐字段按宿主 schema 校验(`intervalMinutes`
 低于 1 时在字段下报错且不发出 setConfig)、保存/恢复默认经
 `POST /session-cleanup/setConfig|resetConfig`,fetch 桩直接接到真实 host 路由,
 网络/HTTP/信封失败均 reject。DOM 交互段需要 jsdom,未安装时自动跳过。

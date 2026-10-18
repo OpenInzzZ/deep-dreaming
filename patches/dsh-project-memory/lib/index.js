@@ -8,10 +8,10 @@
 //  1. Inject a system-prompt section telling the agent that Memorix manages
 //     cross-session project memory, that it is PROJECT-SCOPED, and when to use
 //     its tools.
-//  2. (autoRecall) On the FIRST turn of a recallable session, inject one
-//     context message that carries the session's project root, so the agent
-//     BINDS the project and then loads relevant memories before starting
-//     substantial work.
+//  2. (autoRecall) On the first admitted step of a recallable session, append
+//     one context message to that step's request, carrying the session's
+//     project root, so the agent BINDS the project and then loads relevant
+//     memories before starting substantial work.
 //
 // There is deliberately NO auto-review phase. It used to queue a
 // `agent.followup(...)` after every completed turn, and `followup()` is
@@ -26,18 +26,21 @@
 // the existing collapsible "记忆 · 保存/更新" tool card, which is the compact
 // form the user asked for.
 //
-// Why the recall uses `agent.inject(...)` rather than `followup(...)`: inject
-// queues model-facing context for the next pre-step WITHOUT waking the driver,
-// so the recall rides inside the user's own turn (exactly how DSH delivers its
-// own runtime-context notices) instead of opening another turn.
+// Why the recall rides the `agent/pre-step` waterfall rather than
+// `agent.inject(...)`: injecting from a `session/event` listener synchronously
+// calls `inbox.splice` -> `session.append('agent/inbox/spliced')`, but the
+// event is dispatched while the session's own append is still publishing
+// (`entry.appending === true`), so the session refuses the reentrant append
+// and the call throws. The previous implementation swallowed that error, so
+// the recall never reached the log. `agent/pre-step` is the official
+// request-admission hook: returning `messages` adds a durable user-role
+// context notice to the step the loop is about to run (the same mechanism the
+// shipped `time-context` and `model-selection` producers use), with no
+// reentrancy and no extra turn.
 //
-// Why it fires on `turn/start`: the previous implementation fired on the first
-// `user/message` session event and looked the agent up with `ctx.agents.get()`,
-// which returns undefined at that moment (the agent enters the registry when it
-// is published, after the message is logged). The recall therefore NEVER fired
-// — 0 recalls across the 8 largest session logs on this machine, while the
-// review fired on nearly every turn. `turn/start` is emitted by the agent that
-// owns the turn, so the lookup succeeds by construction.
+// The recall is per agent instance: the first pre-step marks the agent in a
+// Set, and `agent/disposed` clears it. A resumed session therefore gets
+// exactly one recall, on its first admitted step.
 //
 // Why the binding step exists (dsh 0.1.5 / Memorix 1.9): Memorix isolates
 // memory per git-backed project, and DSH starts ONE MCP server for the whole
@@ -64,7 +67,7 @@ import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import z from "@deepseek-ai/schemastery";
 
 const name = "project-memory";
-const inject = ["systemPrompt", "agents"];
+const inject = ["systemPrompt"];
 
 /**
  * Entry config schema. Only the recall toggle remains; all storage-layer
@@ -74,8 +77,8 @@ const inject = ["systemPrompt", "agents"];
  * are stripped, so an old patch-file config does not fail startup).
  */
 export const Config = z.object({
-  /** Session-start memory recall: on the first turn of a session with a
-   * workspace, hand the agent its project root and the binding step, so it
+  /** Session-start memory recall: on the first admitted step of a session with
+   * a workspace, hand the agent its project root and the binding step, so it
    * loads relevant memories before starting substantial work (renders as a
    * folded context row, never as a turn of its own). */
   autoRecall: z.boolean().default(true),
@@ -132,40 +135,41 @@ function projectRootOf(agent) {
   return typeof cwd === "string" && cwd.length > 0 ? cwd : "(unknown workspace)";
 }
 
-/** Install the session-start memory recall: on the FIRST turn of a reviewable
- * session, inject one context message into that turn.
+/** Install the session-start memory recall on the agent's first admitted step.
  *
- * `inject` (next-step, no wake) rather than `followup` (next-turn, wake): the
- * former rides inside the user's own turn like any other context notice, the
- * latter would open a turn of its own. Fires at most once per agent.
+ * A returned `messages` entry from the `agent/pre-step` waterfall is written to
+ * the session as a durable user-role message and included in the request the
+ * step is about to send, which is exactly the "folded context row inside the
+ * user's turn" this bridge wants. It never opens a turn of its own.
  *
- * `turn/start` rather than the first `user/message`: the agent is only in
- * `ctx.agents` once published, which happens after the first message is logged,
- * so a message-triggered lookup always missed (see the module comment). */
+ * `signal.aborted` and a `reject` decision skip the recall: the step will not
+ * run, so adding a message would only leak an orphan row. The agent is marked
+ * as recalled only when the message is actually appended to the decision.
+ *
+ * @param ctx - plugin context.
+ * @param autoRecall - config toggle; false registers nothing.
+ */
 function installRecall(ctx, autoRecall) {
   if (!autoRecall) return;
   const recalled = new Set();
   ctx.on("agent/disposed", ({ agent }) => {
     recalled.delete(agent);
   });
-  ctx.on("session/event", (session, event) => {
-    if (event.type !== "turn/start") return;
-    const agent = ctx.agents.get(session.id);
-    if (agent === void 0 || agent.session !== session) return;
-    if (recalled.has(agent)) return;
-    if (!recallable(agent)) return;
-    recalled.add(agent);
+  ctx.on("agent/pre-step", async ({ agent, signal }, next) => {
+    const decision = await next();
+    // The step was vetoed (or is being aborted): nothing will be admitted.
+    if (decision.kind === "reject" || signal.aborted) return decision;
+    if (recalled.has(agent) || !recallable(agent)) return decision;
     try {
-      // The source shape is the canonical one: a custom `kind` is not among the
-      // session-format migrator's known source kinds, so a log containing one
-      // would fail to migrate when an old session is reopened.
-      agent.inject(createUserMessage({
+      const message = createUserMessage({
         content: [{ type: "text", text: recallPrompt(projectRootOf(agent)) }],
-        source: { kind: "plugin", plugin: name, form: "notice", summary: "项目记忆召回 · memory search" }
-      }));
+        source: { kind: "plugin:project-memory", form: "notice", summary: "项目记忆召回 · memory search" }
+      });
+      recalled.add(agent);
+      return { ...decision, messages: [...decision.messages, message] };
     } catch (error) {
-      recalled.delete(agent);
-      ctx.logger.warn(`project-memory: could not inject the memory recall for agent "${agent.id}": ${String(error)}`);
+      ctx.logger.warn(`project-memory: could not build the memory recall for agent "${agent.id}": ${String(error)}`);
+      return decision;
     }
   });
 }

@@ -56,17 +56,18 @@ memory search」,第一步就是绑定,然后用
 1. **常驻指令**(注入每个会话的 system prompt,`systemPrompt.section`
    `project-memory:guidance`):说明 Memorix 是项目级记忆、必须绑定、
    何时检索(brief)、何时保存(store),以及只记事实与结论。
-2. **会话开始自动召回**(`autoRecall`,默认开):会话**第一轮**
-   (`turn/start`)把一条 context notice 注入**当轮**——携带本会话工作区
-   根目录与绑定调用,要求先绑定、再取 brief。每个会话仅一次;子代理不触发;
-   没有工作区的会话不触发。
-   - 用 `agent.inject(...)`(next-step,**不唤醒**驱动器)而不是
-     `agent.followup(...)`:前者像 DSH 自己的运行时上下文一样落在用户本轮
-     之内,后者按官方语义是「**该条目自成一整轮**」,会凭空多出一轮对话。
-   - 触发点用 `turn/start` 而不是第一条 `user/message`:第一条用户消息落盘时
-     agent 还没进入 `ctx.agents`(发布顺序在消息之后),`agents.get()` 必然
-     返回 undefined —— 这正是旧版召回**从未生效**的原因(实测:本机 8 份最大
-     的会话日志里 0 次召回)。
+2. **会话开始自动召回**(`autoRecall`,默认开):agent 的**第一个被准入的步骤**
+   (`agent/pre-step`)把一条 context notice 追加进该步的模型消息批次——携带本
+   会话工作区根目录与绑定调用,要求先绑定、再取 brief。每个 agent 实例仅一次;
+   子代理不触发;没有工作区的会话不触发;被拒绝/中止的步骤不消耗这次机会。
+   - 走官方 `agent/pre-step` 瀑布(与 `time-context`、`model-selection` 相同):
+     返回 `messages: [...decision.messages, recall]`,消息由会话持久化为带来源
+     的 user-role context row;它不是 `followup`,不会自成一轮。
+   - 为什么不是 `agent.inject(...)`:从 `session/event` 监听器里调用它会同步
+     `inbox.splice` → `session.append`;而事件正是在会话自身 append 尚未发布完
+     (`appending === true`)时分发的,重入追加被拒绝
+     ("session append cannot reenter while another append is being published")。
+     旧实现吞掉了这个异常,所以召回**从未落盘**。
 3. **不产生任何额外轮次**:插件不再在回合结束后做任何事(见下)。
 
 ### 为什么没有「会话结束自动回顾」
@@ -111,8 +112,12 @@ primitives 的 `DisclosureRow`):
 修改 `client.js` 后需重启 DSH 桌面端生效(与其它补丁源码一致)。
 
 会话开始的**召回提示**本身以官方 context notice 形态注入
-(`source.form = 'notice'` + `summary`),折叠为一行摘要,并落在用户本轮之内,
-不占额外对话轮次;召回里出现的 `mcp__memorix__*` 调用同样渲染为上面的卡片。
+(`source.kind = 'plugin:project-memory'` + `form = 'notice'` + `summary`),
+折叠为一行摘要,并落在用户本轮之内,不占额外对话轮次;召回里出现的
+`mcp__memorix__*` 调用同样渲染为上面的卡片。会话格式 v4 拒绝旧的
+`kind: 'plugin'` 包装(写入时即报 `format v4 message requires a
+producer-owned source kind`),`plugin:<名称>` 正是 v3→v4 迁移器为未知插件
+生成的来源拼写。
 
 ## 从旧版迁移
 
@@ -188,13 +193,14 @@ node patches/dsh-project-memory/tests/client-contract.mjs  # 浏览器半:4 个�
 
 冒烟覆盖:apply 返回值不是 thenable(Invalid effect 回归)、Config 对错误
 类型响亮失败而旧键(含 `autoReview`)被容忍、guidance 段落含绑定步骤与工具名、
-召回在**第一轮** `turn/start` 时以 `inject` 投递(不是 followup、不自成一轮)、
-携带本会话工作区根目录、只触发一次、排除子代理与无工作区会话、
-**轮次结束/再次空闲后不再产生任何消息**(旧 autoReview 的噪音回归守卫)。
+召回在**第一个被准入的 `agent/pre-step`** 追加进消息批次(不是 followup、不自成
+一轮、不替换原有批次)、携带本会话工作区根目录、按 agent 只触发一次、被拒绝/
+中止的步骤不消耗召回、排除子代理与无工作区会话、**
+轮次结束/再次空闲后不再产生任何消息**(旧 autoReview 的噪音回归守卫)。
 
 ## 相关文件
 
-- `lib/index.js` — host 半:guidance 段落 + 第一轮召回(inject)
+- `lib/index.js` — host 半:guidance 段落 + 首个 pre-step 召回
 - `client.js` — 浏览器半:Memorix 工具的折叠卡片
 - `cordis.patch.yml` — bundle 层条目(`autoRecall` 默认值)
 

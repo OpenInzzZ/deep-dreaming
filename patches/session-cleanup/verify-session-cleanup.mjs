@@ -70,9 +70,9 @@ const sessionsRoot = mkdtempSync(join(tmpdir(), 'cleanup-verify-'))
 
 /**
  * `webServer` service double: records every register() as
- * `{ kind, path, handler }` plus the live-route count at each settings
- * `register()` (used to prove the transport is installed BEFORE the settings
- * section, so a throwing settings wiring cannot be mistaken for the reason).
+ * `{ kind, path, handler }` plus the live-route count at the first settings
+ * `describe()` (used to prove the transport is installed BEFORE the settings
+ * bridge, so a throwing settings wiring cannot be mistaken for the reason).
  * Handed to the mock context as the `webServer` property, exactly like a real
  * activation of a plugin that lists the carrier in its static `inject`.
  */
@@ -109,21 +109,27 @@ const makeWebServer = () => {
  * unconditional, so a missing carrier throws instead of silently skipping the
  * page's whole transport, which is exactly the symptom this fix removed.
  */
-function makeCtx({ withSettings, settingsThrows = false, withoutCarrier = false }) {
+function makeCtx({ withSettings, settingsThrows = false, withoutCarrier = false, entry = {} }) {
   const calls = {
     info: [],
     warn: [],
-    registered: null,
-    watchCb: null,
     cleanups: [],
     settingsUpdates: [],
     settingsReplaces: [],
+    /** How often the host half read the config document. */
+    settingsDescribeCalls: 0,
+    /** Every document-change broadcast, for the live-rebuild assertions. */
+    settingsEmit: 0,
+    /** Listeners the host half attached to `settings/document-updated`. */
+    documentListeners: [],
     /** Every dependency list the host half declared *dynamically*, in order. */
     injectLists: [],
     /** Labels of the effects registered through `ctx.effect`, in order. */
     effectLabels: [],
-    /** Live route count at the moment the settings namespace registered. */
+    /** Live route count at the moment the settings document was first read. */
     routesAtSettingsRegister: null,
+    /** Set when a throwing settings provider fails the settings child fiber. */
+    settingsFailure: undefined,
   }
   const logger = {
     info: (...args) => { calls.info.push(args) },
@@ -143,32 +149,47 @@ function makeCtx({ withSettings, settingsThrows = false, withoutCarrier = false 
   // The settings provider, kept out of `ctx` itself: a real plugin reaches it
   // only through the inject callback, and an optional `ctx.get('settings')`
   // read answers `undefined` when the service was never provided.
+  //
+  // 0.2.x's `SettingsForms` has NO `register()`: the section IS the loader
+  // entry id, reads ride `describe()` and writes ride `update()` / `replace()`
+  // into the configuration document. The double reproduces exactly that face
+  // (and rejects a foreign namespace) so the test cannot pass against an API
+  // the real Host does not provide.
+  let user = {}
+  let revision = 0
+  const emitDocument = () => {
+    revision += 1
+    calls.settingsEmit += 1
+    for (const listener of [...calls.documentListeners]) listener('session-cleanup', revision)
+  }
+  calls.fireSettingsChange = emitDocument
   const settingsService = withSettings ? {
-    register: (ns, schema, options) => {
-      // Recorded before anything can throw: this is the live route count
-      // the settings section starts from.
-      calls.routesAtSettingsRegister = web.routes.length
-      if (settingsThrows) throw new Error('settings provider exploded during register (harness double)')
-      calls.registered = { ns, options }
-      const base = { ...host.DEFAULTS, ...options.base }
-      // The real scope layers a USER DOCUMENT over the composition base:
-      // `update` merges into the document, `replace` clears it, and
-      // `get()` always resolves base-over-document. Modelling the base
-      // as part of the mutable store would make 恢复默认 look like it
-      // erased the entry config.
-      let user = {}
-      return {
-        get: () => ({ ...base, ...user }),
-        watch: (cb) => { calls.watchCb = cb; return () => {} },
-        update: async (fields) => {
-          user = { ...user, ...fields }
-          calls.settingsUpdates.push(fields)
-        },
-        replace: async (fields) => {
-          user = { ...(fields ?? {}) }
-          calls.settingsReplaces.push(fields)
-        },
-      }
+    describe: () => {
+      calls.settingsDescribeCalls += 1
+      if (calls.routesAtSettingsRegister === null) calls.routesAtSettingsRegister = web.routes.length
+      if (settingsThrows) throw new Error('settings provider exploded during describe (harness double)')
+      return [{
+        ns: 'session-cleanup',
+        // The real descriptor's `value` is the resolved section: composition
+        // entry over schema defaults, with the user document on top.
+        value: { ...host.DEFAULTS, ...entry, ...user },
+        base: { ...host.DEFAULTS, ...entry },
+        user: { ...user },
+        revision,
+        writable: true,
+      }]
+    },
+    update: async (ns, fields) => {
+      if (ns !== 'session-cleanup') throw new Error(`update for foreign namespace ${ns} (harness double)`)
+      user = { ...user, ...fields }
+      calls.settingsUpdates.push(fields)
+      emitDocument()
+    },
+    replace: async (ns, section) => {
+      if (ns !== 'session-cleanup') throw new Error(`replace for foreign namespace ${ns} (harness double)`)
+      user = { ...(section ?? {}) }
+      calls.settingsReplaces.push(section)
+      emitDocument()
     },
   } : undefined
   // What every fiber of this plugin sees: the two STATIC dependencies are
@@ -179,6 +200,16 @@ function makeCtx({ withSettings, settingsThrows = false, withoutCarrier = false 
     web,
     effect,
     sessions: { list: () => [] },
+    // `ctx.on` — the settings bridge listens for document changes. Cordis
+    // disposes these with the fiber; the double returns the same disposer.
+    on: (event, listener) => {
+      if (event !== 'settings/document-updated') return () => {}
+      calls.documentListeners.push(listener)
+      return () => {
+        const at = calls.documentListeners.indexOf(listener)
+        if (at >= 0) calls.documentListeners.splice(at, 1)
+      }
+    },
     ...(withoutCarrier ? {} : { webServer: web.service }),
   }
   const ctx = {
@@ -327,6 +358,11 @@ const assertErrorEnvelope = (label, result) => {
   if (/ctx\.inject\(\s*\[[^\]]*['"]webServer/.test(hostCode)) {
     throw new Error('the web carrier must stay a STATIC inject, not a dynamic gate inside apply')
   }
+  // 0.2.x's SettingsForms has no register(); a reintroduced call would fail
+  // inside the inject child fiber and silently take the write path down again.
+  if (/settings\s*\.\s*register\s*\(/.test(hostCode)) {
+    throw new Error('the host half must not call settings.register: 0.2.x has no such API (use describe/update/replace)')
+  }
   // 载体缺席在真实运行里到不了（静态依赖会先等它绑定），这里断言的是宿主代码
   // 已经没有 undefined 分支：只能响亮地抛，不能悄悄不注册。
   const ctx = makeCtx({ withSettings: true, withoutCarrier: true })
@@ -363,7 +399,7 @@ const assertErrorEnvelope = (label, result) => {
   }
   if (ctx.calls.info.length === 0) throw new Error('startup cleanup tick must run from the entry config')
   if (!ctx.calls.info[0][0].includes('scanned=')) throw new Error(`tick summary missing: ${ctx.calls.info[0]}`)
-  if (ctx.calls.registered !== null) throw new Error('no settings service must not register a namespace')
+  if (ctx.calls.settingsDescribeCalls !== 0) throw new Error('no settings service must not read a settings document')
   if (ctx.web.routes.length !== 1) throw new Error(`exactly one route must be registered, got ${ctx.web.routes.length}`)
   // 路由由恰好一个 effect 持有 —— 卸载时就是它把路由放掉的（下面 dispose 验）。
   const routeEffects = ctx.calls.effectLabels.filter((label) => label !== null && label.includes('rpc route'))
@@ -463,25 +499,29 @@ const assertErrorEnvelope = (label, result) => {
   console.log('host fence OK: 403 foreign Origin (same origin passes) / 405 non-POST / 415 non-JSON (charset passes) / 404 empty+multi-segment / 400 bad body / 413 over 1 MB / 500 throwing handler')
 }
 
-// 2) settings service -> namespace registered, watch rebuilds the timer, the route writes through the scope
+// 2) settings service -> the document layer overrides the entry config, a
+//    document change rebuilds the timer, and the route writes through it
 {
   const entry = { sessionsRoot, maxAgeDays: 7, intervalMinutes: 9, dryRun: true }
-  const ctx = makeCtx({ withSettings: true })
+  const ctx = makeCtx({ withSettings: true, entry })
   host.apply(ctx, entry)
   await settle()
-  if (ctx.calls.registered === null || ctx.calls.registered.ns !== 'session-cleanup') {
-    throw new Error(`namespace not registered: ${JSON.stringify(ctx.calls.registered)}`)
+  if (ctx.calls.settingsDescribeCalls === 0) throw new Error('the settings document was never read')
+  if (ctx.calls.routesAtSettingsRegister !== 1) {
+    throw new Error(`the route must already be live when settings is wired, saw ${ctx.calls.routesAtSettingsRegister} route(s)`)
   }
-  if (ctx.calls.registered.options.base !== entry) throw new Error('entry config must be the composition base')
   if (ctx.calls.info.length === 0) throw new Error('startup tick must run with settings present')
   const before = ctx.calls.info.length
-  ctx.calls.watchCb()
+  // The real SettingsForms emits `settings/document-updated` after an accepted
+  // write; the double fires the same event from `update()`/`replace()` and via
+  // this helper, so the live-rebuild contract is measured, not inferred.
+  ctx.calls.fireSettingsChange()
   await settle()
-  if (ctx.calls.info.length <= before) throw new Error('watch change must rebuild the timer (startup tick again)')
+  if (ctx.calls.info.length <= before) throw new Error('a document change must rebuild the timer (startup tick again)')
 
   const route = routeOf(ctx)
   const set = await callEndpoint(route, 'setConfig', { args: { fields: { maxAgeDays: 3 } } })
-  if (!set.ok || set.value.maxAgeDays !== 3) throw new Error(`setConfig through the scope: ${JSON.stringify(set)}`)
+  if (!set.ok || set.value.maxAgeDays !== 3) throw new Error(`setConfig through the document: ${JSON.stringify(set)}`)
   if (ctx.calls.settingsUpdates.length !== 1 || ctx.calls.settingsUpdates[0].maxAgeDays !== 3) {
     throw new Error(`settings update not written: ${JSON.stringify(ctx.calls.settingsUpdates)}`)
   }
@@ -496,6 +536,8 @@ const assertErrorEnvelope = (label, result) => {
   const reset = await callEndpoint(route, 'resetConfig')
   if (!reset.ok) throw new Error(`resetConfig: ${JSON.stringify(reset)}`)
   if (ctx.calls.settingsReplaces.length !== 1) throw new Error('settings replace not called by resetConfig')
+  // 恢复默认 resolves the composition entry again (the user layer is cleared).
+  if (reset.value.maxAgeDays !== 7) throw new Error(`resetConfig must fall back to the entry config: ${JSON.stringify(reset)}`)
 
   const afterWatch = ctx.calls.info.length
   dispose(ctx)
@@ -503,12 +545,12 @@ const assertErrorEnvelope = (label, result) => {
   if (ctx.calls.info.length !== afterWatch) {
     throw new Error('dispose must not rebuild the timer (isUnloading guard)')
   }
-  ctx.calls.watchCb()
+  ctx.calls.fireSettingsChange()
   await new Promise((resolve) => setTimeout(resolve, 50))
   if (ctx.calls.info.length !== afterWatch) {
-    throw new Error('watch callback after dispose must be guarded too')
+    throw new Error('a document event after dispose must be guarded too')
   }
-  console.log('host OK: settings namespace + watch rebuild + route writes through the scope + isUnloading guards')
+  console.log('host OK: settings document read/write + document-change rebuild + isUnloading guards')
 }
 
 // 2b) fail-soft: the transport must be installed BEFORE the settings section.
@@ -531,9 +573,8 @@ const assertErrorEnvelope = (label, result) => {
   if (!(ctx.calls.settingsFailure instanceof Error)) {
     throw new Error('the harness must have delivered the settings failure into the child fiber')
   }
-  if (ctx.calls.registered !== null) throw new Error('a throwing register must not be recorded as registered')
   if (ctx.calls.routesAtSettingsRegister !== 1) {
-    throw new Error(`the route must already be live when the settings section runs, saw ${ctx.calls.routesAtSettingsRegister} route(s)`)
+    throw new Error(`the route must already be live when the settings bridge runs, saw ${ctx.calls.routesAtSettingsRegister} route(s)`)
   }
   if (ctx.web.routes.length !== 1) throw new Error(`the route must still be live, got ${ctx.web.routes.length}`)
   const route = routeOf(ctx)
@@ -546,21 +587,21 @@ const assertErrorEnvelope = (label, result) => {
     throw new Error(`setConfig must degrade with settings-unavailable: ${JSON.stringify(set)}`)
   }
   dispose(ctx)
-  console.log('host fail-soft OK: a throwing settings register leaves the /session-cleanup route fully usable')
+  console.log('host fail-soft OK: a throwing settings describe leaves the /session-cleanup route fully usable')
 }
 
-// 2c) same wiring, measured instead of inferred: the settings namespace must be
-//     registered while the route is ALREADY live (Cordis rolls back every
+// 2c) same wiring, measured instead of inferred: the settings document must be
+//     first read while the route is ALREADY live (Cordis rolls back every
 //     effect registered before a throw in the same inject callback).
 {
   const ctx = makeCtx({ withSettings: true })
   host.apply(ctx, { sessionsRoot, dryRun: true, intervalMinutes: 9 })
   await settle()
   if (ctx.calls.routesAtSettingsRegister !== 1) {
-    throw new Error(`the route must be live before the settings section registers, saw ${ctx.calls.routesAtSettingsRegister} route(s)`)
+    throw new Error(`the route must be live before the settings document is read, saw ${ctx.calls.routesAtSettingsRegister} route(s)`)
   }
   dispose(ctx)
-  console.log('host order OK: the /session-cleanup route is installed before the settings section')
+  console.log('host order OK: the /session-cleanup route is installed before the settings bridge')
 }
 
 rmSync(sessionsRoot, { recursive: true, force: true })
@@ -690,16 +731,17 @@ const clientCtx = {
 }
 
 // One settings-capable host half, live for the whole client section: the card's
-// reads and writes are answered by the real route and the real settings scope.
+// reads and writes are answered by the real route and the real settings document.
 // The entry config carries the 45-day override the card must render (the mock
 // settings provider starts from exactly this base).
 let fetchCtx = null
-fetchCtx = makeCtx({ withSettings: true })
-host.apply(fetchCtx, {
+const cardEntry = {
   sessionsRoot: 'C:/__verify__/sessions',
   enabled: true, maxAgeDays: 45, maxTotalMB: 1024, keepSessions: 5,
   intervalMinutes: 360, dryRun: false,
-})
+}
+fetchCtx = makeCtx({ withSettings: true, entry: cardEntry })
+host.apply(fetchCtx, cardEntry)
 await settle()
 activeCtx = fetchCtx
 
@@ -811,15 +853,11 @@ if (JSDOM === null) {
   const doc = dom.window.document
 
   // A pristine host half for the render flow: the earlier cardApi section wrote
-  // through the installed scope, so this one starts from the documented 45-day
-  // override. `activeCtx` is what the fetch double answers from.
+  // through the installed document, so this one starts from the documented
+  // 45-day override. `activeCtx` is what the fetch double answers from.
   fetchCalls.length = 0
-  const domCtx = makeCtx({ withSettings: true })
-  host.apply(domCtx, {
-    sessionsRoot: 'C:/__verify__/sessions',
-    enabled: true, maxAgeDays: 45, maxTotalMB: 1024, keepSessions: 5,
-    intervalMinutes: 360, dryRun: false,
-  })
+  const domCtx = makeCtx({ withSettings: true, entry: cardEntry })
+  host.apply(domCtx, cardEntry)
   await settle()
   activeCtx = domCtx
 

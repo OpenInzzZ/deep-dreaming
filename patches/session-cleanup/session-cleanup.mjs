@@ -5,9 +5,10 @@
  * 跳过当前活跃会话。通过 cordis.patch.yml 的 insert 装载。
  *
  * 配置来源(优先级从低到高):schema 默认值 < 组合层 entry 配置
- * (cordis.patch.yml 的 config)< 设置文档的用户层。配置经 dsh-settings
- * 服务注册(namespace `session-cleanup`),可在 设置 → 插件 → 插件配置
- * 中可视化编辑;`applies: live`,保存后即时生效(定时器按新间隔重建)。
+ * (cordis.patch.yml 的 config)< 设置文档的用户层。0.2.x 的 settings 服务
+ * 没有 `register()`:字段标 `.volatile()` 后用户层由配置文档承载,
+ * `settings.describe()` 读、`settings.update()/replace()` 写(命名空间就是
+ * loader entry id `session-cleanup`),保存后即时生效(定时器按新间隔重建)。
  * settings 服务不存在时回退到组合层配置,行为与旧版一致。
  *
  * 配置项:
@@ -28,6 +29,7 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { readdir, rm, stat } from 'node:fs/promises'
 import z from '@deepseek-ai/schemastery'
+import { isVolatile } from '@deepseek-ai/cosmokit'
 
 export const name = 'session-cleanup'
 
@@ -40,17 +42,38 @@ export const SETTINGS_NAMESPACE = 'session-cleanup'
  * The export name must be exactly `Config`: the Cordis loader reads
  * `plugin.Config` (vendor/cordis registry.ts) to validate the entry config;
  * any other export name silently skips validation.
+ *
+ * Every field is `.volatile()`. The Host derives the settings section from
+ * `volatileForm(Config)` (`settings/src/index.ts`), skips an entry whose form
+ * is empty, and refuses a write to an unmarked field with
+ * `Config field "x" is not volatile`. The other half of that contract: once
+ * marked, the validated value is a `{ get }` accessor box, so `plainConfig()`
+ * must unwrap it before any arithmetic (same idiom as `llm-deepseek`'s
+ * `plainOptions()`).
  */
 export const Config = z.object({
-  enabled: z.boolean().default(true),
-  maxAgeDays: z.number().default(30),
-  maxTotalMB: z.number().default(1024),
-  keepSessions: z.number().default(5),
+  enabled: z.boolean().default(true).volatile(),
+  maxAgeDays: z.number().default(30).volatile(),
+  maxTotalMB: z.number().default(1024).volatile(),
+  keepSessions: z.number().default(5).volatile(),
   // 0 would make setInterval spin at ~1ms; 1 minute is the sane floor.
-  intervalMinutes: z.number().min(1).default(360),
-  dryRun: z.boolean().default(false),
-  sessionsRoot: z.string().default(''),
+  intervalMinutes: z.number().min(1).default(360).volatile(),
+  dryRun: z.boolean().default(false).volatile(),
+  sessionsRoot: z.string().default('').volatile(),
 })
+
+/**
+ * Unwrap schemastery `.volatile()` accessors into a plain object.
+ * Passing the box downstream turns every field into an object: `enabled` would
+ * always be truthy and `intervalMinutes` arithmetic would be `NaN`.
+ * @param config - validated entry config whose volatile fields are `{ get }` boxes.
+ * @returns the same fields as plain values.
+ */
+export function plainConfig(config) {
+  return Object.fromEntries(
+    Object.entries(config ?? {}).map(([key, value]) => [key, isVolatile(value) ? value.get() : value]),
+  )
+}
 
 export const DEFAULTS = {
   enabled: true,
@@ -259,38 +282,57 @@ export function summarize(result) {
 }
 
 /**
- * Register the settings namespace and hand the write scope to `onScope`.
- * Same contract as dsh-settings' installSettingsSection, plus the scope:
- * the config RPC writes through it (persisted to settings.yaml), so edits
- * survive restarts and take effect live via the watcher.
+ * Attach the optional settings-document layer.
  *
- * `isUnloading` mirrors the official isUnloading(ctx) guard: when the
- * plugin's own fiber is tearing down, both the settings detach disposer and
- * the watcher must NOT re-run `onChange` (= start), which would rebuild the
- * timer against resources being released. The `disposed` flag is set by the
- * plugin's teardown effect before the settings child fiber disposes (the
- * parent fiber disposes its own effects first), so the guard sees it set.
+ * 0.2.x's `settings` service is `SettingsForms`, and it has NO `register()`:
+ * the section is derived from the loader entry's `Config` (its namespace IS the
+ * entry id), the resolved values are read with `describe()`, and a write goes
+ * through `update(ns, patch)` / `replace(ns, section)` into the profile
+ * configuration document. Each accepted write re-emits
+ * `settings/document-updated`, which rebuilds the timer here — that is what
+ * makes the card's `applies: live` claim true.
+ *
+ * The FIRST `describe()` runs eagerly and uncaught: a settings provider that
+ * cannot describe at all is exactly the failure the route-before-settings
+ * ordering protects against (Cordis disposes the failing child fiber's own
+ * effects, not the parent's route). Reads after activation fail soft to the
+ * composition entry config, so a later provider hiccup cannot 500 the card.
+ *
+ * `isUnloading` mirrors the official guard: during teardown the document event
+ * must not rebuild the timer against resources being released.
+ *
+ * @param ctx - plugin context.
+ * @param hooks - `{ entryConfig, setSource, setApi, onChange }`; `setApi`
+ *   receives the `{ update, replace }` face the config route writes through.
+ * @param isUnloading - teardown probe for the document listener.
  */
-function registerConfigSection(ctx, ns, schema, entry, hooks, onScope, isUnloading = () => false) {
+function installSettingsBridge(ctx, hooks, isUnloading = () => false) {
   ctx.inject(['settings'], (sctx) => {
-    const scope = sctx.settings.register(ns, schema, { base: entry })
-    hooks.setSource(() => scope.get())
-    sctx.effect(() => () => {
-      // Runs both when the settings provider detaches (the consumer keeps
-      // running and must fall back to its composition entry) and when the
-      // plugin itself unloads (disposed is already set; onChange would
-      // rebuild the timer against a fiber whose resources are being let go).
-      if (isUnloading()) return
-      hooks.setSource(() => entry)
+    const settings = sctx.settings
+    const read = () => {
+      try {
+        const row = settings.describe().find((form) => form.ns === SETTINGS_NAMESPACE)
+        return row === undefined ? undefined : row.value
+      } catch (error) {
+        sctx.logger?.warn?.(`session-cleanup: settings describe failed: ${error instanceof Error ? error.message : String(error)}`)
+        return undefined
+      }
+    }
+    // Strict first read (see the doc comment): a provider that cannot describe
+    // must fail this child fiber instead of silently pretending to be wired.
+    settings.describe()
+    hooks.setSource(() => read() ?? hooks.entryConfig())
+    sctx.on('settings/document-updated', (ns) => {
+      // A stored change landing while the consumer unloads reaches the
+      // listener before the registration is released; guard it the same way.
+      if (ns !== SETTINGS_NAMESPACE || isUnloading()) return
       hooks.onChange()
     })
-    hooks.onChange()
-    scope.watch(() => {
-      // A stored change landing while the consumer unloads reaches the
-      // watcher before the registration is released; guard it the same way.
-      if (!isUnloading()) hooks.onChange()
+    hooks.setApi({
+      update: (fields) => settings.update(SETTINGS_NAMESPACE, fields),
+      replace: (section) => settings.replace(SETTINGS_NAMESPACE, section),
     })
-    onScope(scope)
+    hooks.onChange()
   })
 }
 
@@ -408,13 +450,15 @@ export function createRpcRoute(path, handle) {
 export const inject = ['sessions', 'webServer']
 
 export function apply(ctx, config = {}) {
-  const cfg = { ...DEFAULTS, ...config }
-  if (!cfg.enabled) return
+  // `.volatile()` fields arrive as `{ get }` boxes; unwrap once so every later
+  // arithmetic/comparison sees plain values.
+  const entryConfig = { ...DEFAULTS, ...plainConfig(config) }
+  if (!entryConfig.enabled) return
 
   const logger = ctx.logger
   /** 当前权威配置: 设置文档 > 组合层 entry; settings 缺失时回退 entry。 */
-  let source = () => ({ ...DEFAULTS, ...config })
-  let configScope = null
+  let source = () => entryConfig
+  let settingsApi = null
   let timer = null
   let disposed = false
 
@@ -425,6 +469,9 @@ export function apply(ctx, config = {}) {
     const sessionsRoot = resolveSessionsRoot(cfg.sessionsRoot)
     const liveIds = new Set(ctx.sessions.list().map((s) => s.id))
     const result = await runCleanup(sessionsRoot, cfg, liveIds)
+    // A scan started before teardown may finish after it: a line logged then
+    // would still reach the released provider, so re-check before reporting.
+    if (disposed) return
     logger.info(`[${reason}] ${summarize(result)}`)
     if (result.errors.length > 0) logger.warn(`cleanup errors: ${result.errors.join(' | ')}`)
   }
@@ -449,13 +496,13 @@ export function apply(ctx, config = {}) {
   }
 
   // 端点处理函数: 契约与旧的 RPC handler 完全一致(getConfig / setConfig /
-  // resetConfig), 只是换了承载方式。`configScope` 在调用时才读取, 所以
-  // 无论设置分区此时是否已经挂上, 读到的都是当前那个 scope。
+  // resetConfig), 只是换了承载方式。`settingsApi` 在调用时才读取, 所以
+  // 无论设置分区此时是否已经挂上, 读到的都是当前那个写入面。
   const handleEndpoint = async (endpoint, payload) => {
     if (endpoint === 'getConfig') {
       return { ok: true, value: source() }
     }
-    if (configScope === null) {
+    if (settingsApi === null) {
       return configError('settings-unavailable', 'settings service is not ready yet')
     }
     if (endpoint === 'setConfig') {
@@ -464,7 +511,7 @@ export function apply(ctx, config = {}) {
         return configError('bad-request', 'fields must be a plain object')
       }
       try {
-        await configScope.update(fields)
+        await settingsApi.update(fields)
         return { ok: true, value: source() }
       } catch (error) {
         return configError('settings-rejected', String(error?.message ?? error))
@@ -472,7 +519,7 @@ export function apply(ctx, config = {}) {
     }
     if (endpoint === 'resetConfig') {
       try {
-        await configScope.replace({})
+        await settingsApi.replace({})
         return { ok: true, value: source() }
       } catch (error) {
         return configError('settings-rejected', String(error?.message ?? error))
@@ -486,16 +533,18 @@ export function apply(ctx, config = {}) {
   // `cannot get property "webServer" without inject`(见 createRpcRoute 的
   // 说明), 通道根本不会存在, 页面的 POST 会落到 SPA 兜底。
   //
-  // 顺序很重要: 该注册排在设置分区之前。Cordis 在 apply 抛错时会回滚它此前
-  // 注册的每一个 effect, 而设置分区恰恰是最容易抛错的一步(见 ui-settings-other
+  // 顺序很重要: 该注册排在设置桥之前。Cordis 在 apply 抛错时会回滚它此前
+  // 注册的每一个 effect, 而设置接线恰恰是最容易抛错的一步(见 ui-settings-other
   // 的同类教训); 传输先落地, 设置挂掉也不会把页面的读写通道一起带走。
   // 注册走 ctx.effect: 路由随插件卸载一起释放。
   ctx.effect(() => ctx.webServer.register(createRpcRoute('/session-cleanup', handleEndpoint)), 'session-cleanup: /session-cleanup rpc route')
 
-  registerConfigSection(ctx, SETTINGS_NAMESPACE, Config, config, {
+  installSettingsBridge(ctx, {
+    entryConfig: () => entryConfig,
     setSource: (current) => { source = current },
+    setApi: (api) => { settingsApi = api },
     onChange: start,
-  }, (scope) => { configScope = scope }, () => disposed)
+  }, () => disposed)
 
   start()
 

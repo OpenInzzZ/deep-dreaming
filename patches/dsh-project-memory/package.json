@@ -1,6 +1,6 @@
 {
   "name": "dsh-project-memory",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Lightweight auto-recall / auto-review bridge to Memorix: injects prompt guidance and session-start recall / session-end review followups that tell the agent when to use mcp__memorix__* tools. Actual storage, search, and deduplication are handled by Memorix.",
   "type": "module",
   "main": "lib/index.js",
