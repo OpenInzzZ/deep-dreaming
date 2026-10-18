@@ -625,6 +625,8 @@ if (React === undefined || React === null) {
         IconSendOutlineMedium: icon,
         IconTrashOutlineRegular: icon,
         IconCheckOutlineRegular: icon,
+        FileTypeIcon: (props) => React.createElement('span', { 'data-file-icon': true, ...props }),
+        fileSizeText: (bytes) => `${bytes} B`,
         Tooltip: TooltipStub,
       }
     }
@@ -639,7 +641,7 @@ if (React === undefined || React === null) {
   // through the session scope, so an unused hard dependency only delays apply)
   // and `connection` (the browser half reaches the host over `fetch` now —
   // `ctx.connection.rpc.call` cannot work in dsh 0.1.5-rc.1).
-  for (const required of ['slots', 'locale', 'sessions']) {
+  for (const required of ['slots', 'locale', 'sessions', 'uiConversation']) {
     if (!exports_.inject.includes(required)) throw new Error(`client inject must declare ${required}`)
   }
   if (exports_.inject.includes('conversation')) throw new Error(`client inject declares the unused service 'conversation': ${JSON.stringify(exports_.inject)}`)
@@ -700,6 +702,7 @@ if (React === undefined || React === null) {
     },
     // No `connection` service: the browser half must not need one any more.
     sessions: { scope: () => ({ get: () => ({ updateQueue: async (itemId, action) => { updateQueueCalls.push({ itemId, action }) }, input: { for: () => ({ notify: () => {} }) } }) }) },
+    uiConversation: { imageUrl: async () => 'blob:queue-thumb' },
     slots: {
       inject: (_key, callback) => { registered = callback() },
       register: (options, component) => ({ ...options, component }),
@@ -815,6 +818,7 @@ if (React === undefined || React === null) {
       useProjection: (key) => (key === 'inbox' ? projectionOf() : undefined),
       updateQueue: injected.updateQueue,
       notify: (level, text) => { notifies.push({ level, text }) },
+      loadImage: injected.loadImage,
       reorder: injected.reorder,
       t: (key, params) => {
         const value = dict[key]
@@ -965,8 +969,8 @@ if (React === undefined || React === null) {
         ...renderProps(),
         useSession: (select) => select({
           pendingSubmissions: [
-            { requestId: 'local-1', placement: 'queued' },
-            { requestId: 'echo-1', placement: 'transcript' },
+            { requestId: 'local-1', placement: 'queued', text: 'local echo', attachments: [] },
+            { requestId: 'echo-1', placement: 'transcript', text: 'transcript echo', attachments: [] },
           ],
           running: false,
           subagent: null,
@@ -983,6 +987,11 @@ if (React === undefined || React === null) {
     if (pendingRows[0].querySelector('.qt-actions') !== null) {
       throw new Error('a pending row must show a sending state instead of edit/remove/steer')
     }
+    // The local echo keeps its own text while the Host has not published a row
+    // (the shipped dock renders it beside the sending status, not as a blank).
+    if (pendingRows[0].querySelector('.qt-preview')?.textContent !== 'local echo') {
+      throw new Error(`a pending row must render its own text: ${JSON.stringify(pendingRows[0].querySelector('.qt-preview')?.textContent)}`)
+    }
     // The transcript echo is already in the chat, so the dock must not list it.
     if (doc.querySelectorAll('.qt-row').length !== 3) {
       throw new Error(`transcript echoes must not be listed: ${doc.querySelectorAll('.qt-row').length} rows`)
@@ -997,14 +1006,24 @@ if (React === undefined || React === null) {
     console.log('pending local submission OK: sending row, not draggable, no phantom actions, transcript echo excluded, drop refused')
 
     // A row whose wire content is not all text cannot round-trip an edit, and
-    // the dock must say so instead of silently dropping the attachments.
+    // the dock renders its attachments (thumbnail + file chip) instead of a
+    // `[image]` marker, exactly like the shipped dock.
     dockInbox.nextTurn = [
-      { id: 'img-1', role: 'user', content: [{ type: 'image', attachment: { name: 'a.png' } }], source: { kind: 'user' } },
+      {
+        id: 'img-1',
+        role: 'user',
+        content: [
+          { type: 'image', attachment: { attachmentId: 'att-img-1', name: 'a.png', bytes: 2048, mimeType: 'image/png' } },
+          { type: 'file', attachment: { attachmentId: 'att-file-1', name: 'notes.txt', bytes: 1024, mimeType: 'text/plain' } },
+        ],
+        source: { kind: 'user' },
+      },
       userRow('m2', 'second message'),
     ]
     await act(async () => {
       root.render(React.createElement(registered.component, renderProps()))
     })
+    await act(async () => {})
     const imageRow = doc.querySelectorAll('.qt-row')[0]
     const editBtn = imageRow.querySelector('button[aria-label="' + en.edit + '"]')
     if (editBtn === null) throw new Error('non-text row must still render its actions')
@@ -1012,10 +1031,16 @@ if (React === undefined || React === null) {
     if (editBtn.getAttribute('title') !== en['edit.unsupported']) {
       throw new Error(`non-text row must explain itself: ${editBtn.getAttribute('title')}`)
     }
-    if (imageRow.querySelector('.qt-preview').textContent !== '[image]') {
-      throw new Error(`a non-text block must preview as its marker: ${imageRow.querySelector('.qt-preview').textContent}`)
+    if (imageRow.querySelector('.qt-thumb') === null) {
+      throw new Error('an image attachment must render a thumbnail')
     }
-    console.log('non-text row OK: edit disabled with the shipped explanation, blocks preview as markers')
+    if (imageRow.querySelector('.qt-fileName')?.textContent !== 'notes.txt') {
+      throw new Error(`a file attachment must render its chip: ${imageRow.querySelector('.qt-fileName')?.textContent}`)
+    }
+    if (imageRow.querySelector('.qt-preview')?.textContent !== '') {
+      throw new Error(`attachments must not become preview marker text: ${JSON.stringify(imageRow.querySelector('.qt-preview')?.textContent)}`)
+    }
+    console.log('non-text row OK: edit disabled with the shipped explanation, attachments render as thumbnail + file chip')
   }
 
   // The `fetch` double is installed on the shared global: put the real one back

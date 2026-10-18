@@ -1,30 +1,31 @@
 /**
  * ui-settings-model-capabilities — browser half: per-model capability
- * configuration for hand-declared `llm-pi-ai` routes.
+ * configuration for `llm-pi-ai` provider cards.
  *
- * Two capabilities, one surface. The shipped Models section renders a model
- * row with id/name, context window, output cap, and a 输入类型 checkbox pair
- * (`input`), and its provider editor states outright that reasoning effort is
- * absent because "effort is a per-MODEL capability". A hand-declared route can
- * therefore only express thinking by hand-editing its configuration file. This
- * plugin fills that seat through the section's own extension point: the keyed
- * `settings.models.provider-card` slot (dispatched with `entryKey` = the
- * provider row's settings namespace), so one registration here lands on every
- * pi-ai provider card.
+ * Two capabilities, one surface, split by route kind because 0.2.1 changed who
+ * owns each one:
  *
- *   - THINKING writes `reasoningEfforts` — `false` disables reasoning, a level
- *     map declares the offered levels and their wire spellings, absence
- *     inherits the installed catalog.
- *   - IMAGE INPUT writes `input` — `['text','image']` claims vision,
- *     `['text']` corrects a gateway that does not serve what the catalog
- *     records, and REMOVING the key restores inheritance (the catalog entry,
- *     then the route's `defaultInput`). The shipped checkbox cannot express
- *     that third state: it renders the inherited list and writes it back as a
- *     declaration the moment one box is touched, which pins an inherited model
- *     to a snapshot of the catalog. This card keeps the distinction visible —
- *     an empty array through the config schema's materialization is the
- *     adapter's own spelling of "no answer here", while a stored `input` is a
- *     declaration — and offers all three states as one segmented control.
+ *   - On a CATALOG-SERVED route the shipped Models section has no reasoning
+ *     editor (effort is a per-MODEL capability, so the provider-level editor
+ *     omits it and no catalog entry supplies the override), but this card's
+ *     THINKING control writes `reasoningEfforts` — `false` disables reasoning,
+ *     a level map declares the offered levels and their wire spellings,
+ *     absence inherits the installed catalog.
+ *   - On a HAND-DECLARED route 0.2.1 ships the official
+ *     `ModelReasoningEfforts` editor (shown only there), so this card leaves
+ *     the thinking half to it — no second switch, and an image save carries
+ *     `reasoningEfforts` through verbatim.
+ *
+ * IMAGE INPUT is this card's contribution on every route: it writes `input` —
+ * `['text','image']` claims vision, `['text']` corrects a gateway that does not
+ * serve what the catalog records, and REMOVING the key restores inheritance
+ * (the catalog entry, then the route's `defaultInput`). The shipped checkbox
+ * cannot express that third state: it renders the inherited list and writes it
+ * back as a declaration the moment one box is touched, which pins an inherited
+ * model to a snapshot of the catalog. This card keeps the distinction visible —
+ * an empty array through the config schema's materialization is the adapter's
+ * own spelling of "no answer here", while a stored `input` is a declaration —
+ * and offers all three states as one segmented control.
  *
  * Data rides the shipped settings transport, never a private channel: the
  * plugin takes the `llm-pi-ai` namespace's shared form from `ctx.configForms`
@@ -127,6 +128,7 @@ const CSS = [
 const zh = {
   title: '模型能力',
   hint: '思考开启后该模型在输入框的模型菜单中出现「推理等级」；图片输入决定该模型能否接收图片，选「跟随上游」则不声明，沿用上游目录或路由默认。',
+  hintOfficial: '该路由的思考档位由官方模型行管理（模型 → 展开 → 推理等级）；这里只补充图片输入三态，选「跟随上游」则不声明。',
   keys: '思考',
   stateOn: '思考已开启',
   stateOff: '思考已关闭',
@@ -160,6 +162,7 @@ const zh = {
 const en = {
   title: 'Capabilities',
   hint: 'Thinking adds a Reasoning level row to this model in the composer model menu; image input decides whether the model takes images — pick “Inherit” to declare nothing and keep the installed catalog or the route default.',
+  hintOfficial: 'The official model row already edits this route’s reasoning levels (Models → expand → Reasoning level); this card only adds the three-state image input — “Inherit” declares nothing.',
   keys: 'Thinking',
   stateOn: 'Thinking on',
   stateOff: 'Thinking off',
@@ -275,12 +278,19 @@ function levelsToConfig(state) {
   return config;
 }
 
-/** Whether a staged state satisfies the profile schema (≥1 thinking level, non-empty wires, known modalities). */
-function validState(state) {
+/**
+ * Whether a staged state satisfies the profile schema (≥1 thinking level,
+ * non-empty wires, known modalities).
+ *
+ * `withThinking` is false on a hand-declared pi-ai route: the shipped Models
+ * section already edits that route's reasoning levels, so this card owns only
+ * `input` there and must not validate (or later write) a thinking half.
+ */
+function validState(state, withThinking = true) {
   const input = state.input;
   if (input !== undefined && !(Array.isArray(input) && input.length > 0
     && input.every((modality) => MODALITIES.includes(modality)))) return false;
-  if (state.enabled !== true) return true;
+  if (!withThinking || state.enabled !== true) return true;
   // pi-ai: only `off` may carry null (or a value like `none`); an empty string
   // is rejected on every level, and at least one thinking level must exist.
   if ('off' in state.levels) {
@@ -300,11 +310,15 @@ function validState(state) {
  * which writes the key away) have to compare equal, while `['text']` — the
  * same effective modalities for a hand-declared model, and a different
  * declaration — must not.
+ *
+ * `withThinking` is false where the official model row owns reasoning: only
+ * the image half participates in dirtiness then.
  */
-function canonical(state) {
+function canonical(state, withThinking = true) {
+  const input = state.input === undefined ? 'inherit' : `declared:${state.input.join('+')}`;
+  if (!withThinking) return JSON.stringify({ input });
   const levels = {};
   for (const level of LEVELS) if (level in state.levels) levels[level] = state.levels[level];
-  const input = state.input === undefined ? 'inherit' : `declared:${state.input.join('+')}`;
   return JSON.stringify({ enabled: state.enabled === true, levels, input });
 }
 
@@ -313,12 +327,17 @@ function canonical(state) {
  * through untouched. An inherited image state (or one staged on a model whose
  * profile does not state it) REMOVES the key rather than storing the empty
  * list, so the profile keeps inheriting instead of pinning today's catalog.
+ *
+ * `withThinking` is false on a hand-declared route: `reasoningEfforts` is
+ * owned by the official model row there and must be carried through verbatim,
+ * even when the same model is staged for an image change.
  */
-function applyDrafts(models, drafts) {
+function applyDrafts(models, drafts, withThinking = true) {
   return models.map((model) => {
     const state = drafts[model.id];
     if (state === undefined) return model;
-    const next = { ...model, reasoningEfforts: levelsToConfig(state) };
+    const next = { ...model };
+    if (withThinking) next.reasoningEfforts = levelsToConfig(state);
     if (state.input === undefined) delete next.input;
     else next.input = [...state.input];
     return next;
@@ -381,6 +400,13 @@ function ModelCapabilitiesCard({ provider, t, scope }) {
   const models = modelsAt(snapshot.value, path);
   const stored = modelsAt(snapshot.user, path);
   const readOnly = snapshot.writable === false || snapshot.status !== 'ready';
+  // Hand-declared pi-ai routes already get the shipped per-model reasoning
+  // editor (0.2.1's `ModelReasoningEfforts`); this card must not render a
+  // second thinking switch there or overwrite `reasoningEfforts` on save. It
+  // keeps adding the one capability the shipped editor lacks: the three-state
+  // image input (including "remove the declaration, inherit again").
+  const managesThinking = provider?.declared !== true;
+  const canon = (state) => canonical(state, managesThinking);
 
   const stateOfModel = (model) => ({
     ...stateOf(model.reasoningEfforts),
@@ -388,7 +414,7 @@ function ModelCapabilitiesCard({ provider, t, scope }) {
   });
   const staged = (model) => drafts[model.id] ?? stateOfModel(model);
   const dirty = models.some((model) => drafts[model.id] !== undefined
-    && canonical(drafts[model.id]) !== canonical(stateOfModel(model)));
+    && canon(drafts[model.id]) !== canon(stateOfModel(model)));
 
   const edit = (model, next) => {
     setFailed(null);
@@ -406,8 +432,8 @@ function ModelCapabilitiesCard({ provider, t, scope }) {
     const pending = {};
     for (const model of models) {
       const state = drafts[model.id];
-      if (state === undefined || canonical(state) === canonical(stateOfModel(model))) continue;
-      if (!validState(state)) {
+      if (state === undefined || canon(state) === canon(stateOfModel(model))) continue;
+      if (!validState(state, managesThinking)) {
         setFailed(t('invalid'));
         return;
       }
@@ -415,7 +441,7 @@ function ModelCapabilitiesCard({ provider, t, scope }) {
     }
     const ids = Object.keys(pending);
     if (ids.length === 0) return;
-    const next = applyDrafts(models, pending);
+    const next = applyDrafts(models, pending, managesThinking);
     setBusy(true);
     try {
       await scope.mutate([{ op: 'set', path: [...path, 'models'], value: next }]);
@@ -427,7 +453,7 @@ function ModelCapabilitiesCard({ provider, t, scope }) {
         // The staged shape is rebuilt from the fresh entry, so a write that
         // landed reads back as the staged state and a refused one cannot.
         return model !== undefined
-          && canonical(stateOfModel(model)) === canonical(pending[id]);
+          && canon(stateOfModel(model)) === canon(pending[id]);
       });
       if (landed) {
         // The write folded into the section: the drafts are now the stored state.
@@ -460,18 +486,18 @@ function ModelCapabilitiesCard({ provider, t, scope }) {
   return jsxs('div', { className: 'mc-card', children: [
     jsxs('div', { className: 'mc-head', children: [
       jsx('span', { className: 'mc-title', children: t('title') }, 'title'),
-      jsx('span', { className: 'mc-hint', children: t('hint') }, 'hint'),
+      jsx('span', { className: 'mc-hint', children: t(managesThinking ? 'hint' : 'hintOfficial') }, 'hint'),
     ] }, 'head'),
     ...models.map((model, index) => {
       const state = staged(model);
       const name = String(model.name ?? model.id);
-      const open = openId === model.id && state.enabled;
+      const open = managesThinking && openId === model.id && state.enabled;
       const locked = readOnly || busy;
       return jsxs('div', { className: 'mc-model', children: [
         jsxs('div', { className: 'mc-row', children: [
           jsx('span', { className: 'mc-name', title: name, children: name }, 'name'),
-          jsx('span', { className: 'mc-state', children: thinkingLabel(state) }, 'state'),
-          jsx(Switch, {
+          managesThinking ? jsx('span', { className: 'mc-state', children: thinkingLabel(state) }, 'state') : null,
+          managesThinking ? jsx(Switch, {
             checked: state.enabled,
             disabled: locked,
             label: t('aria.enabled', { model: name }),
@@ -479,8 +505,8 @@ function ModelCapabilitiesCard({ provider, t, scope }) {
               edit(model, (current) => ({ ...current, enabled: next2 }));
               if (next2) setOpenId(model.id);
             },
-          }, 'switch'),
-          jsx('button', {
+          }, 'switch') : null,
+          managesThinking ? jsx('button', {
             type: 'button',
             className: 'mc-expand',
             'aria-expanded': open,
@@ -491,7 +517,7 @@ function ModelCapabilitiesCard({ provider, t, scope }) {
               jsx(IconChevronDownOutlineMedium, { className: open ? 'mc-chevron mc-chevron-open' : 'mc-chevron' }, 'chevron'),
               jsx('span', { children: open ? t('collapse') : t('levels') }, 'label'),
             ],
-          }, 'expand'),
+          }, 'expand') : null,
         ] }, 'row'),
         !open ? null : jsx('div', { className: 'mc-levels', children: LEVELS.map((level) => {
           const member = level in state.levels;

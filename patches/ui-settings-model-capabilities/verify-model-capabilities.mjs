@@ -244,6 +244,23 @@ console.log('exports contract OK:', JSON.stringify(exports_.inject), 'NS =', exp
   if (canonical({ enabled: false, levels: {}, input: ['text'] }) === canonical({ enabled: false, levels: {} })) {
     throw new Error('canonical: a declaration must differ from the inherited state')
   }
+  // `withThinking = false` is the hand-declared route owned by the official
+  // model row: the card owns only the image half there.
+  if (canonical({ enabled: true, levels: { low: 'low' }, input: ['text'] }, false)
+    !== canonical({ enabled: false, levels: {}, input: ['text'] }, false)) {
+    throw new Error('canonical: a declared route must ignore the thinking half')
+  }
+  if (validState({ enabled: true, levels: { off: null }, input: ['text', 'image'] }, false) !== true) {
+    throw new Error('validState: a declared route must not reject a thinking half it does not own')
+  }
+  const imageOnlyDraft = applyDrafts(
+    [{ id: 'a', reasoningEfforts: { low: 'low' }, input: ['text'] }],
+    { a: { enabled: false, levels: {}, input: ['text', 'image'] } },
+    false,
+  )[0]
+  if (JSON.stringify(imageOnlyDraft.reasoningEfforts) !== JSON.stringify({ low: 'low' })) {
+    throw new Error('applyDrafts: a declared route must carry reasoningEfforts through verbatim')
+  }
   // Layer accessors: only an array of models answers, and a missing layer is [].
   if (modelsAt({ providers: { p: { models } } }, ['providers', 'p']).length !== 2) throw new Error('modelsAt must read the section')
   if (modelsAt({ providers: { p: {} } }, ['providers', 'p']).length !== 0) throw new Error('modelsAt must answer [] without a list')
@@ -400,7 +417,11 @@ const provider = {
   settingsNs: 'llm-pi-ai',
   settingsPath,
   active: true,
-  declared: true,
+  // A catalog-served pi-ai route: the shipped Models section does NOT render
+  // its per-model reasoning editor here (`declared` is what enables it), so
+  // this card is the only place the thinking half can be configured. The
+  // hand-declared case gets its own section at the end.
+  declared: false,
 }
 const t = bind('modelCapabilities')
 const rootHost = globalThis.document.createElement('div')
@@ -613,6 +634,47 @@ if (modelSwitch('gpt-6-astra').getAttribute('aria-checked') !== storedBefore) {
 if (rootHost.querySelector('.mc-error') !== null) throw new Error('discard must clear the surfaced failure')
 refuseWrites = false
 console.log('refusal OK: failure surfaced, draft kept for retry, discard still restores the stored state')
+
+// --- hand-declared routes: the shipped model row owns thinking -----------------
+// 0.2.1's Models section renders the official `ModelReasoningEfforts` editor on
+// hand-declared pi-ai routes. Rendering a second thinking switch here would
+// duplicate that control, and an image-only save must carry `reasoningEfforts`
+// through verbatim instead of normalizing it to `false`.
+{
+  const declaredProvider = { ...provider, declared: true }
+  await act(async () => {
+    root.render(React.createElement(registered.component, {
+      provider: declaredProvider, configured: true, keyConfigured: true, t, ...face,
+    }))
+  })
+  if (rootHost.querySelector('.mc-row [role="switch"]') !== null) {
+    throw new Error('a declared pi-ai route must not render a second thinking switch (the official model row owns it)')
+  }
+  if (rootHost.querySelector('.mc-levels') !== null) throw new Error('a declared route must not render the level editor')
+  if (rootHost.querySelector('.mc-hint').textContent !== t('hintOfficial')) {
+    throw new Error(`a declared route must explain that the official row owns thinking: ${rootHost.querySelector('.mc-hint').textContent}`)
+  }
+  if (inputTabs('deepseek-v4-pro').length !== 3) {
+    throw new Error('the three-state image control must stay on declared routes')
+  }
+  const proBefore = snapshot.user.providers[route].models.find((model) => model.id === 'deepseek-v4-pro')
+  const effortsBefore = JSON.stringify(proBefore.reasoningEfforts)
+  await act(async () => { click(inputTab('deepseek-v4-pro', 'image')) })
+  await act(async () => { click(saveButton()) })
+  const proAfter = lastWrite().find((model) => model.id === 'deepseek-v4-pro')
+  if (JSON.stringify(proAfter.reasoningEfforts) !== effortsBefore) {
+    throw new Error(`a declared route's image save must carry reasoningEfforts verbatim: ${JSON.stringify(proAfter.reasoningEfforts)} vs ${effortsBefore}`)
+  }
+  if (JSON.stringify(proAfter.input) !== JSON.stringify(['text', 'image'])) {
+    throw new Error(`a declared route's image save must write the declaration: ${JSON.stringify(proAfter.input)}`)
+  }
+  await act(async () => { click(inputTab('deepseek-v4-pro', 'inherit')) })
+  await act(async () => { click(saveButton()) })
+  if ('input' in lastWrite().find((model) => model.id === 'deepseek-v4-pro')) {
+    throw new Error('returning to inherit on a declared route must remove the key too')
+  }
+  console.log('declared route OK: thinking owned by the official row, image save carries reasoningEfforts verbatim')
+}
 
 console.log('\nALL HARNESS CHECKS PASSED')
 process.exit(0)

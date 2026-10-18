@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-client-ui-queue-tools",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "private": true,
   "description": "User-level plugin: enhanced queue dock — hover shows the full queued message text, and queued messages can be reordered (up/down) via a host RPC",
   "type": "module",

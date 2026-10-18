@@ -1,21 +1,30 @@
 /**
  * Browser half of the ui-queue-tools patch: an enhanced queue dock.
  *
- * Shadows the shipped `conversation.input.dock` entry (same id "queue", lower
- * priority — the slot registry renders the lowest live priority, so this
- * registrant replaces the official queue strip):
+ * Shadow target: the shipped `conversation.input.dock` entry of DSH
+ * 0.2.1-rc.2 (same id "queue", lower priority — the slot registry renders the
+ * lowest live priority, so this registrant replaces the official queue strip).
+ * This file reproduces the shipped QueueDock's behavior: durable-row
+ * attachments (image thumbnails loaded through `ctx.uiConversation.imageUrl`
+ * and file chips), locally queued submission echoes with their own text and
+ * attachments, inline edit/remove/steer, the collapsible header, and queue
+ * actions for continuable subagents. Keep it in sync when the shipped dock
+ * changes; the official source is
+ * `packages/client/ui-conversation/src/client/queue/QueueDock.tsx`.
  *
- * 1. Hovering a queued message preview shows the FULL text (the shipped dock
- *    truncates the preview to 200 chars and has no full-text affordance).
+ * On top of that it adds:
+ *
+ * 1. Hovering a queued message preview shows the FULL text (a Tooltip on the
+ *    CSS-ellipsized preview).
  * 2. Rows are draggable: dropping one on another reorders the pending queue
  *    through the host half's `/queue` prefix route, declaring the `queued`
  *    placement the drop index was computed on (Inbox.splice on that list); the
  *    durable event stream then refreshes every client, so the dock needs no
  *    optimistic local reorder.
  *
- * All other shipped behavior (collapse header, edit, remove, steer) is
- * reproduced verbatim; the component receives the same props the slot
- * renderer supplies (`useSession`, `t`) plus this registrant's inject face.
+ * Props arrive from the slot renderer (`useSession`, `useProjection`,
+ * `renderFactorySlot`, `t`) plus this registrant's inject face (`updateQueue`,
+ * `notify`, `loadImage`, `reorder`).
  */
 window.__ModuleLoader__.load({ id: '@local/dsh-client-ui-queue-tools', factory: (require) => {
 var module = { exports: {} }; var exports = module.exports;
@@ -23,7 +32,11 @@ var module = { exports: {} }; var exports = module.exports;
 const React = require('react');
 const { useEffect, useId, useMemo, useState } = React;
 const { jsx, jsxs, Fragment } = require('react/jsx-runtime');
-const { IconChevronDownOutlineMedium, IconChevronUpOutlineMedium, IconCloseOutlineRegular, IconEditOutlineRegular, IconQueueOutlineMedium, IconSendOutlineMedium, IconTrashOutlineRegular, IconCheckOutlineRegular, Tooltip } = require('@deepseek-ai/dsh-client-ui-primitives');
+const {
+  FileTypeIcon, fileSizeText, IconChevronDownOutlineMedium, IconChevronUpOutlineMedium, IconCloseOutlineRegular,
+  IconEditOutlineRegular, IconQueueOutlineMedium, IconSendOutlineMedium, IconTrashOutlineRegular, IconCheckOutlineRegular,
+  Tooltip,
+} = require('@deepseek-ai/dsh-client-ui-primitives');
 
 const PLUGIN_ID = '@local/dsh-client-ui-queue-tools';
 
@@ -32,26 +45,33 @@ const PLUGIN_ID = '@local/dsh-client-ui-queue-tools';
    QueueDock.module.css with this plugin's own class names. */
 const CSS = [
   '.qt-dock{box-sizing:border-box;width:calc(100% - var(--dsh-composer-side-clearance) - var(--dsh-composer-side-clearance) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset));max-width:calc(var(--dsh-composer-card-max-width) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset));margin:0 auto calc(0px - var(--dsh-composer-stack-gap) - 3px);padding:0 var(--dsh-composer-dock-inset);flex:none}',
-  '.qt-panel{background:var(--dsw-specific-tip);--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2);--dsh-scrollbar-thumb-hover:var(--dsw-alias-scrollbar-hover-l2);border-radius:12px 12px 0 0;width:100%;padding:2px 0;position:relative;overflow:hidden}',
-  '.qt-panel:after{border:1px solid var(--dsw-alias-border-l1);border-radius:inherit;content:"";pointer-events:none;border-bottom:none;position:absolute;inset:0}',
-  '.qt-header{box-sizing:border-box;width:100%;height:36px;color:var(--dsw-alias-label-primary);text-align:left;cursor:pointer;background:0 0;border:none;border-radius:8px;align-items:center;gap:10px;padding:4px 12px;display:flex}',
+  '.qt-panel{position:relative;isolation:isolate;overflow:hidden;width:100%;padding:2px 0;border-radius:var(--dsw-radius-lg) var(--dsw-radius-lg) 0 0;background:var(--dsw-specific-menu);backdrop-filter:var(--dsw-menu-backdrop-filter);--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2);--dsh-scrollbar-thumb-hover:var(--dsw-alias-scrollbar-hover-l2)}',
+  '.qt-panel:after{border:.5px solid var(--dsw-alias-border-l1);border-radius:inherit;content:"";pointer-events:none;border-bottom:none;position:absolute;inset:0}',
+  '.qt-header{box-sizing:border-box;width:100%;height:36px;color:var(--dsw-alias-label-primary);text-align:left;cursor:pointer;background:0 0;border:none;border-radius:var(--dsw-radius-md);align-items:center;gap:10px;padding:4px 12px;display:flex}',
   '.qt-header:focus-visible{outline:2px solid var(--dsw-alias-label-tertiary);outline-offset:-2px}',
   '.qt-header:disabled{cursor:default}',
   '.qt-lead{color:var(--dsw-alias-label-tertiary);flex:none;place-items:center;display:grid}',
   '.qt-count{min-width:0;font-family:Inter, var(--dsw-font-family);flex:auto;font-size:13px;font-weight:500;line-height:24px}',
   '.qt-chevron{width:14px;height:14px;color:var(--dsw-alias-label-tertiary);flex:none;place-items:center;display:grid}',
   '.qt-list{max-height:180px;margin:0;padding:0;list-style:none;overflow-y:auto}',
-  '.qt-row{box-sizing:border-box;border-radius:8px;align-items:center;gap:10px;width:100%;height:36px;padding:4px 5px 4px 12px;display:flex}',
+  '.qt-row{box-sizing:border-box;border-radius:var(--dsw-radius-md);align-items:center;gap:10px;width:100%;min-height:36px;padding:4px 5px 4px 12px;display:flex}',
   '.qt-row+.qt-row{box-shadow:inset 0 1px 0 var(--dsw-alias-border-l1)}',
   '.qt-row[draggable="true"]{cursor:grab}',
   '.qt-row[draggable="true"]:active{cursor:grabbing}',
   '.qt-row-dragging{opacity:.45}',
   '.qt-row-over{outline:2px dashed var(--dsw-alias-state-business-primary);outline-offset:-2px;background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 8%,transparent)}',
+  '.qt-attachments{display:flex;flex:none;gap:4px;min-width:0;max-width:55%;overflow:hidden}',
+  '.qt-file{display:inline-flex;flex:0 1 180px;align-items:center;gap:4px;min-width:74px;height:24px;padding:0 6px;overflow:hidden;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-base);box-sizing:border-box}',
+  '.qt-fileIcon{display:inline-flex;flex:none;width:16px;height:16px}',
+  '.qt-fileName{min-width:0;overflow:hidden;color:var(--dsw-alias-label-primary-dimmed);font:var(--dsw-font-xs-13);text-overflow:ellipsis;white-space:nowrap}',
+  '.qt-fileSize{flex:none;color:var(--dsw-alias-label-tertiary);font-size:10px;white-space:nowrap}',
+  '.qt-thumb{width:24px;height:24px;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-xs);background:var(--dsw-alias-bg-base);object-fit:cover;box-sizing:border-box;display:inline-block}',
   '.qt-preview,.qt-editor{min-width:0;font:var(--dsw-font-xs-13);font-family:Inter, var(--dsw-font-family);flex:auto}',
   '.qt-preview{color:var(--dsw-alias-label-primary-dimmed);text-overflow:ellipsis;white-space:nowrap;word-break:break-word;overflow:hidden}',
-  '.qt-row-editing{height:auto;min-height:36px;align-items:flex-start;padding-top:6px}',
+  '.qt-row-editing{align-items:flex-start;padding-top:6px}',
   '.qt-editor{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);min-height:28px;max-height:112px;color:var(--dsw-alias-label-primary);border-radius:6px;outline:none;padding:4px 8px;resize:none;overflow-y:auto;font:var(--dsw-font-xs-13);font-family:Inter, var(--dsw-font-family);line-height:18px}',
   '.qt-editor:focus{border-color:var(--dsw-alias-state-business-primary)}',
+  '.qt-status{flex:none;color:var(--dsw-alias-label-tertiary);font:var(--dsw-font-xs-13);white-space:nowrap}',
   '.qt-actions{flex:none;align-items:center;gap:10px;display:flex}',
   '.qt-actions .qt-action-group{display:inline-flex;align-items:center;gap:2px}',
   '.qt-action{width:28px;height:28px;color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:none;border-radius:999px;flex:none;place-items:center;padding:0;display:grid}',
@@ -73,6 +93,8 @@ const CSS = [
 /** Simplified Chinese dictionary and key source of truth. */
 const zh = {
   count: '{n} 条排队消息',
+  image: '排队消息图片',
+  file: '排队文件 {name}',
   edit: '编辑排队消息',
   'edit.unsupported': '包含非文本内容，暂不支持编辑',
   save: '保存排队消息',
@@ -91,6 +113,8 @@ const zh = {
 /** English dictionary checked against the Chinese key set. */
 const en = {
   count: '{n} queued messages',
+  image: 'Queued message image',
+  file: 'Queued file {name}',
   edit: 'Edit queued message',
   'edit.unsupported': 'Contains non-text content; editing is not supported yet',
   save: 'Save queued message',
@@ -113,38 +137,12 @@ const NS = 'queue.tools';
  *  sends is relative to that list, and the host validates it as such. */
 const QUEUED_PLACEMENT = 'queued';
 
-/**
- * Character budget of one row's preview, matching the shipped dock.
- *
- * 0.2.0-rc.2 stopped sending a pre-flattened `preview`/`text` pair on each row:
- * a row now carries the model-facing `content` blocks and every consumer folds
- * its own text out of them (the shipped `previewOf`/`textOf` do exactly this).
- * Reading `row.preview` therefore rendered `undefined` for every message.
- */
-const QUEUE_PREVIEW_CHARS = 200;
+/** Shared empty list: a stable identity keeps the useMemo dependencies calm. */
+const EMPTY = [];
 
-/**
- * Fold one row's content blocks into the single-line preview the dock shows.
- *
- * The shipped dock drops image/file blocks here because it renders them as
- * thumbnails and file chips beside the text; this dock renders no attachment
- * row, so dropping them would leave an attachment-only message as a blank line.
- * They stay as `[image]` / `[file]` markers instead — visible, and the reason
- * such a row reports "editing is not supported" rather than looking empty.
- */
-function previewOf(content) {
-  if (!Array.isArray(content)) return '';
-  const flat = content
-    .map((block) => {
-      if (block === null || typeof block !== 'object') return '';
-      return block.type === 'text' ? block.text : '[' + String(block.type) + ']';
-    })
-    .join(' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  const chars = Array.from(flat);
-  return chars.length > QUEUE_PREVIEW_CHARS ? chars.slice(0, QUEUE_PREVIEW_CHARS).join('') + '…' : flat;
-}
+/** Text-rendering facts handed to the shipped `conversation.user.text` factory,
+ *  matching the official dock (collapse runs of whitespace, trim the ends). */
+const QUEUE_TEXT_FACTS = Object.freeze({ collapseWhitespace: true, trimWhitespace: true });
 
 /**
  * The row's text when editing can round-trip it, `null` otherwise.
@@ -160,51 +158,30 @@ function textOf(content) {
 }
 
 /**
- * The `next-turn` rows to render, from the Session's `inbox` projection.
- *
- * This used to read `useSession((s) => s.queue)`. That field is gone in
- * 0.2.0-rc.2 — `SessionSnapshot` exposes `pendingSubmissions` instead, and the
- * pending queue itself moved to the `inbox` projection (`['next-turn']`, the
- * same list the reorder endpoint splices). The old read produced `undefined`,
- * and the very next `.filter(...)` threw during render, so the whole dock
- * vanished rather than degrading.
- *
- * Rows are normalised here so every consumer below sees `{ id, content,
- * preview, text, pending }` regardless of which shape the projection sends:
- * a durable row keeps its message id, while a locally queued submission that
- * the Host has not admitted yet has only its request id and no content.
+ * The plain-text preview of one row: the concatenated text blocks. Attachments
+ * render as their own thumbnails/chips beside it, exactly like the shipped
+ * dock, so an image/file block contributes no marker text here.
  */
-function rowsOf(inbox, pendingSubmissions) {
-  const durable = inbox !== null && typeof inbox === 'object' && Array.isArray(inbox['next-turn']) ? inbox['next-turn'] : [];
-  const admitted = new Set();
-  for (const row of durable) {
-    const source = row?.source;
-    if (source !== null && typeof source === 'object' && source.kind === 'user' && typeof source.rpcId === 'string') {
-      admitted.add(source.rpcId);
-    }
+function textPreviewOf(content) {
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((block) => (block !== null && typeof block === 'object' && block.type === 'text' ? String(block.text) : ''))
+    .join('');
+}
+
+/**
+ * Durable attachment references carried by one queued row. Inbox projections
+ * are wire data despite their typed face, so an image/file block without a
+ * reference is skipped rather than trusted.
+ */
+function queueAttachments(content) {
+  const attachments = [];
+  if (!Array.isArray(content)) return attachments;
+  for (const block of content) {
+    if (block?.type === 'image' && block.attachment !== undefined) attachments.push({ type: 'image', attachment: block.attachment });
+    if (block?.type === 'file' && block.attachment !== undefined) attachments.push({ type: 'file', attachment: block.attachment });
   }
-  const local = Array.isArray(pendingSubmissions) ? pendingSubmissions : [];
-  return [
-    ...durable.map((row) => {
-      const content = Array.isArray(row?.content) ? row.content : [];
-      return {
-        id: typeof row?.id === 'string' ? row.id : null,
-        content,
-        preview: previewOf(content),
-        text: textOf(content),
-        pending: false,
-      };
-    }),
-    ...local
-      .filter((item) => item?.placement === QUEUED_PLACEMENT && !admitted.has(item?.requestId))
-      .map((item) => ({
-        id: typeof item?.requestId === 'string' ? item.requestId : null,
-        content: [],
-        preview: '',
-        text: null,
-        pending: true,
-      })),
-  ];
+  return attachments;
 }
 
 /** Index of `id` inside the projection's `next-turn` list (the Host's space). */
@@ -214,7 +191,7 @@ function nextTurnIndexOf(inbox, id) {
 }
 
 /** Services required by the queue-dock registration. */
-const inject = ['slots', 'locale', 'sessions'];
+const inject = ['slots', 'locale', 'sessions', 'uiConversation'];
 
 /**
  * A failure of the transport itself (fetch threw, non-2xx, the route is not
@@ -260,18 +237,75 @@ const call = async (endpoint, args) => {
   return envelope.value
 }
 
+/** One durable queued image as a fixed-size thumbnail; a load failure keeps the
+ *  empty placeholder. Mirrors the shipped dock's QueueThumb. */
+function QueueThumb({ attachment, loadImage, label }) {
+  const [url, setUrl] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    if (typeof loadImage !== 'function') return () => { alive = false };
+    Promise.resolve(loadImage(attachment)).then(
+      (resolved) => { if (alive) setUrl(resolved) },
+      () => { /* placeholder retained; the durable transcript surfaces read errors */ },
+    );
+    return () => { alive = false };
+  }, [attachment, loadImage]);
+  return url === null
+    ? jsx('span', { className: 'qt-thumb', 'aria-hidden': true }, 'thumb')
+    : jsx('img', { className: 'qt-thumb', src: url, alt: label }, 'thumb');
+}
+
+/** Compact file identity used beside queue thumbnails. */
+function QueueFile({ attachment, label }) {
+  const name = typeof attachment?.name === 'string' ? attachment.name : '';
+  const size = typeof attachment?.bytes === 'number' && typeof fileSizeText === 'function'
+    ? fileSizeText(attachment.bytes)
+    : '';
+  return jsxs('span', { className: 'qt-file', 'aria-label': label, title: name, children: [
+    jsx('span', { className: 'qt-fileIcon', 'aria-hidden': true, children: jsx(FileTypeIcon, { path: name, size: 16 }) }, 'icon'),
+    jsx('span', { className: 'qt-fileName', children: name }, 'name'),
+    size === '' ? null : jsx('span', { className: 'qt-fileSize', children: size }, 'size'),
+  ] });
+}
+
 /**
- * Enhanced queue strip: the shipped dock plus full-text hover preview
- * (Tooltip, same affordance as the action buttons) and drag-to-reorder.
- * Props arrive from the slot renderer (`useSession`, `t`) and this
- * registrant's inject face (`updateQueue`, `notify`, `reorder`).
+ * Enhanced queue strip: the shipped dock (attachments, pending echoes, inline
+ * edit/remove/steer, collapsible header, continuable-subagent actions) plus a
+ * full-text hover preview and drag-to-reorder.
  */
-function QueueToolsDock({ useSession, useProjection, updateQueue, notify, reorder, t }) {
+function QueueToolsDock({
+  useSession, useProjection, updateQueue, notify, loadImage, reorder, renderFactorySlot, t,
+}) {
   const inbox = useProjection('inbox');
-  const pendingSubmissions = useSession((s) => s.pendingSubmissions);
-  const queue = useMemo(() => rowsOf(inbox, pendingSubmissions), [inbox, pendingSubmissions]);
+  const pendingSubmissions = useSession((s) => s.pendingSubmissions) ?? EMPTY;
+  const queue = useMemo(() => {
+    const rows = inbox !== null && typeof inbox === 'object' && Array.isArray(inbox['next-turn']) ? inbox['next-turn'] : EMPTY;
+    // Locally queued submissions that already echoed into the transcript are
+    // represented by their durable row; rendering both would duplicate them.
+    const inChat = new Set(
+      pendingSubmissions.filter((item) => item?.placement === 'transcript').map((item) => item.requestId),
+    );
+    if (inChat.size === 0) return rows;
+    return rows.filter(({ source }) => (
+      source == null || typeof source !== 'object' || source.kind !== 'user'
+      || typeof source.rpcId !== 'string' || !inChat.has(source.rpcId)
+    ));
+  }, [inbox, pendingSubmissions]);
+  const pendingQueue = useMemo(() => {
+    const admitted = new Set();
+    for (const row of queue) {
+      const source = row?.source;
+      if (source != null && typeof source === 'object' && source.kind === 'user' && typeof source.rpcId === 'string') {
+        admitted.add(source.rpcId);
+      }
+    }
+    return pendingSubmissions.filter((item) => item?.placement === QUEUED_PLACEMENT && !admitted.has(item?.requestId));
+  }, [pendingSubmissions, queue]);
+  const rowCount = queue.length + pendingQueue.length;
   const running = useSession((s) => s.running);
-  const queueMutable = useSession((s) => s.subagent === null);
+  // A continuable subagent session accepts queue mutations too; the shipped
+  // dock gates on the same predicate.
+  const queueMutable = useSession((s) => s.subagent === null || s.subagent?.address?.mode === 'continuable');
   const [editing, setEditing] = useState(null);
   const [busy, setBusy] = useState(null);
   const [collapsed, setCollapsed] = useState(true);
@@ -280,21 +314,18 @@ function QueueToolsDock({ useSession, useProjection, updateQueue, notify, reorde
   const listId = useId();
 
   useEffect(() => {
-    if (queue.length === 0 && !collapsed) setCollapsed(true);
+    if (rowCount === 0 && !collapsed) setCollapsed(true);
     if (editing !== null && (!queueMutable || !queue.some((row) => row.id === editing.id))) setEditing(null);
-  }, [collapsed, editing, queue, queueMutable]);
+  }, [collapsed, editing, queue, queueMutable, rowCount]);
 
-  if (queue.length === 0) return null;
+  if (rowCount === 0) return null;
   const interactionActive = queueMutable && (editing !== null || busy !== null);
   const expanded = !collapsed || interactionActive;
-  const listVisible = queue.length === 1 || expanded;
+  const listVisible = rowCount === 1 || expanded;
   // Only admitted durable rows are reorderable. A locally queued submission
-  // does carry its `requestId`, but the Host has not published a row for it yet,
-  // so there is no inbox entry to splice and the official dock keeps its actions
-  // disabled until the row arrives. `movable` is what the drag affordances and
-  // the index arithmetics below count.
-  const movable = queue.filter((row) => !row.pending).length;
-  const canReorder = queueMutable && movable > 1;
+  // carries its `requestId`, but the Host has not published a row for it yet,
+  // so there is no inbox entry to splice.
+  const canReorder = queueMutable && queue.length > 1;
 
   const applyAction = async (itemId, action, failure) => {
     setBusy(itemId);
@@ -321,17 +352,14 @@ function QueueToolsDock({ useSession, useProjection, updateQueue, notify, reorde
   };
 
   /**
-   * Drop handler: translate a drop onto `toRow` into a `next-turn` index.
+   * Translate a drop onto `toRow` into a `next-turn` index.
    *
-   * The dock renders a *filtered* list (a locally queued submission that the
-   * Host has not admitted is appended after the durable rows), while the reorder
-   * endpoint splices the projection's own `next-turn` list. Sending the rendered
-   * index would land the row in the wrong slot as soon as the two orders differ,
-   * so the target is resolved back to a durable row and its position inside the
-   * projection is what travels.
+   * The rendered list filters/appends submissions, while the reorder endpoint
+   * splices the projection's own `next-turn` list, so the target is resolved
+   * back to a durable row and its position inside the projection travels.
    */
   const dropOn = (toRow) => {
-    if (draggingId === null || toRow.pending || draggingId === toRow.id) return;
+    if (draggingId === null || draggingId === toRow.id) return;
     const fromIndex = nextTurnIndexOf(inbox, draggingId);
     const toIndex = nextTurnIndexOf(inbox, toRow.id);
     if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
@@ -351,8 +379,197 @@ function QueueToolsDock({ useSession, useProjection, updateQueue, notify, reorde
     }, t('editFailed'))) setEditing(null);
   };
 
+  /** Render the preview through the shipped user-text factory when the slot
+   *  supplies one, falling back to plain text in a DOM-free contract test. */
+  const renderPreview = (text) => {
+    if (typeof renderFactorySlot === 'function') {
+      return renderFactorySlot('conversation.user.text', {
+        text, facts: QUEUE_TEXT_FACTS, interactive: false, ellipsis: true,
+      });
+    }
+    return text;
+  };
+
+  const previewNode = (key, text) => {
+    const span = jsx('span', { className: 'qt-preview', children: renderPreview(text) }, 'preview');
+    if (text.length === 0) return span;
+    // The tooltip carries the UNCUT text: the shipped factory ellipsizes by CSS.
+    return jsx(Tooltip, { label: text, side: 'bottom', delayMs: 500, maxWidth: 480, children: span }, key);
+  };
+
+  const attachmentsNode = (key, attachments) => jsx('span', { className: 'qt-attachments', children: attachments.map((item, index) => (
+    item.type === 'image'
+      // A locally queued image already carries a browser preview URL; only the
+      // durable inbox row needs the session-authorized loader.
+      ? (typeof item.previewUrl === 'string'
+        ? jsx('img', { className: 'qt-thumb', src: item.previewUrl, alt: t('image') }, `${item.previewUrl}:${index}`)
+        : jsx(QueueThumb, {
+          attachment: item.attachment, loadImage, label: t('image'),
+        }, `${item.attachment?.attachmentId ?? 'image'}:${index}`))
+      : jsx(QueueFile, {
+        attachment: item.attachment, label: t('file', { name: item.attachment?.name ?? '' }),
+      }, `${item.attachment?.attachmentId ?? item.attachment?.name ?? 'file'}:${index}`)
+  )) }, key);
+
+  const editorNode = () => jsx('textarea', {
+    autoFocus: true,
+    rows: 1,
+    className: 'qt-editor',
+    'aria-label': t('edit'),
+    value: editing.text,
+    ref: (el) => {
+      // Fit the box to the content once on mount (multiline editing).
+      if (el !== null && el.dataset.sized !== '1') {
+        el.dataset.sized = '1'
+        el.style.height = 'auto'
+        el.style.height = el.scrollHeight + 'px'
+      }
+    },
+    onChange: (event) => {
+      const el = event.currentTarget
+      el.style.height = 'auto'
+      el.style.height = el.scrollHeight + 'px'
+      setEditing({ id: editing.id, text: el.value })
+    },
+    onKeyDown: (event) => {
+      if (event.key === 'Escape') { setEditing(null); return }
+      // Enter submits (official behavior); Shift+Enter inserts a newline.
+      if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+        event.preventDefault();
+        void saveEdit();
+      }
+    },
+  }, 'editor');
+
+  const actionsNode = (row) => (editing?.id === row.id
+    ? jsxs(Fragment, { children: [
+      jsx(Tooltip, { label: t('save'), side: 'bottom', delayMs: 500, children: jsx('button', {
+        type: 'button',
+        className: 'qt-action',
+        'aria-label': t('save'),
+        disabled: busy !== null || editing.text.trim() === '',
+        onClick: () => { void saveEdit() },
+        children: jsx(IconCheckOutlineRegular, { size: 14 }),
+      }, 'save') }),
+      jsx(Tooltip, { label: t('cancelEdit'), side: 'bottom', delayMs: 500, children: jsx('button', {
+        type: 'button',
+        className: 'qt-action',
+        'aria-label': t('cancelEdit'),
+        disabled: busy !== null,
+        onClick: () => { setEditing(null) },
+        children: jsx(IconCloseOutlineRegular, { size: 14 }),
+      }, 'cancel') }),
+    ] })
+    : jsxs(Fragment, { children: [
+      jsx(Tooltip, { label: t('edit'), side: 'bottom', delayMs: 500, disabled: row.text === null, children: jsx('button', {
+        type: 'button',
+        className: 'qt-action',
+        'aria-label': t('edit'),
+        title: row.text === null ? t('edit.unsupported') : undefined,
+        disabled: busy !== null || row.text === null,
+        onClick: (event) => {
+          // Drop focus so the button's focus-triggered tooltip cannot linger
+          // when the row swaps into edit mode.
+          if (event.currentTarget.blur) event.currentTarget.blur()
+          if (row.text !== null) setEditing({ id: row.id, text: row.text })
+        },
+        onMouseDown: (event) => {
+          // Prevent mouse clicks from focusing the button at all (the
+          // focus-triggered tooltip popping up on click is the reported
+          // glitch); keyboard Tab focus keeps working.
+          if (event.preventDefault) event.preventDefault()
+        },
+        children: jsx(IconEditOutlineRegular, { size: 14 }),
+      }, 'edit') }),
+      jsx(Tooltip, { label: t('remove'), side: 'bottom', delayMs: 500, children: jsx('button', {
+        type: 'button',
+        className: 'qt-action',
+        'aria-label': t('remove'),
+        disabled: busy !== null,
+        onClick: () => { void applyAction(row.id, { kind: 'remove' }, t('removeFailed')) },
+        children: jsx(IconTrashOutlineRegular, { size: 14 }),
+      }, 'remove') }),
+      jsx(Tooltip, { label: t('steer'), side: 'bottom', delayMs: 500, disabled: !running, children: jsx('button', {
+        type: 'button',
+        className: 'qt-action',
+        'aria-label': t('steer'),
+        title: running ? undefined : t('steer.unavailable'),
+        disabled: busy !== null || !running,
+        onClick: () => { void applyAction(row.id, { kind: 'steer' }, t('steerFailed')) },
+        children: jsx(IconSendOutlineMedium, {}),
+      }, 'steer') }),
+    ] }));
+
+  const durableRow = (row) => {
+    const attachments = queueAttachments(row?.content);
+    // `null` (not '') means the row cannot round-trip an edit: content that is
+    // not entirely text must not silently lose its attachments on save.
+    const text = textOf(row?.content);
+    const previewText = textPreviewOf(row?.content);
+    const editingThis = editing?.id === row.id;
+    const dragClass = (draggingId === row.id ? ' qt-row-dragging' : '')
+      + (dragOverId === row.id && draggingId !== null && draggingId !== row.id ? ' qt-row-over' : '');
+    return jsxs('li', {
+      className: 'qt-row' + (editingThis ? ' qt-row-editing' : '') + dragClass,
+      // `false`, never `undefined`: React does not remove an attribute a
+      // previous render already set when the new value is undefined.
+      draggable: canReorder && !editingThis ? true : false,
+      'aria-grabbed': draggingId === row.id ? true : undefined,
+      onDragStart: (event) => {
+        if (!canReorder || editingThis) return
+        setDraggingId(row.id)
+        try { event.dataTransfer.effectAllowed = 'move' } catch { /* jsdom has no dataTransfer */ }
+      },
+      onDragOver: (event) => {
+        if (draggingId === null || draggingId === row.id) return
+        event.preventDefault()
+        try { event.dataTransfer.dropEffect = 'move' } catch { /* jsdom */ }
+        setDragOverId(row.id)
+      },
+      onDrop: (event) => {
+        if (draggingId === null) return
+        event.preventDefault()
+        dropOn(row)
+        endDrag()
+      },
+      onDragEnd: endDrag,
+      children: [
+        rowCount === 1 ? jsx('span', { className: 'qt-lead', 'aria-hidden': true, children: jsx(IconQueueOutlineMedium, {}) }, 'lead') : null,
+        attachments.length > 0 ? attachmentsNode('attachments', attachments) : null,
+        editingThis ? editorNode() : previewNode('preview-tip', previewText),
+        queueMutable ? jsx('div', { className: 'qt-actions', children: actionsNode({ ...row, text }) }, 'actions') : null,
+      ],
+    }, row.id);
+  };
+
+  const pendingRow = (submission) => {
+    const attachments = Array.isArray(submission?.attachments)
+      ? submission.attachments.filter((item) => item?.type === 'image' || item?.type === 'file')
+      : [];
+    const text = typeof submission?.text === 'string' ? submission.text : '';
+    // A locally queued submission has no Host row to act on yet: show its own
+    // echo (text + attachments) and a sending status instead of actions.
+    return jsxs('li', {
+      className: 'qt-row qt-pending-row',
+      'data-qt-pending': '1',
+      draggable: false,
+      children: [
+        rowCount === 1 ? jsx('span', { className: 'qt-lead', 'aria-hidden': true, children: jsx(IconQueueOutlineMedium, {}) }, 'lead') : null,
+        attachments.length > 0
+          ? attachmentsNode('attachments', attachments.map((item) => ({
+            type: item.type,
+            attachment: item.value ?? item.attachment,
+            previewUrl: item.value?.previewUrl,
+          })))
+          : null,
+        previewNode('preview-tip', text),
+        jsx('span', { className: 'qt-status', role: 'status', children: t('sending') }, 'status'),
+      ],
+    }, submission.requestId);
+  };
+
   return jsx('div', { className: 'qt-dock', 'data-queue-dock': '', children: jsxs('div', { className: 'qt-panel', children: [
-    queue.length > 1 ? jsxs('button', {
+    rowCount > 1 ? jsxs('button', {
       type: 'button',
       className: 'qt-header',
       'aria-controls': listId,
@@ -361,7 +578,10 @@ function QueueToolsDock({ useSession, useProjection, updateQueue, notify, reorde
       onClick: () => { setCollapsed((value) => !value) },
       children: [
         jsx('span', { className: 'qt-lead', 'aria-hidden': true, children: jsx(IconQueueOutlineMedium, {}) }, 'lead'),
-        jsx('span', { className: 'qt-count', children: t('count', { n: queue.length }) }, 'count'),
+        jsx('span', { className: 'qt-count', children: t('count', { n: rowCount }) }, 'count'),
+        !listVisible && pendingQueue.length > 0
+          ? jsx('span', { className: 'qt-status', role: 'status', children: t('sending') }, 'status')
+          : null,
         jsx('span', { className: 'qt-chevron', 'aria-hidden': true, children: expanded ? jsx(IconChevronDownOutlineMedium, {}) : jsx(IconChevronUpOutlineMedium, {}) }, 'chevron'),
       ],
     }, 'header') : null,
@@ -369,137 +589,9 @@ function QueueToolsDock({ useSession, useProjection, updateQueue, notify, reorde
       id: listId,
       className: 'qt-list',
       hidden: !listVisible,
-      children: listVisible ? queue.map((row) => jsxs('li', {
-        className: 'qt-row' + (editing?.id === row.id ? ' qt-row-editing' : '') + (draggingId === row.id ? ' qt-row-dragging' : '') + (dragOverId === row.id && draggingId !== null && draggingId !== row.id ? ' qt-row-over' : ''),
-        'data-qt-pending': row.pending ? '1' : undefined,
-        // `false`, never `undefined`: React does not remove an attribute that a
-        // previous render already set when the new value is undefined, so a row
-        // that stops being draggable would keep `draggable="true"` in the DOM.
-        draggable: canReorder && !row.pending && editing?.id !== row.id ? true : false,
-        'aria-grabbed': draggingId === row.id ? true : undefined,
-        onDragStart: (event) => {
-          if (!canReorder || row.pending) return
-          setDraggingId(row.id)
-          try { event.dataTransfer.effectAllowed = 'move' } catch { /* jsdom has no dataTransfer */ }
-        },
-        onDragOver: (event) => {
-          if (draggingId === null || draggingId === row.id || row.pending) return
-          event.preventDefault()
-          try { event.dataTransfer.dropEffect = 'move' } catch { /* jsdom */ }
-          setDragOverId(row.id)
-        },
-        onDrop: (event) => {
-          if (draggingId === null) return
-          event.preventDefault()
-          dropOn(row)
-          endDrag()
-        },
-        onDragEnd: endDrag,
-        children: [
-          queue.length === 1 ? jsx('span', { className: 'qt-lead', 'aria-hidden': true, children: jsx(IconQueueOutlineMedium, {}) }, 'lead') : null,
-          editing?.id === row.id ? jsx('textarea', {
-            autoFocus: true,
-            rows: 1,
-            className: 'qt-editor',
-            'aria-label': t('edit'),
-            value: editing.text,
-            ref: (el) => {
-              // Fit the box to the content once on mount (multiline editing).
-              if (el !== null && el.dataset.sized !== '1') {
-                el.dataset.sized = '1'
-                el.style.height = 'auto'
-                el.style.height = el.scrollHeight + 'px'
-              }
-            },
-            onChange: (event) => {
-              const el = event.currentTarget
-              el.style.height = 'auto'
-              el.style.height = el.scrollHeight + 'px'
-              setEditing({ id: row.id, text: el.value })
-            },
-            onKeyDown: (event) => {
-              if (event.key === 'Escape') { setEditing(null); return }
-              // Enter submits (official behavior); Shift+Enter inserts a newline.
-              if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-                event.preventDefault();
-                void saveEdit();
-              }
-            },
-          }, 'editor') : jsx(Tooltip, {
-            // Pending rows have no content to preview yet; the row still renders
-            // so the count and the collapse state stay truthful.
-            label: row.text ?? row.preview,
-            side: 'bottom',
-            delayMs: 500,
-            maxWidth: 480,
-            children: jsx('span', {
-              className: 'qt-preview',
-              'data-qt-empty': row.preview.length === 0 ? '1' : undefined,
-              children: row.preview,
-            }, 'preview'),
-          }, 'preview-tip'),
-          // A locally queued submission has no Host row to act on yet: the
-          // shipped dock shows a sending state instead of actions, and offering
-          // edit/remove/steer here would post an id the Host cannot resolve.
-          row.pending ? jsx('span', { className: 'qt-sending', children: t('sending') }, 'sending')
-            : queueMutable ? jsx('div', { className: 'qt-actions', children: editing?.id === row.id ? jsxs(Fragment, { children: [
-            jsx(Tooltip, { label: t('save'), side: 'bottom', delayMs: 500, children: jsx('button', {
-              type: 'button',
-              className: 'qt-action',
-              'aria-label': t('save'),
-              disabled: busy !== null || editing.text.trim() === '',
-              onClick: () => { void saveEdit() },
-              children: jsx(IconCheckOutlineRegular, { size: 14 }),
-            }, 'save') }),
-            jsx(Tooltip, { label: t('cancelEdit'), side: 'bottom', delayMs: 500, children: jsx('button', {
-              type: 'button',
-              className: 'qt-action',
-              'aria-label': t('cancelEdit'),
-              disabled: busy !== null,
-              onClick: () => { setEditing(null) },
-              children: jsx(IconCloseOutlineRegular, { size: 14 }),
-            }, 'cancel') }),
-          ] }) : jsxs(Fragment, { children: [
-            jsx(Tooltip, { label: t('edit'), side: 'bottom', delayMs: 500, disabled: row.text === null, children: jsx('button', {
-              type: 'button',
-              className: 'qt-action',
-              'aria-label': t('edit'),
-              title: row.text === null ? t('edit.unsupported') : undefined,
-              disabled: busy !== null || row.text === null,
-              onClick: (event) => {
-                // Drop focus so the button's focus-triggered tooltip cannot
-                // linger when the row swaps into edit mode.
-                if (event.currentTarget.blur) event.currentTarget.blur()
-                if (row.text !== null) setEditing({ id: row.id, text: row.text })
-              },
-              onMouseDown: (event) => {
-                // Prevent mouse clicks from focusing the button at all (the
-                // focus-triggered tooltip popping up on click is the reported
-                // glitch); keyboard Tab focus keeps working.
-                if (event.preventDefault) event.preventDefault()
-              },
-              children: jsx(IconEditOutlineRegular, { size: 14 }),
-            }, 'edit') }),
-            jsx(Tooltip, { label: t('remove'), side: 'bottom', delayMs: 500, children: jsx('button', {
-              type: 'button',
-              className: 'qt-action',
-              'aria-label': t('remove'),
-              disabled: busy !== null,
-              onClick: () => { void applyAction(row.id, { kind: 'remove' }, t('removeFailed')) },
-              children: jsx(IconTrashOutlineRegular, { size: 14 }),
-            }, 'remove') }),
-            jsx(Tooltip, { label: t('steer'), side: 'bottom', delayMs: 500, disabled: !running, children: jsx('button', {
-              type: 'button',
-              className: 'qt-action',
-              'aria-label': t('steer'),
-              title: running ? undefined : t('steer.unavailable'),
-              disabled: busy !== null || !running,
-              onClick: () => { void applyAction(row.id, { kind: 'steer' }, t('steerFailed')) },
-              children: jsx(IconSendOutlineMedium, {}),
-            }, 'steer') }),
-          ] }) }, 'actions') : null,
-        ],
-      }, row.id)) : null,
+      children: listVisible
+        ? [...queue.map(durableRow), ...pendingQueue.map(pendingRow)]
+        : null,
     }, 'list'),
   ] }) });
 }
@@ -537,6 +629,9 @@ function apply(ctx) {
         notify: (level, text) => {
           conversation.input.for(actx).notify(level, text)
         },
+        // Durable queued images resolve through the shipped session-authorized
+        // loader; the shipped dock does the same.
+        loadImage: (attachment) => ctx.uiConversation.imageUrl(sessionId, attachment),
         // Every index this dock computes comes from the `queued` rows it
         // renders, so the host can refuse a move onto any other list.
         reorder: (itemId, toIndex) => reorder(sessionId, itemId, toIndex, QUEUED_PLACEMENT),
