@@ -52,12 +52,12 @@ function makeInstallation(root, names) {
 }
 
 /** 造一个「共用依赖仓库」，把给定名字链接到 targetDir。 */
-function makeStore(root, names, targetDir) {
+function makeStore(root, names, targetDir, version = '0.1.5-old') {
   const scope = join(root, '@deepseek-ai');
   mkdirSync(scope, { recursive: true });
   for (const name of names) {
     const target = join(targetDir, name);
-    writePkg(target, `@deepseek-ai/${name}`, '0.1.5-old');
+    writePkg(target, `@deepseek-ai/${name}`, version);
     symlinkSync(target, join(scope, name), 'junction');
   }
   return scope;
@@ -121,6 +121,17 @@ try {
   check('体检结论：健康时为 healthy 且不需要关注', healthySummary.healthy === true, healthySummary.summary);
   check('体检结论：一行摘要包含可用计数',
     healthySummary.summary.includes('3/3'), healthySummary.summary);
+  // The store is a projection at the RUNTIME version: resolvable links alone
+  // were not enough (measured: app 0.2.1-rc.2 + store 0.2.0-rc.2 reported OK).
+  const staleSummary = summarizeStore(healthy, '9.9.9-test');
+  check('体检结论：store 版本落后于安装版本时不健康并点名',
+    staleSummary.healthy === false
+    && staleSummary.versionMismatch.length === 1
+    && staleSummary.versionMismatch[0].name === '@deepseek-ai/dsh-llm'
+    && staleSummary.summary.includes('不一致'),
+    staleSummary.summary);
+  const alignedSummary = summarizeStore(healthy, '0.1.5-old');
+  check('体检结论：store 版本与安装版本一致时仍然健康', alignedSummary.healthy === true, alignedSummary.summary);
 
   // --- 5. 体检：断链与 app.asar 链接 ---------------------------------------
   const brokenStore = join(scratch, 'store-broken');
@@ -166,7 +177,10 @@ try {
     JSON.stringify({ asar: asarOk.asarLinked.length, broken: asarOk.broken.length, usable: asarOk.usable.length }));
 
   // --- 6. 报告装配 ---------------------------------------------------------
-  const report = buildReport({ installRoot: goodRoot, commandLines: [rendererLine], storeDir: storeRoot });
+  // A store materialised at the installation's own version.
+  const alignedStoreRoot = join(scratch, 'store-aligned');
+  makeStore(alignedStoreRoot, ['schemastery', 'dsh-llm', 'cordis'], join(scratch, 'aligned-scope'), '9.9.9-test');
+  const report = buildReport({ installRoot: goodRoot, commandLines: [rendererLine], storeDir: alignedStoreRoot });
   check('buildReport：显式安装根优先，报告完整',
     report.ok === true
     && report.installation.source === 'explicit'
@@ -174,6 +188,12 @@ try {
     && report.store.entries === 3,
     JSON.stringify({ source: report.installation?.source, entries: report.store?.entries }));
   check('buildReport：带一行仓库摘要', report.summary.healthy === true, report.summary.summary);
+  const staleReport = buildReport({ installRoot: goodRoot, commandLines: [rendererLine], storeDir: storeRoot });
+  check('buildReport：store 版本与安装版本不一致时判为不健康（升级回归）',
+    staleReport.summary.healthy === false
+    && staleReport.summary.versionMismatch.length === 1
+    && staleReport.summary.summary.includes('不一致'),
+    staleReport.summary.summary);
 
   const fromProcess = buildReport({ commandLines: [rendererLine], storeDir: storeRoot });
   check('buildReport：能从运行中的命令行推出安装（环境里没有该路径时失败是预期的）',

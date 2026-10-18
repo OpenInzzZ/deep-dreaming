@@ -4,9 +4,9 @@
 
 **deep-dreaming** is a personal DSH (DeepSeek Harness) user-level patch collection. Each patch extends DSH through the official Cordis plugin mechanism and is deployed as a **bundle**: the package declares `dsh.bundle.patch`, ships its own `cordis.patch.yml` (the loader row lives there), and `install.ps1` links it into the profile with pnpm and registers it in `dsh.profile.bundles`. A profile-layer `- insert:` row for the same id is a migration leftover and must never coexist with the bundle row (see "One owner per loader row").
 
-- **Target: the DSH DESKTOP app** (Electron, `@deepseek-ai/dsh-desktop`). The profile is `~/.dsh/profiles/desktop`; the host is the packaged runtime `resources/app.asar/dsh` (currently **0.2.0-rc.2**), launched by `dsh-desktop-host` with `--no-open --port 19387`. `dsh web` (npx-cached CLI, ports 3080-3100) is **legacy and no longer maintained**: its lifecycle scripts are archived under `archive/web-scripts/` — see `archive/README.md`.
+- **Target: the DSH DESKTOP app** (Electron, `@deepseek-ai/dsh-desktop`). The profile is `~/.dsh/profiles/desktop`; the host is the packaged runtime `resources/app.asar/dsh` (currently **0.2.1-rc.2**), launched by `dsh-desktop-host` on a **dynamically assigned loopback port** (0.2.1 no longer takes a fixed `--port 19387`; observed 63920 / 54920 / 59749 on this machine). `dsh web` (npx-cached CLI, ports 3080-3100) is **legacy and no longer maintained**: its lifecycle scripts are archived under `archive/web-scripts/` — see `archive/README.md`.
 - **Repo**: `D:\GitHub\deep-dreaming` (clonable anywhere; no hardcoded absolute paths)
-- **DSH source checkout** (to verify APIs against the real implementation, not to build from): `D:\GitHub\deepseek-harness` — a monorepo at the same version as the desktop app. Use it for questions like "what does `deepseekAccount.getBalance` take" or "which icon names exist in 0.2.0-rc.2".
+- **DSH source checkout** (to verify APIs against the real implementation, not to build from): `D:\GitHub\deepseek-harness` — a monorepo at the same version as the desktop app. Use it for questions like "what does `deepseekAccount.getBalance` take" or "which icon names exist in the current release".
 - **Memory**: Memorix (MCP) holds cross-session project memory. `.dsh-memory/` is legacy data from the pre-Memorix implementation — gitignored, local to this machine only.
 
 ---
@@ -36,16 +36,16 @@ deep-dreaming/
 │   ├── restart-desktop.ps1        # Restart the desktop app (source changes need it); -Force required
 │   ├── desktop-install.mjs        # Discover the desktop installation + health-check the shared store (read-only)
 │   ├── desktop-install.test.mjs   # Unit tests for the above
-│   ├── migrate-icon-names.mjs     # Migrate `…Outline16/14` icon names to 0.2.0-rc.2's `…OutlineRegular/Medium`
+│   ├── migrate-icon-names.mjs     # Migrate `…Outline16/14` icon names to the current `…OutlineRegular/Medium`
 │   ├── verify-plugin-meta.mjs     # Prove each patch's locale title/description resolve the way DSH reads them
 │   ├── migrate-dsh-memory.mjs     # Import the legacy .dsh-memory/ notes into Memorix over MCP stdio
 │   ├── run-tests.mjs              # Run the whole test matrix (`npm test`)
 │   └── test-deps.mjs              # Resolve react/jsdom for the verify scripts (repo → NODE_PATH → profile)
 ├── patches/                       # One directory per patch
-│   ├── dsh-project-memory/        # Memorix bridge: guidance section + first-turn auto-recall
+│   ├── dsh-project-memory/        # Memorix bridge: guidance section + first-admitted-step auto-recall
 │   ├── session-cleanup/           # Auto-clean archived sessions by age/size
-│   ├── ui-settings-model-capabilities/ # Thinking switch + effort levels + image-input state per custom llm-pi-ai model
-│   ├── ui-queue-tools/            # Queue message preview + reorder
+│   ├── ui-settings-model-capabilities/ # Catalog-route thinking + three-state image input (declared-route thinking is official)
+│   ├── ui-queue-tools/            # Queue dock synced with official 0.2.1 + full-text preview + drag reorder
 │   ├── temp-session/              # Sidebar button for ad-hoc temp sessions
 │   ├── whale-background/          # Whale-girl background image in chat area
 │   └── mcp-servers/               # One settings page over a list of external MCP servers; mounts the official MCP client once per entry
@@ -73,7 +73,7 @@ Every patch is a Cordis plugin with a host half and optionally a client (browser
 - Exports `Config` — a `z.object({...})` schemastery schema for entry config validation. Required *when the entry takes config*; a config-less plugin may omit it (`session-cleanup` and `ui-settings-model-capabilities` have one; `ui-queue-tools` and `temp-session` do not need one).
 - Optionally exports `inject` — an array of service names required before `apply` runs.
 - Registers its client↔host transport as a fenced prefix route on `webServer` (see "Client ↔ Host transport"); `ctx.connection.rpc.handle` is broken in this dsh version and must not be used.
-- Registers settings by exporting a `Config` schema — **there is no registration call in 0.2.0-rc.2** (see "Settings" below and pitfall 16).
+- Registers settings by exporting a `Config` schema — **there is no registration call in 0.2.x** (see "Settings" below and pitfall 16).
 - Uses `ctx.effect(() => cleanup, 'label')` for all side effects (timers, routes, listeners).
 - Listens to events via `ctx.on('event/name', handler)`.
 
@@ -157,13 +157,13 @@ Every patch ships `locale/en.json` + `locale/zh.json` so the plugin management p
 - Never use the shared `/api` channel — it belongs to the Typert gateway.
 
 ### Settings
-- **There is no `ctx.settings.register` in 0.2.0-rc.2.** The host half just exports its `Config` schema; the Host derives the entry's settings section from it, and the section's namespace **is the loader entry id** (`ctx.configForms.get(entryId)` on the client).
+- **There is no `ctx.settings.register` in 0.2.x.** The host half just exports its `Config` schema; the Host derives the entry's settings section from it, and the section's namespace **is the loader entry id** (`ctx.configForms.get(entryId)` on the client). The host-side read/write face is `settings.describe()` (find the descriptor whose `ns` is the entry id) and `settings.update(ns, patch)` / `replace(ns, section)`; live changes arrive as `settings/document-updated(ns, revision)`. `patches/session-cleanup/session-cleanup.mjs` is the working example (all fields `.volatile()`, entry config unwrapped with `plainConfig()`).
 - **A settings section exists only for `volatile` fields, and volatile fields are `{ get }` accessors.** `settings/src/index.ts` throws `Plugin entry "<ns>" has no volatile fields` when `volatileForm(Config)` is empty, and `Config field "x" is not volatile` per write path (`:386`, `:388`) — an unmarked field means *card present, form silently absent*. Mark them with `.volatile()` (needs schemastery **3.18.4**; the shared store used to project 3.18.2 from an npx cache, which is why patches could not mark anything — see "Host Dependencies"). The second half of the trap: after `.volatile()`, the validated config value is a `{ get }` box, not the plain value — unwrap before handing it to anything else, exactly like the official `plainOptions()` (`llm-deepseek/src/config.ts:65`); `patches/mcp-servers/lib/index.js`'s `plainConfig()` is that unwrap. Passing the box downstream fails validation (`expected { serverName: string … }`).
 - **A `z.union` config gets no settings card, and schemastery schemas are *called*, not `.parse()`d.** The section is derived from `plugin.Config`, but a union cannot be flattened into a form, so mounting such a package directly (`@deepseek-ai/dsh-mcp-client` is `stdio | streamable-http`) yields **no UI at all** — wrap it and export a flat `Config` instead (`patches/mcp-servers/lib/index.js`). Validation is `Config(value)` → the filled object, throwing on a bound violation; there is no `.parse()` method (measured: `host.Config.parse is not a function`).
 - Host-side editing goes through the resolved entry config (composition layer) plus the Host's own `settings` document; there is no per-plugin registration step to wait for.
 - Client-side reads/writes use `ctx.configForms.get(entryId)`: `getSnapshot()` / `subscribe(listener)` to read, and `set(field, value)` / `unset(field)` / `mutate(ops)` to write (`ops` is a `SettingsPathOpView[]` of `{ op: 'set' | 'unset', path: [...], value }`). The provider already carries `remote.settings` on its **own** fiber, so a consumer must not declare that Remote itself.
 - For a page rather than a form, register on the shipped `settings.section` slot with `{ name, id, order, label: () => t('nav') }`.
-- **The shipped runtime has no generic plugin-config editor.** The keyed `plugins.row.config` slot is declared and consumed by `ui-plugin-manager` but contributed by nobody in 0.2.0-rc.2 (checked in the checkout and in `resources/app.asar`), so a bundle row's detail page renders no form even when that entry serves a namespace. The Host still answers `settings.describe` / `mutate` — only the UI is missing, so a patch that needs an editing surface registers its own `settings.section` page (`patches/mcp-servers/lib/client.js` is the working example).
+- **The shipped runtime has no generic plugin-config editor.** The keyed `plugins.row.config` slot is declared and consumed by `ui-plugin-manager` but contributed by nobody in 0.2.1-rc.2 (checked in the checkout and in `resources/app.asar`), so a bundle row's detail page renders no form even when that entry serves a namespace. The Host still answers `settings.describe` / `mutate` — only the UI is missing, so a patch that needs an editing surface registers its own `settings.section` page (`patches/mcp-servers/lib/client.js` is the working example).
 - A patch is free to keep its own fenced route as the data path (that is what `session-cleanup` does), which keeps the card working no matter how the Host wires settings.
 
 ### Theme Tokens
@@ -188,13 +188,13 @@ Every patch ships `locale/en.json` + `locale/zh.json` so the plugin management p
 - **Not watched:** a bundle's own `cordis.patch.yml` (it lives in `patches/`, outside the watched set) and patch source files. Row-structure edits inside a bundle yml and any source change need a restart (`scripts/restart-desktop.ps1`); a reload triggered by any watched file re-reads the bundle layers as a side effect.
 
 ### Restarting
-- The desktop app owns its lifecycle: the host is an Electron child process on `127.0.0.1:19387`, and **the current session runs inside it**. `scripts/restart-desktop.ps1` therefore refuses to act without `-Force`, and the running session dies with the old host — that is expected, not a failure.
+- The desktop app owns its lifecycle: the host is an Electron child process on a **dynamically assigned loopback port** (0.2.1; no fixed `--port 19387` any more — observed 63920 / 54920 / 59749), and **the current session runs inside it**. `scripts/restart-desktop.ps1` therefore refuses to act without `-Force`, and the running session dies with the old host — that is expected, not a failure.
 - `scripts/start-desktop.ps1` starts the app, or reports that it is already running (Electron's single-instance lock focuses the existing window).
 - `deploy.ps1` re-deploys both to `~/.dsh/scripts/` on every run.
 
 ### Crash recovery (web-era, archived)
 - The old escape hatch was `dsh web --clean` (boot the bundle layers only), injected by `archive/web-scripts/patch-cli.ps1` into the **npx-cached** CLI. That script is archived and no longer deployed: the desktop app runs its packaged runtime, which has no such flag.
-- To boot the desktop profile without its user layer today, move `~/.dsh/profiles/desktop/cordis.patch.yml` aside and restart the app. (The packaged CLI does support `--dump-config` / `--dump-default-config` for inspection — see `resources/runtime/cli/bin/dsh.cmd`.)
+- To boot the desktop profile without its user layer today, move `~/.dsh/profiles/desktop/cordis.patch.yml` aside and restart the app. (The packaged CLI does support `--dump-config` / `--dump-default-config` for inspection — see `resources/runtime/cli/bin/dsh.cmd`; the `desktop` profile is Electron-managed and refuses those flags, so copy the profile to a scratch name and dump that instead.)
 
 ### Junction Links
 - Every patch is installed as a **bundle** (see "Patch Architecture"): `install.ps1` links it into the profile with pnpm and registers it in `dsh.profile.bundles`; the bundle's own `cordis.patch.yml` (declared as `dsh.bundle.patch`) supplies its loader row.
@@ -212,7 +212,9 @@ Every patch ships `locale/en.json` + `locale/zh.json` so the plugin management p
   ```
 - That link makes the tree **cyclic**: `patches/<p>/node_modules` reaches `@local/*`, which points back at `patches/*`, whose `node_modules` links back again. Never run a recursive scan (`Get-ChildItem -Recurse`, `dir /s`, recursive globs) over `patches/` — it does not terminate. Read files by exact path.
 - `scripts/deploy.ps1` auto-fixes missing host dependency links.
-- **The store must be a materialised tree at the runtime's version, not an npx cache.** Measured 2026-10-13: `~/.dsh/profiles/node_modules` was **250 symlinks into `%LOCALAPPDATA%\npm-cache\_npx\<hash>\node_modules`** left by the web-era CLI — one `npm cache clean` (or the cache GC) breaks every patch at once with `MODULE_NOT_FOUND`, and the tree was a minor behind the packaged runtime (schemastery 3.18.2, `dsh-mcp-client` 0.1.5-rc.3), which is what silently removed every patch's settings form (`.volatile()` did not exist there). Re-materialised by installing the runtime-matched roots in a temp dir — `npm i @deepseek-ai/dsh-llm@0.2.0-rc.2 @deepseek-ai/dsh-mcp-client@0.2.0-rc.2` — and letting npm resolve `cordis` / `schemastery` itself (do not hand-copy versions), moving the old dir out to `~/.dsh/store-npx-era-<ts>` (kept, not deleted), moving the new tree into place, then restoring the `@local/*` junctions from the snapshot `~/.dsh/store-snapshot-<ts>.tsv`. `deploy.ps1` now FAILs when any store entry points into `npm-cache\_npx`.
+- **The store must be a materialised tree at the runtime's version, not an npx cache.** Measured 2026-10-13: `~/.dsh/profiles/node_modules` was **250 symlinks into `%LOCALAPPDATA%\npm-cache\_npx\<hash>\node_modules`** left by the web-era CLI — one `npm cache clean` (or the cache GC) breaks every patch at once with `MODULE_NOT_FOUND`, and the tree was a minor behind the packaged runtime (schemastery 3.18.2, `dsh-mcp-client` 0.1.5-rc.3), which is what silently removed every patch's settings form (`.volatile()` did not exist there). Re-materialised by installing the runtime-matched roots in a temp dir and letting npm resolve `cordis` / `schemastery` itself (do not hand-copy versions), moving the old dir out to `~/.dsh/store-npx-era-<ts>` (kept, not deleted), moving the new tree into place, then restoring the `@local/*` junctions from the snapshot `~/.dsh/store-snapshot-<ts>.tsv`.
+  - **2026-10-18 re-materialisation for 0.2.1-rc.2**: `npm i @deepseek-ai/dsh-llm@0.2.1-rc.2 @deepseek-ai/dsh-mcp-client@0.2.1-rc.2 @deepseek-ai/dsh-session-format-catalog@0.2.1-rc.2` (the catalog is test-only: the project-memory smoke test encodes through the real v4 codec). Resulting store: `cordis` 4.0.5, `schemastery` 3.18.5, `dsh-llm` / `dsh-mcp-client` / catalog 0.2.1-rc.2. Old tree kept at `~/.dsh/store-npx-era-20261017-190810`.
+  - `deploy.ps1` / `desktop-install.mjs` now FAIL on **either** a store entry pointing into `npm-cache\_npx` **or** `@deepseek-ai/dsh-llm`'s version differing from the desktop app's version (the old check only tested "resolvable", so app 0.2.1 + store 0.2.0 was reported OK). `@deepseek-ai/schemastery` has its own version line and is excluded from that comparison.
 - **Known gap in that check**: `desktop-install.mjs`'s `defaultCandidates()` only guesses `%LOCALAPPDATA%\Programs\DeepSeek Harness` and `%ProgramFiles%\DeepSeek Harness`. A custom install root (this machine: `D:\Programs\DeepSeek Harness`) is discovered *only while the app runs*, via its process command line — with the app stopped the version probe prints "DSH desktop app not found" and skips. The general fix is a registry `InstallLocation` candidate (HKCU/HKLM Uninstall entries); until then run the store version check with the app started, or pass `-InstallRoot`.
 
 ---
@@ -256,10 +258,10 @@ node patches/temp-session/verify-temp-session.mjs
 This project uses Memorix (MCP) for cross-session project memory. The `dsh-project-memory` patch is a lightweight bridge that:
 
 1. Injects a system-prompt guidance section telling the agent when to use `mcp__memorix__*` tools and that Memorix isolates memory **per git project**.
-2. On the **first turn** of a session (`turn/start`, `autoRecall`), injects one context notice carrying that session's workspace root and the binding step → agent calls `mcp__memorix__memorix_session_start({ projectRoot })` (one MCP server serves the whole process, so every session re-binds) and then `mcp__memorix__memorix_project_context` for relevant existing memory.
+2. On the **first admitted step** of a session (`agent/pre-step`, `autoRecall`), appends one context notice carrying that session's workspace root and the binding step to the step's admitted message batch → agent calls `mcp__memorix__memorix_session_start({ projectRoot })` (one MCP server serves the whole process, so every session re-binds) and then `mcp__memorix__memorix_project_context` for relevant existing memory.
 3. Nothing else. There is deliberately **no post-turn review round**: it used to `agent.followup(...)` after every completed turn, which bought one purely administrative turn per user turn (measured 23 extra turns in a 62-turn session) and was removed. Saving is driven by the guidance section.
 
-Recall uses `agent.inject(...)` (next-step context, no driver wake) rather than `followup(...)` (its own turn), so the notice rides inside the user's turn and renders as a collapsed context row. Its message `source` must stay the canonical `{ kind: 'plugin', plugin, form: 'notice', summary }` — a custom `kind` is not among the session-format migrator's known source kinds, so an old log containing one fails to migrate.
+The recall rides the `agent/pre-step` waterfall (`return { ...decision, messages: [...decision.messages, notice] }`) rather than `agent.inject(...)`: `session/event` is dispatched while the session's own append is still publishing, and injecting from there re-enters `session.append` and is refused (`session append cannot reenter while another append is being published`). The host-side smoke test drives the real waterfall and the real v4 encoder. The message `source` must be the producer-owned `{ kind: 'plugin:project-memory', form: 'notice', summary }` — format v4 rejects `kind: 'plugin'` at encode time (see pitfall 18).
 
 The bridge owns no storage, no tools and no settings namespace — Memorix's own SQLite + Orama store is the only backend. The old self-contained implementation (`lib/store.js` and its unit test) was deleted after the Memorix migration.
 
@@ -296,6 +298,18 @@ The bridge owns no storage, no tools and no settings namespace — Memorix's own
 
 17. **A settings form needs `.volatile()`, and `.volatile()` boxes the value.** Two halves, both silent: (a) the Host derives the section from `volatileForm(Config)`, so a Config whose fields are unmarked yields **a card with no form** and a write error `has no volatile fields` (`settings/src/index.ts:386`, per-path check at `:388`); (b) once marked, the validated value is a `{ get }` accessor, so anything that consumes the config must unwrap it first (official idiom: `plainOptions()` in `llm-deepseek/src/config.ts:65`) — handing the box to another schema fails with `expected { serverName: string … }`. `patches/mcp-servers` has both pinned: every form field asserts `meta.volatile === true`, and the load-smoke feeds the *boxed* config to `toMcpConfig()` exactly as `apply()` receives it. (`.volatile()` itself needs schemastery ≥ 3.18.4 — see "Host Dependencies" for why the store mattered here.)
 
+18. **A plugin notice needs a producer-owned source kind, and it cannot be injected from a session event.** Session format v4 (already current in 0.2.0-rc.2) validates every durable message source at encode/decode time and rejects `kind: 'plugin'` with `format v4 message requires a producer-owned source kind`; a plugin's spelling is `plugin:<name>` (the v3→v4 migrator's mapping for unknown plugin names). Worse, `agent.inject(...)` called from a `session/event` listener synchronously runs `inbox.splice → session.append`, but the event is dispatched while the session's own append is still publishing (`appending === true`), so the append is refused with `session append cannot reenter while another append is being published`. Both failures are silent if the call sits inside a `try/catch` — that is exactly how `dsh-project-memory`'s recall never reached the log. The supported shape is the `agent/pre-step` waterfall (same mechanism as the shipped `time-context` / `model-selection`):
+   ```js
+   ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+     const decision = await next()
+     if (decision.kind === 'reject' || signal.aborted) return decision
+     return { ...decision, messages: [...decision.messages, createUserMessage({ source: { kind: 'plugin:<name>', form: 'notice', summary }, ... })] }
+   })
+   ```
+   `dsh-project-memory/tests/plugin.smoke.mjs` pins both halves: it drives the real `ctx.events.waterfall` and pipes the message through the real v4 encoder.
+
+19. **The shared store is a version projection: "resolvable" is not "current".** A store materialised for 0.2.0-rc.2 stayed fully resolvable after the app moved to 0.2.1-rc.2, so the old health check reported `[OK]` while patches imported the previous release. `deploy.ps1` / `desktop-install.mjs` now compare `@deepseek-ai/dsh-llm`'s store version against the installation version and FAIL on a mismatch (`@deepseek-ai/schemastery` has its own version line and is excluded). Related 0.2.1 config drift: `llm-deepseek-account` no longer accepts `config.models` (`models is no longer configurable`), and that entry does not activate with the key present — remove it (the account `/models` listing supplies the catalog; per-model tweaks go to `modelOverrides.<id>`).
+
 ---
 
 ## Adding a New Patch
@@ -311,7 +325,7 @@ The bridge owns no storage, no tools and no settings namespace — Memorix's own
 2. Add to `scripts/install.ps1` (`$bundlePatchDirs`) and `scripts/deploy.ps1` (`$bundlePatchDirs`) so both scripts install and verify it, and add its host-dependency dir to `deploy.ps1`'s `$depPlugins`.
 3. Run `scripts/install.ps1` (pnpm-links the package, registers `dsh.profile.bundles`, strips any stale profile row) and then `scripts/deploy.ps1` to validate (junctions, bundle registration, row ownership, host dependency links, script/asset sync).
 4. **Never** also insert the patch's row in the profile layer — the bundle owns it; a second owner aborts the boot with `duplicate loader entry id`.
-5. If the patch has a browser half that needs host data or actions, copy `createRpcRoute` from `patches/ui-queue-tools/lib/index.js` and register it inside a dependency that **declares `webServer`** (`inject: ['webServer', …]` or `ctx.inject(['webServer', …])`) — never read the carrier with `ctx.get` during activation, and do **not** register a `connection.rpc` channel (see "Client ↔ Host transport").
+5. If the patch has a browser half that needs host data or actions, copy `createRpcRoute` from `patches/ui-queue-tools/lib/index.js` and add `webServer` to the host half's **static** `inject` entry (`export const inject = [<deps>, 'webServer']`) — never read the carrier with `ctx.get` during activation, never gate the registration behind a dynamic `ctx.inject(...)`, and do **not** register a `connection.rpc` channel (see "Client ↔ Host transport").
 6. **Check what DSH already ships before building UI.** The desktop app's own bundles already cover a lot (account page with balances, theme, shortcuts, plugin inventory…). A user patch that re-renders an existing view adds a second sidebar entry and drifts out of sync with the official copy — that is exactly how the retired `ui-settings-balance` failed. Grep the DSH source checkout (`packages/client/ui-*`) for the feature first.
 
 ---
@@ -321,7 +335,7 @@ The bridge owns no storage, no tools and no settings namespace — Memorix's own
 | Patch | Host file | Client file | RPC channel | Settings namespace |
 |-------|-----------|-------------|-------------|-------------------|
 | dsh-project-memory | `lib/index.js` | `client.js` | (none) | (none) |
-| session-cleanup | `session-cleanup.mjs` | `client.js` | `/session-cleanup` | `session-cleanup` (the entry id; no registration call in 0.2.0-rc.2) |
+| session-cleanup | `session-cleanup.mjs` | `client.js` | `/session-cleanup` | `session-cleanup` (the entry id; no registration call in 0.2.x) |
 | ui-settings-model-capabilities | `lib/index.js` | `lib/client.js` | (none — `configForms.get('llm-pi-ai')`) | `llm-pi-ai` (the provider entry id) |
 | ui-queue-tools | `lib/index.js` | `lib/client.js` | `/queue` | (none) |
 | temp-session | `lib/index.js` | `lib/client.js` | `/temp-session` | (none) |

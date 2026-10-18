@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-client-mcp-servers",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Umbrella bundle: one settings page holding a list of external MCP servers, each mounted as a child of the official @deepseek-ai/dsh-mcp-client",
   "type": "module",

@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-client-whale-background",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "private": true,
   "description": "User-level plugin: whale-girl background for the conversation area",
   "type": "module",

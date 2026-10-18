@@ -260,27 +260,45 @@ export function buildReport({ installRoot, candidates = [], commandLines = [], s
   if (found === undefined) {
     return { ok: false, error: 'desktop-installation-not-found', storeDir, store };
   }
+  const installation = { ...found, version: installationVersion(found) };
   return {
     ok: true,
-    installation: { ...found, version: installationVersion(found) },
+    installation,
     storeDir,
     store,
-    summary: summarizeStore(store),
+    summary: summarizeStore(store, installation.version),
   };
 }
 
 /**
  * 把体检结果压成一行结论 + 是否需要人工关注。
+ *
+ * `runtimeVersion` 是桌面端安装的版本。共享仓库是**按运行时版本物化**的投影：
+ * 它可以从 0.2.0-rc.2 的 npx 树一路留下来，而每条链接仍然「可解析」。只检查
+ * 可解析会把这个状态判成健康（实测：app 0.2.1-rc.2 + store 0.2.0-rc.2 仍显示
+ * `[OK]`），所以这里额外要求 `@deepseek-ai/dsh-llm` 的版本与安装版本一致。
+ * `@deepseek-ai/schemastery` 有自己的版本线，不参与该比较。
+ *
  * @param store {@link inspectStore} 的结果
+ * @param runtimeVersion 桌面端安装版本；缺省时跳过版本一致性检查（旧的调用方）
  */
-export function summarizeStore(store) {
+export function summarizeStore(store, runtimeVersion) {
   const probeFailed = store.probe.filter(entry => !entry.ok);
-  const healthy = store.broken.length === 0 && probeFailed.length === 0;
+  const versionMismatch = runtimeVersion === undefined
+    ? []
+    : store.probe.filter(entry => entry.ok
+      && entry.name === '@deepseek-ai/dsh-llm'
+      && typeof entry.version === 'string'
+      && entry.version !== runtimeVersion);
+  const healthy = store.broken.length === 0 && probeFailed.length === 0 && versionMismatch.length === 0;
   const parts = [`${store.usable.length}/${store.entries} 条投影可解析`];
   if (store.broken.length > 0) parts.push(`${store.broken.length} 条不可用`);
   if (store.asarLinked.length > 0) parts.push(`${store.asarLinked.length} 条指向 app.asar（Node 无法解析）`);
   if (probeFailed.length > 0) parts.push(`关键包不可解析: ${probeFailed.map(entry => entry.name).join(', ')}`);
-  return { healthy, summary: parts.join(' / '), probeFailed };
+  if (versionMismatch.length > 0) {
+    parts.push(`store 版本与桌面端不一致: ${versionMismatch.map(entry => `${entry.name} ${entry.version} ≠ ${runtimeVersion}`).join(', ')}`);
+  }
+  return { healthy, summary: parts.join(' / '), probeFailed, versionMismatch };
 }
 
 // ---------------------------------------------------------------------------

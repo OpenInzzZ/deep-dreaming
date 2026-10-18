@@ -1,7 +1,7 @@
 # deep-dreaming
 
-> **目标平台**: DSH **桌面端**(Electron,`@deepseek-ai/dsh-desktop`),当前适配 **`0.2.0-rc.2`**
-> (profile:`~/.dsh/profiles/desktop`;宿主:打包运行时 `resources/app.asar/dsh`)
+> **目标平台**: DSH **桌面端**(Electron,`@deepseek-ai/dsh-desktop`),当前适配 **`0.2.1-rc.2`**
+> (profile:`~/.dsh/profiles/desktop`;宿主:打包运行时 `resources/app.asar/dsh`;宿主端口由桌面端动态分配)
 > Web 端(`dsh web`)已**不再维护**,其生命周期脚本归档在 [`archive/`](archive/README.md)
 
 个人 dsh(DeepSeek Harness)用户级补丁集。所有补丁都通过 `~/.dsh` 的
@@ -17,8 +17,8 @@ deep-dreaming/
 ├── patches/                      # 全部补丁,一补丁一目录(代码 + 测试 + README)
 │   ├── dsh-project-memory/       # 跨会话项目记忆(Memorix 桥接,组合包插件)
 │   ├── session-cleanup/          # 会话日志自动清理(目录包插件)
-│   ├── ui-settings-model-capabilities/  # 设置「模型」页扩展:自定义(llm-pi-ai)模型的思考开关/等级 + 图片输入三态 + verify
-│   ├── ui-queue-tools/           # 排队消息增强:hover 全文预览 + 上下移排序 + verify
+│   ├── ui-settings-model-capabilities/  # 设置「模型」页扩展:目录型路由的思考 + 全路由图片输入三态(声明型路由的思考交给官方)
+│   ├── ui-queue-tools/           # 排队消息增强:hover 全文预览 + 拖拽排序,并与官方 0.2.1 坞同步(附件/本地回显)
 │   ├── temp-session/             # 侧边栏一键发起不绑定项目的临时会话 + verify
 │   ├── whale-background/         # 会话区域鲸鱼娘背景图(bundle 补丁)
 │   └── mcp-servers/              # 一张设置页管理多个外部 MCP 服务(含 IDEA 代码诊断),加服务不重启
@@ -29,7 +29,7 @@ deep-dreaming/
 │   ├── deploy.ps1                # 只读校验:同步脚本与资产 + bundle 登记/行属主 + junction + 体检宿主依赖仓库
 │   ├── start-desktop.ps1         # 启动桌面端(已在运行则聚焦窗口)
 │   ├── restart-desktop.ps1       # 重启桌面端(改补丁源码后必须;需 -Force)
-│   ├── desktop-install.mjs       # 发现桌面端安装 + 体检共享依赖仓库(只读,含单元测试)
+│   ├── desktop-install.mjs       # 发现桌面端安装 + 体检共享依赖仓库(解析 + 版本一致性,只读,含单元测试)
 │   ├── migrate-icon-names.mjs    # 把 `…Outline16/14` 图标名迁移到 0.2.0-rc.2 的 `…OutlineRegular/Medium`
 │   ├── verify-plugin-meta.mjs    # 复刻官方 readPluginMeta,证明「设置 → 内置插件」会显示我们的标题/描述
 │   ├── verify-bundle-rows.mjs    # 校验每个补丁的 dsh.bundle 声明与包内 cordis.patch.yml 行结构
@@ -44,10 +44,10 @@ deep-dreaming/
 
 | 补丁 | 作用 | 部署方式 | 使用文档 |
 | --- | --- | --- | --- |
-| [dsh-project-memory](patches/dsh-project-memory/) | 跨会话项目记忆:**Memorix 桥接**(存储/检索/去重/成熟度都在 Memorix)——注入提示词引导,并在会话第一轮召回既有记忆(带上本会话工作区根目录与项目绑定步骤),记忆存取由 Memorix 经 MCP(`mcp__memorix__*`)完成;记忆工具调用以**可折叠「记忆阶段」卡片**展示,**不产生额外对话轮次** | 作为 **bundle** 安装:`dsh plugin --profile desktop add`(或 `pnpm add`)进 profile 并登记到 `dsh.profile.bundles` + Memorix 全局安装与 `memorix setup --agent dsh --global` | [README](patches/dsh-project-memory/README.md) |
+| [dsh-project-memory](patches/dsh-project-memory/) | 跨会话项目记忆:**Memorix 桥接**(存储/检索/去重/成熟度都在 Memorix)——注入提示词引导,并在会话**首个被准入步骤**(`agent/pre-step`)召回既有记忆(带上本会话工作区根目录与项目绑定步骤),记忆存取由 Memorix 经 MCP(`mcp__memorix__*`)完成;记忆工具调用以**可折叠「记忆阶段」卡片**展示,**不产生额外对话轮次** | 作为 **bundle** 安装:`dsh plugin --profile desktop add`(或 `pnpm add`)进 profile 并登记到 `dsh.profile.bundles` + Memorix 全局安装与 `memorix setup --agent dsh --global` | [README](patches/dsh-project-memory/README.md) |
 | [session-cleanup](patches/session-cleanup/) | 按天数/容量定期清理归档会话,跳过活跃会话 | **bundle**:包内 `cordis.patch.yml` 行 + `install.ps1` pnpm link 进 profile 并登记 `dsh.profile.bundles` | [README](patches/session-cleanup/README.md) |
-| [ui-queue-tools](patches/ui-queue-tools/) | 排队消息增强:hover 预览全文 + 上移/下移排序(host 半经 Inbox.splice 重排) | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/ui-queue-tools/README.md) |
-| [ui-settings-model-capabilities](patches/ui-settings-model-capabilities/) | 设置「模型」页扩展:给自定义(llm-pi-ai)路由逐模型配置**能力**——**思考开关 + 思考等级(档位与发送值)**写回 `reasoningEfforts`(模型菜单随之出现「推理等级」),**图片输入三态**(跟随上游 / 仅文本 / 支持图片)写回 `input`,补上官方勾选框表达不了的「继承」状态 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/ui-settings-model-capabilities/README.md) |
+| [ui-queue-tools](patches/ui-queue-tools/) | 排队消息增强:hover 预览全文 + **拖拽排序**(host 半经 Inbox.splice 重排);其余行为与官方 0.2.1 队列坞同步(附件缩略图/文件块、本地排队回显、可继续子代理) | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/ui-queue-tools/README.md) |
+| [ui-settings-model-capabilities](patches/ui-settings-model-capabilities/) | 设置「模型」页扩展:给 llm-pi-ai 路由逐模型配置**能力**——**目录型路由**的**思考开关 + 等级(档位与发送值)**写回 `reasoningEfforts`(声明型路由的思考由 0.2.1 官方模型行负责,本卡不再重复);**图片输入三态**(跟随上游 / 仅文本 / 支持图片)写回 `input`,补上官方勾选框表达不了的「继承」状态 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/ui-settings-model-capabilities/README.md) |
 | [temp-session](patches/temp-session/) | 侧边栏底部「临时会话」按钮:一键发起绑定**用户级临时目录**的会话,不关联任何项目 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/temp-session/README.md) |
 | [whale-background](patches/whale-background/) | 会话区域背景:在对话滚动区居中偏右显示鲸鱼娘透明图(13% 透明度),资源缺失时自动跳过而不影响启动 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/whale-background/README.md) |
 | [mcp-servers](patches/mcp-servers/) | **MCP 服务接入**:一张设置页管理多个外部 MCP 服务,清单存在配置里,加/删服务不用改 yml、不用重启。出厂默认那条是 **IDEA 代码诊断**——模型改完代码直接调 `mcp__idea__lint_files` / `get_file_problems` 拿 IDE 实时检查结果(实测冷分析 3.6s、8 文件批量 4.9s、59 个工具),不必为「符号解析不了」跑一遍编译。宿主端对每项挂一个官方 `@deepseek-ai/dsh-mcp-client` 子 fiber(官方一个 entry 只连一个 server,且它的 `z.union` 展不开成表单);客户端半端注册 `settings.section` 页——**运行时没有任何插件贡献 `plugins.row.config`,官方根本没有通用配置编辑器** | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/mcp-servers/README.md) |
@@ -114,7 +114,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 - **一个 loader 行只能有一个来源。** 每个补丁都声明了 `dsh.bundle`,它的行由 bundle 层(包自带 `cordis.patch.yml`)提供;profile 层**不能**再写同 id 的 `- insert:` 行。两层若同时提供同一个 id,`applyEntryPatches` 不会去重,Loader 会 fail-loud 抛 `TypeError: duplicate loader entry id`,dsh 直接起不来。`install.ps1` 会**先**剥离 profile 遗留行再装 bundle(若 bundle 安装失败则把该行原样恢复回去);`deploy.ps1` 检测到「bundle 已声明但未登记」或「profile 层插入了已在 `dsh.profile.bundles` 里的名字」都会报 FAIL。
   注意 `dsh plugin add` / `dsh plugin update --profile desktop` 会自行把声明了 `dsh.bundle` 的依赖补进 `dsh.profile.bundles`,所以不要"为了保险"两边都写。
 - **不要在 `patches/` 下做递归扫描**:`patches/<p>/node_modules` 是指向 `~/.dsh/profiles/node_modules` 的 junction,而 profile 里的 `@local/*` 又指回 `patches/*`,形成环;`Get-ChildItem -Recurse` 之类的命令不会结束。
-- **`~/.dsh/profiles/node_modules` 必须是按运行时版本物化的实目录。** 它曾经是 web 时代 npx 缓存留下的 **250 条指向 `%LOCALAPPDATA%\npm-cache\_npx\<hash>\node_modules` 的软链**:一次 `npm cache clean`(或缓存 GC)就能让全部补丁同时 `MODULE_NOT_FOUND`;而且那套包比打包运行时落后一个 minor(schemastery 3.18.2 vs 3.18.4)—— 这正是「卡片在、设置表单没有」的根因,因为 `.volatile()` 在 3.18.2 里不存在(可编辑分区只收 volatile 字段)。2026-10-13 已按运行时版本重物化:临时目录里 `npm i @deepseek-ai/dsh-llm@0.2.0-rc.2 @deepseek-ai/dsh-mcp-client@0.2.0-rc.2`(cordis / schemastery 交给 npm 自己解析,**不要手抄版本号**),旧目录**移出**到 `~/.dsh/store-npx-era-<ts>`(未删除),`@local/*` 链接按快照 `~/.dsh/store-snapshot-<ts>.tsv` 恢复。`deploy.ps1` 现在见到任何指向 `npm-cache\_npx` 的 store 条目就报 FAIL。
+- **`~/.dsh/profiles/node_modules` 必须是按运行时版本物化的实目录。** 它曾经是 web 时代 npx 缓存留下的 **250 条指向 `%LOCALAPPDATA%\npm-cache\_npx\<hash>\node_modules` 的软链**:一次 `npm cache clean`(或缓存 GC)就能让全部补丁同时 `MODULE_NOT_FOUND`;而且那套包比打包运行时落后一个 minor(schemastery 3.18.2 vs 3.18.4)—— 这正是「卡片在、设置表单没有」的根因,因为 `.volatile()` 在 3.18.2 里不存在(可编辑分区只收 volatile 字段)。2026-10-13 已按运行时版本重物化:临时目录里 `npm i @deepseek-ai/dsh-llm@0.2.0-rc.2 @deepseek-ai/dsh-mcp-client@0.2.0-rc.2`(cordis / schemastery 交给 npm 自己解析,**不要手抄版本号**),旧目录**移出**到 `~/.dsh/store-npx-era-<ts>`(未删除),`@local/*` 链接按快照 `~/.dsh/store-snapshot-<ts>.tsv` 恢复。
+  **2026-10-18 又按 `0.2.1-rc.2` 重物化了一次**(`npm i @deepseek-ai/dsh-llm@0.2.1-rc.2 @deepseek-ai/dsh-mcp-client@0.2.1-rc.2 @deepseek-ai/dsh-session-format-catalog@0.2.1-rc.2`,最后一个供测试里的真实 v4 编码器使用),旧树保留在 `~/.dsh/store-npx-era-20261017-190810`。`deploy.ps1` 现在**既**检查任何指向 `npm-cache\_npx` 的 store 条目,**也**比对 store 里 `@deepseek-ai/dsh-llm` 与桌面端版本 —— 不一致即 FAIL(此前只检查"可解析",实测 app 0.2.1 + store 0.2.0 曾被误判为 OK)。
 
 ## 故障恢复
 
@@ -262,7 +263,7 @@ Web 端时期修掉的问题,以及下次升级时要先看的地方:
    改成区分"服务未加载"与"消息可能已开始发送",不再把前者说成后者。
    **结论:改过 patch 文件后,先重启再用 host 侧功能。**
 
-### 桌面端适配(0.2.0-rc.2)
+### 桌面端适配(0.2.0-rc.2 → 0.2.1-rc.2)
 
 从「以 Web 端为准」转到「以桌面端为准」时踩到并修掉的:
 
@@ -277,12 +278,12 @@ Web 端时期修掉的问题,以及下次升级时要先看的地方:
 3. **共享宿主依赖仓库必须与宿主同版本**:`~/.dsh/profiles/node_modules` 是补丁唯一能
    解析 `import '@deepseek-ai/*'` 的地方(Node 从补丁的真实路径解析)。它原本指向一个
    后来被 npm 清空的 npx 缓存(0.1.5-rc.2),导致补丁全部 `MODULE_NOT_FOUND`;
-   现按桌面端 release 重建为 **0.2.0-rc.2**。
+   现按桌面端 release 重建(2026-10-18 已随 **0.2.1-rc.2** 再次物化)。
    **不要试图把这个仓库指到打包运行时**:junction 指向 `app.asar` 内部时 Node 解析
    不了(实测 `readFileSync` ENOENT),物化要 236 MB,删掉投影则 import 直接失败。
 4. **`dsh-project-memory` 的 peer 门槛**:它声明 `@deepseek-ai/dsh-llm: ^0.1.5-rc.2`,
    而 `^0.1.x` 不包含 `0.2.0-rc.2`,桌面端会因 peer 不满足而**跳过该 bundle**。
-   已改为 `^0.2.0-rc.2`。
+   已改为 `^0.2.0-rc.2`(带 `includePrerelease` 的检查同时接受 `0.2.1-rc.2`)。
 5. **运行状态 / 重启 / 检查更新 / 创建快捷方式整体下线**:这些都以 Web 端生命周期
    为准。原 `ui-settings-other` 已改造为只读余额页
    (`ui-settings-balance`),**随后也退役了** —— 见下一条;
@@ -304,6 +305,37 @@ Web 端时期修掉的问题,以及下次升级时要先看的地方:
 8. **客户端图标名在 0.2.0-rc.2 全部改名**:见下节第 2 条。
 9. **CLI 补丁(`--clean`)不再需要**:桌面端跑打包运行时,不是 npx 缓存。
    `archive/web-scripts/patch-cli.ps1` 保留但不再部署。
+
+### 0.2.1-rc.2 适配补记(2026-10-18)
+
+升级到 0.2.1-rc.2 时实际修掉/确认的:
+
+1. **会话格式 v4 拒绝 `source.kind = 'plugin'`**:编码时抛
+   `format v4 message requires a producer-owned source kind`。插件来源必须写成
+   `plugin:<name>`(v3→v4 迁移器对未知插件的拼写);`dsh-project-memory` 的召回
+   已改。注意这在 0.2.0-rc.2 就已是 v4,只是当时没有测试覆盖到「真实编码器」。
+2. **不能从 `session/event` 监听器里调 `agent.inject`**:事件在会话自身 append
+   尚未发布完(`appending=true`)时分发,`inject` 同步触发
+   `inbox.splice → session.append`,被以 `session append cannot reenter while
+   another append is being published` 拒绝;旧代码吞掉异常,召回从未落盘。
+   正确做法是 `agent/pre-step` 瀑布返回
+   `messages: [...decision.messages, notice]`(官方 `time-context` /
+   `model-selection` 同款)。
+3. **0.2.x 的 `settings` 服务没有 `register()`**:`session-cleanup` 改用
+   `Config` 字段 `.volatile()` + `settings.describe()` 读、`settings.update()` /
+   `replace()` 写,并监听 `settings/document-updated` 重建定时器;设置卡片的
+   `setConfig` 从 `settings-unavailable` 恢复为可写。
+4. **store 版本校验**:`deploy.ps1` / `desktop-install.mjs` 现在比对 store 的
+   `@deepseek-ai/dsh-llm` 与桌面端版本(此前 app 0.2.1 + store 0.2.0 会被判 OK)。
+5. **profile 的 `llm-deepseek-account.config.models` 已不可配置**:0.2.1 报
+   `models is no longer configurable`,该 entry 会不激活;该键已从
+   `~/.dsh/profiles/desktop/cordis.patch.yml` 删除(备份 `.bak-20261018`)。
+6. **桌面端宿主端口改为动态分配**(不再固定 19387;本次多次重启分别落在
+   63920 / 54920 / 59749):脚本与文档不得硬编码端口。
+7. **功能重叠处理**:`ui-queue-tools` 影子坞同步官方 0.2.1(附件、本地回显、
+   continuable 子代理、工厂渲染),只保留全文 Tooltip + 拖拽排序;
+   `ui-settings-model-capabilities` 在声明型路由上隐藏思考区(官方
+   `ModelReasoningEfforts` 负责),保存时 `reasoningEfforts` 原样透传。
 
 ### 本轮部署状态(2026-09-18,Web 端)
 

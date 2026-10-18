@@ -286,14 +286,19 @@ if ($Profile -eq 'desktop') {
             Write-Host "  install : $($report.installation.installRoot) (dsh $($report.installation.version))"
             Write-Host "  store   : $($report.summary.summary)"
             foreach ($probe in @($report.store.probe)) {
-                $mark = if ($probe.ok) { '[OK]' } else { '[FAIL]' }
-                Write-Host "  $mark $($probe.name) $($probe.version)"
+                $aligned = ($probe.name -ne '@deepseek-ai/dsh-llm') -or (-not $probe.ok) -or ($probe.version -eq $report.installation.version)
+                $mark = if ($probe.ok -and $aligned) { '[OK]' } else { '[FAIL]' }
+                $suffix = if ($probe.ok -and -not $aligned) { " (expected $($report.installation.version))" } else { '' }
+                Write-Host "  $mark $($probe.name) $($probe.version)$suffix"
             }
             if ($report.summary.healthy) {
                 Write-Host '  [OK] every projection resolves; the patches can import their host packages' -ForegroundColor Green
             } else {
-                Write-Host '  [FAIL] the store has unusable projections; rebuild it with the CLI that created it' -ForegroundColor Red
+                Write-Host '  [FAIL] the store is stale or unusable; re-materialise it at the runtime version (AGENTS.md Host Dependencies)' -ForegroundColor Red
                 foreach ($name in @($report.store.broken)) { Write-Host "         broken: $name" -ForegroundColor DarkGray }
+                foreach ($mismatch in @($report.summary.versionMismatch)) {
+                    Write-Host "         version: $($mismatch.name) $($mismatch.version) != $($report.installation.version)" -ForegroundColor DarkGray
+                }
                 $failed++
             }
         }

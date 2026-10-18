@@ -345,7 +345,13 @@ foreach ($rename in $renamedBundles) {
     if (-not $active) { continue }
 
     $state = Read-BundleState $profilePkg
-    if (-not (($state.Deps -contains $rename.Old) -or ($state.Bundles -contains $rename.Old))) { continue }
+    # A retired bundle can survive in THREE places, and any one of them is a
+    # reason to run the cleanup: the profile dependency, `dsh.profile.bundles`,
+    # or a legacy profile-layer insert row (the common case for a bundle that
+    # was installed before the bundle migration). Checking only the manifest
+    # left the row behind, pointing at a package this repo no longer ships.
+    $legacyRow = Test-InsertRow -Content (Read-Utf8 $patchFile) -Id $rename.RowId
+    if (-not (($state.Deps -contains $rename.Old) -or ($state.Bundles -contains $rename.Old) -or $legacyRow)) { continue }
 
     $manifestJson = Read-Utf8 $profilePkg | ConvertFrom-Json
     if ($null -ne $manifestJson.dependencies) {
