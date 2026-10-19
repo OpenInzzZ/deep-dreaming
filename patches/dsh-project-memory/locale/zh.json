@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "项目记忆召回",
-    "description": "会话首轮自动召回当前项目的相关记忆，并向提示词注入 Memorix 的使用时机指引；存储与检索由 Memorix 完成。"
+    "description": "会话首轮自动召回当前项目的相关记忆，并向提示词注入 MCP Reference Memory 图谱工具的使用时机与项目前缀约定；存储与检索由参考记忆服务器完成。"
   }
 }

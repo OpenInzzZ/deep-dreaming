@@ -7,7 +7,7 @@
 - **Target: the DSH DESKTOP app** (Electron, `@deepseek-ai/dsh-desktop`). The profile is `~/.dsh/profiles/desktop`; the host is the packaged runtime `resources/app.asar/dsh` (currently **0.2.1-rc.2**), launched by `dsh-desktop-host` on a **dynamically assigned loopback port** (0.2.1 no longer takes a fixed `--port 19387`; observed 63920 / 54920 / 59749 on this machine). `dsh web` (npx-cached CLI, ports 3080-3100) is **legacy and no longer maintained**: its lifecycle scripts are archived under `archive/web-scripts/` — see `archive/README.md`.
 - **Repo**: `D:\GitHub\deep-dreaming` (clonable anywhere; no hardcoded absolute paths)
 - **DSH source checkout** (to verify APIs against the real implementation, not to build from): `D:\GitHub\deepseek-harness` — a monorepo at the same version as the desktop app. Use it for questions like "what does `deepseekAccount.getBalance` take" or "which icon names exist in the current release".
-- **Memory**: Memorix (MCP) holds cross-session project memory. `.dsh-memory/` is legacy data from the pre-Memorix implementation — gitignored, local to this machine only.
+- **Memory**: the official MCP Reference Memory server (`mcp-server-memory`, serverName `reference_memory`) holds cross-session project memory. `.dsh-memory/` is legacy data from the pre-MCP local implementation — gitignored, local to this machine only.
 
 ---
 
@@ -30,7 +30,7 @@ deep-dreaming/
 ├── README.md                      # Project overview + patch catalog + deploy guide
 ├── package.json                   # Test-only dev deps (react / react-dom / jsdom); `npm test`
 ├── scripts/
-│   ├── install.ps1                # One-shot: junctions + bundle installs (pnpm link + dsh.profile.bundles, strips legacy rows first) + Memorix setup + deploy check
+│   ├── install.ps1                # One-shot: junctions + bundle installs (pnpm link + dsh.profile.bundles, strips legacy rows first) + MCP Reference Memory setup + deploy check
 │   ├── deploy.ps1                 # Read-only check: junctions/entries/row ownership + store health + script/asset sync
 │   ├── start-desktop.ps1          # Start the DSH desktop app (focus the window when already running)
 │   ├── restart-desktop.ps1        # Restart the desktop app (source changes need it); -Force required
@@ -38,11 +38,12 @@ deep-dreaming/
 │   ├── desktop-install.test.mjs   # Unit tests for the above
 │   ├── migrate-icon-names.mjs     # Migrate `…Outline16/14` icon names to the current `…OutlineRegular/Medium`
 │   ├── verify-plugin-meta.mjs     # Prove each patch's locale title/description resolve the way DSH reads them
-│   ├── migrate-dsh-memory.mjs     # Import the legacy .dsh-memory/ notes into Memorix over MCP stdio
+│   ├── migrate-dsh-memory.mjs     # Import the legacy .dsh-memory/ notes into MCP Reference Memory over MCP stdio
+│   ├── migrate-memorix-to-reference.mjs # Copy Memorix project snapshots into the MCP Reference Memory graph (official `memorix transfer export` + MCP writes)
 │   ├── run-tests.mjs              # Run the whole test matrix (`npm test`)
 │   └── test-deps.mjs              # Resolve react/jsdom for the verify scripts (repo → NODE_PATH → profile)
 ├── patches/                       # One directory per patch
-│   ├── dsh-project-memory/        # Memorix bridge: guidance section + first-admitted-step auto-recall
+│   ├── dsh-project-memory/        # MCP Reference Memory bridge: guidance section + first-admitted-step auto-recall
 │   ├── session-cleanup/           # Auto-clean archived sessions by age/size
 │   ├── ui-settings-model-capabilities/ # Catalog-route thinking + three-state image input (declared-route thinking is official)
 │   ├── ui-queue-tools/            # Queue dock synced with official 0.2.1 + full-text preview + drag reorder
@@ -253,19 +254,21 @@ node patches/temp-session/verify-temp-session.mjs
 
 ---
 
-## Project Memory (Memorix)
+## Project Memory (MCP Reference Memory)
 
-This project uses Memorix (MCP) for cross-session project memory. The `dsh-project-memory` patch is a lightweight bridge that:
+This project uses the official **MCP Reference Memory** server (`@modelcontextprotocol/server-memory`, `mcp-server-memory`) for cross-session project memory, mounted through `@deepseek-ai/dsh-mcp-client` by a home-layer row (`~/.dsh/cordis.patch.yml`, id `memory-mcp-reference`, serverName `reference_memory`, graph at `~/.dsh-mcp-reference-memory.jsonl`). The `dsh-project-memory` patch is a lightweight bridge that:
 
-1. Injects a system-prompt guidance section telling the agent when to use `mcp__memorix__*` tools and that Memorix isolates memory **per git project**.
-2. On the **first admitted step** of a session (`agent/pre-step`, `autoRecall`), appends one context notice carrying that session's workspace root and the binding step to the step's admitted message batch → agent calls `mcp__memorix__memorix_session_start({ projectRoot })` (one MCP server serves the whole process, so every session re-binds) and then `mcp__memorix__memorix_project_context` for relevant existing memory.
+1. Injects a system-prompt guidance section telling the agent when to use `mcp__reference_memory__*` tools and that the graph is **shared by every project** — entity names must carry the `<project>/<topic>` prefix (project = workspace basename, lower-cased).
+2. On the **first admitted step** of a session (`agent/pre-step`, `autoRecall`), appends one context notice carrying that session's workspace root and derived project identifier to the step's admitted message batch → agent calls `mcp__reference_memory__search_nodes({ query: "<project>" })` before substantial work. There is no binding call: unlike the retired Memorix backend, the reference server has no project boundary and no session_start.
 3. Nothing else. There is deliberately **no post-turn review round**: it used to `agent.followup(...)` after every completed turn, which bought one purely administrative turn per user turn (measured 23 extra turns in a 62-turn session) and was removed. Saving is driven by the guidance section.
 
 The recall rides the `agent/pre-step` waterfall (`return { ...decision, messages: [...decision.messages, notice] }`) rather than `agent.inject(...)`: `session/event` is dispatched while the session's own append is still publishing, and injecting from there re-enters `session.append` and is refused (`session append cannot reenter while another append is being published`). The host-side smoke test drives the real waterfall and the real v4 encoder. The message `source` must be the producer-owned `{ kind: 'plugin:project-memory', form: 'notice', summary }` — format v4 rejects `kind: 'plugin'` at encode time (see pitfall 18).
 
-The bridge owns no storage, no tools and no settings namespace — Memorix's own SQLite + Orama store is the only backend. The old self-contained implementation (`lib/store.js` and its unit test) was deleted after the Memorix migration.
+The bridge owns no storage, no tools and no settings namespace — the reference server's JSONL knowledge graph is the only backend. The old self-contained implementation (`lib/store.js` and its unit test) was deleted during the Memorix migration; Memorix itself was replaced by the reference server in 0.3.0 (`install.ps1` removes the legacy `memory-memorix` row and the `~/.dsh/AGENTS.md` block that `memorix setup` wrote).
 
-`.dsh-memory/` holds the **legacy** Markdown notes of that previous implementation (Markdown + YAML front matter, categories `project_introduction`, `development_code_specification`, `common_pitfalls_experience`, `project_tech_stack`, `general`). It is gitignored, lives only on this machine, and nothing reads it at runtime; `scripts/migrate-dsh-memory.mjs` imports it into Memorix over the real MCP stdio channel (idempotent, `--dry-run` supported).
+`.dsh-memory/` holds the **legacy** Markdown notes of that previous implementation (Markdown + YAML front matter, categories `project_introduction`, `development_code_specification`, `common_pitfalls_experience`, `project_tech_stack`, `general`). It is gitignored, lives only on this machine, and nothing reads it at runtime; `scripts/migrate-dsh-memory.mjs` imports it into the reference graph over the real MCP stdio channel (idempotent, `--dry-run` supported).
+
+Existing **Memorix** data is copied by `scripts/migrate-memorix-to-reference.mjs`: it calls the official `memorix transfer export` per project root (`--cwd`, repeatable; or `--from <export.json|dir>`), maps each non-archived observation to `<project>/<title>` (slug = last segment of Memorix's canonical projectId, lower-cased), and writes through the real `mcp-server-memory` stdio channel. Existing entity names are skipped, so re-runs are idempotent; `archived` observations stay behind unless `--include-archived` is passed. Memorix's own DB is never modified.
 
 ---
 

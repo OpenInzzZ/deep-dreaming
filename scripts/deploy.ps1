@@ -171,11 +171,31 @@ if ((Test-Path $profilePatch) -and (Test-Path $profilePkgPath)) {
 
 # 2. Legacy home-layer file:// plugin references (no longer used; warn only).
 $homePatch = Join-Path $dshHome 'cordis.patch.yml'
+$homeContent = if (Test-Path $homePatch) { Read-Utf8 $homePatch } else { '' }
 if (Test-Path $homePatch) {
-    $content = Read-Utf8 $homePatch
-    if ($content -match 'name:\s*(file://[^\s]+)') {
+    if ($homeContent -match 'name:\s*(file://[^\s]+)') {
         Write-Host "  [WARN] legacy file:// plugin ref in ~/.dsh/cordis.patch.yml: $($Matches[1])" -ForegroundColor Yellow
     }
+}
+
+# 2.5. Memory provider. The dsh-project-memory bridge has no storage of its
+#      own: it targets MCP Reference Memory through @deepseek-ai/dsh-mcp-client.
+#      That row lives in the HOME patch layer (not a @local bundle), so it is
+#      checked here rather than by section 1.5.
+$checked++
+if ($homeContent -match 'serverName:\s*reference_memory') {
+    if ($null -ne (Get-Command 'mcp-server-memory' -ErrorAction SilentlyContinue)) {
+        Write-Host '  [OK] memory provider: reference_memory row + mcp-server-memory on PATH'
+    } else {
+        Write-Host '  [FAIL] reference_memory row is present but mcp-server-memory is not on PATH - the MCP client cannot spawn it; run scripts/install.ps1' -ForegroundColor Red
+        $failed++
+    }
+} else {
+    Write-Host '  [FAIL] no reference_memory row in ~/.dsh/cordis.patch.yml - the project-memory bridge has no backend; run scripts/install.ps1' -ForegroundColor Red
+    $failed++
+}
+if ($homeContent -match 'serverName:\s*memorix') {
+    Write-Host '  [WARN] a Memorix memory row is still mounted alongside reference_memory; remove it to avoid two memory servers' -ForegroundColor Yellow
 }
 
 # 3. Ensure every host-side plugin that imports @deepseek-ai/* has a node_modules

@@ -15,7 +15,7 @@ deep-dreaming/
 ├── README.md                     # 本文件:总览 + 补丁清单
 ├── package.json                  # 仅测试用依赖(react / react-dom / jsdom),npm install 后 npm test
 ├── patches/                      # 全部补丁,一补丁一目录(代码 + 测试 + README)
-│   ├── dsh-project-memory/       # 跨会话项目记忆(Memorix 桥接,组合包插件)
+│   ├── dsh-project-memory/       # 跨会话项目记忆(MCP Reference Memory 桥接,组合包插件)
 │   ├── session-cleanup/          # 会话日志自动清理(目录包插件)
 │   ├── ui-settings-model-capabilities/  # 设置「模型」页扩展:目录型路由的思考 + 全路由图片输入三态(声明型路由的思考交给官方)
 │   ├── ui-queue-tools/           # 排队消息增强:hover 全文预览 + 拖拽排序,并与官方 0.2.1 坞同步(附件/本地回显)
@@ -25,7 +25,7 @@ deep-dreaming/
 ├── assets/                       # 品牌资产(鲸鱼娘 favicon;不归任何补丁,由 deploy.ps1 同步到 ~/.dsh/assets)
 ├── archive/                      # 已退役的脚本 / 资产 / 补丁(只读保留,不再部署)
 ├── scripts/
-│   ├── install.ps1               # 一键安装:建 junction 兜底(含 @local 自引用)+ 7 个 bundle 补丁全部装成 bundle(先剥遗留行) + Memorix + 部署校验(幂等)
+│   ├── install.ps1               # 一键安装:建 junction 兜底(含 @local 自引用)+ 7 个 bundle 补丁全部装成 bundle(先剥遗留行) + MCP Reference Memory + 部署校验(幂等)
 │   ├── deploy.ps1                # 只读校验:同步脚本与资产 + bundle 登记/行属主 + junction + 体检宿主依赖仓库
 │   ├── start-desktop.ps1         # 启动桌面端(已在运行则聚焦窗口)
 │   ├── restart-desktop.ps1       # 重启桌面端(改补丁源码后必须;需 -Force)
@@ -33,18 +33,19 @@ deep-dreaming/
 │   ├── migrate-icon-names.mjs    # 把 `…Outline16/14` 图标名迁移到 0.2.0-rc.2 的 `…OutlineRegular/Medium`
 │   ├── verify-plugin-meta.mjs    # 复刻官方 readPluginMeta,证明「设置 → 内置插件」会显示我们的标题/描述
 │   ├── verify-bundle-rows.mjs    # 校验每个补丁的 dsh.bundle 声明与包内 cordis.patch.yml 行结构
-│   ├── migrate-dsh-memory.mjs    # 把旧版 .dsh-memory/ 笔记导入 Memorix(幂等,可 --dry-run)
+│   ├── migrate-dsh-memory.mjs    # 把旧版 .dsh-memory/ 笔记导入 MCP Reference Memory(幂等,可 --dry-run)
+│   ├── migrate-memorix-to-reference.mjs # 把 Memorix 项目快照复制进参考图谱(官方 transfer export + MCP 写入,幂等)
 │   ├── run-tests.mjs             # 跑完整个测试矩阵(npm test)
 │   └── test-deps.mjs             # 验证脚本的 react / jsdom 解析(仓库 node_modules → NODE_PATH → profile)
 ├── archive/                      # Web 端时期的脚本与资产(只读保留,不再部署)
-└── .dsh-memory/                  # LEGACY 记忆笔记(旧实现,已迁移到 Memorix),gitignored
+└── .dsh-memory/                  # LEGACY 记忆笔记(旧实现,可导入 MCP Reference Memory),gitignored
 ```
 
 ## 补丁清单
 
 | 补丁 | 作用 | 部署方式 | 使用文档 |
 | --- | --- | --- | --- |
-| [dsh-project-memory](patches/dsh-project-memory/) | 跨会话项目记忆:**Memorix 桥接**(存储/检索/去重/成熟度都在 Memorix)——注入提示词引导,并在会话**首个被准入步骤**(`agent/pre-step`)召回既有记忆(带上本会话工作区根目录与项目绑定步骤),记忆存取由 Memorix 经 MCP(`mcp__memorix__*`)完成;记忆工具调用以**可折叠「记忆阶段」卡片**展示,**不产生额外对话轮次** | 作为 **bundle** 安装:`dsh plugin --profile desktop add`(或 `pnpm add`)进 profile 并登记到 `dsh.profile.bundles` + Memorix 全局安装与 `memorix setup --agent dsh --global` | [README](patches/dsh-project-memory/README.md) |
+| [dsh-project-memory](patches/dsh-project-memory/) | 跨会话项目记忆:**MCP Reference Memory 桥接**(图谱存储/检索/关系都在官方 `@modelcontextprotocol/server-memory`)——注入提示词引导,并在会话**首个被准入步骤**(`agent/pre-step`)召回既有记忆(带上本会话工作区与 `<project>/<topic>` 项目前缀),记忆存取由 `mcp__reference_memory__*` 完成;九个记忆工具调用以**可折叠「记忆阶段」卡片**展示,**不产生额外对话轮次** | 作为 **bundle** 安装:`dsh plugin --profile desktop add`(或 `pnpm add`)进 profile 并登记到 `dsh.profile.bundles` + 全局安装 `@modelcontextprotocol/server-memory` 与 home 层 `reference_memory` MCP 行 | [README](patches/dsh-project-memory/README.md) |
 | [session-cleanup](patches/session-cleanup/) | 按天数/容量定期清理归档会话,跳过活跃会话 | **bundle**:包内 `cordis.patch.yml` 行 + `install.ps1` pnpm link 进 profile 并登记 `dsh.profile.bundles` | [README](patches/session-cleanup/README.md) |
 | [ui-queue-tools](patches/ui-queue-tools/) | 排队消息增强:hover 预览全文 + **拖拽排序**(host 半经 Inbox.splice 重排);其余行为与官方 0.2.1 队列坞同步(附件缩略图/文件块、本地排队回显、可继续子代理) | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/ui-queue-tools/README.md) |
 | [ui-settings-model-capabilities](patches/ui-settings-model-capabilities/) | 设置「模型」页扩展:给 llm-pi-ai 路由逐模型配置**能力**——**目录型路由**的**思考开关 + 等级(档位与发送值)**写回 `reasoningEfforts`(声明型路由的思考由 0.2.1 官方模型行负责,本卡不再重复);**图片输入三态**(跟随上游 / 仅文本 / 支持图片)写回 `input`,补上官方勾选框表达不了的「继承」状态 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/ui-settings-model-capabilities/README.md) |
@@ -59,14 +60,14 @@ deep-dreaming/
 ```powershell
 # 在仓库根目录执行:建 junction 兜底(含 @local 自引用)+ 把 7 个 bundle 补丁全部装成 bundle
 # (pnpm link + 登记 dsh.profile.bundles,先剥离 profile 层遗留行)
-# + 安装并接线 Memorix + 部署校验(幂等,可重复运行)
+# + 安装并接线 MCP Reference Memory + 部署校验(幂等,可重复运行)
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 # 一般无需重启:profile manifest 与用户层都会热应用(几秒内)。
 # 若插件页卡片或某条 host 路由缺失,再重启(会结束当前会话):
 powershell -ExecutionPolicy Bypass -File .\scripts\restart-desktop.ps1 -Force
 ```
 
-`install.ps1` 还会:剥离 profile 层遗留的 `- insert:` 行(bundle 装失败时原样恢复该行,保证补丁始终有属主)、幂等安装 **Memorix**(`npm install -g memorix` + `memorix setup --agent dsh --global`,写进 `~/.dsh/cordis.patch.yml`,用 `-SkipMemorix` 跳过)、并用桌面端自带的 CLI(`resources\runtime\cli\bin\dsh.cmd plugin --profile desktop add`)装 bundle。所有脚本读写配置文件都走显式 UTF-8(Windows PowerShell 5.1 的 `Get-Content`/`Set-Content` 默认按 ANSI 解码,会把中文注释写成乱码)。
+`install.ps1` 还会:剥离 profile 层遗留的 `- insert:` 行(bundle 装失败时原样恢复该行,保证补丁始终有属主)、幂等安装 **MCP Reference Memory**(`npm install -g @modelcontextprotocol/server-memory@2026.7.4`,把 `reference_memory` 行写进 `~/.dsh/cordis.patch.yml` 并移除旧的 `memory-memorix` 行,用 `-SkipMemoryProvider` / 旧别名 `-SkipMemorix` 跳过)、清除 `~/.dsh/AGENTS.md` 里 `memorix setup` 写入的遗留段落,并用桌面端自带的 CLI(`resources\runtime\cli\bin\dsh.cmd plugin --profile desktop add`)装 bundle。所有脚本读写配置文件都走显式 UTF-8(Windows PowerShell 5.1 的 `Get-Content`/`Set-Content` 默认按 ANSI 解码,会把中文注释写成乱码)。
 
 动手前它会**只读体检**「共享宿主依赖仓库」`~/.dsh/profiles/node_modules`,并报告桌面端安装与版本——补丁的宿主端 `import '@deepseek-ai/*'` 只能在这里被解析,仓库坏掉时补丁会以 `MODULE_NOT_FOUND` 装不上。
 
@@ -94,11 +95,20 @@ $cli = "D:\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
 & $cli plugin --profile desktop add "$repo\patches\dsh-project-memory"
 # (bundle 层变更由 HMR 热应用;若卡片/路由缺失再重启桌面端)
 
-# 2.5 项目记忆的后端:Memorix 全局安装 + 写入 MCP 行(install.ps1 已含)
-npm install -g memorix
-memorix setup --agent dsh --global
-# 旧版 .dsh-memory/ 笔记导入 Memorix(在对应项目根执行,幂等):
+# 2.5 项目记忆的后端:MCP Reference Memory 全局安装 + 写入 home 层 MCP 行
+#     (install.ps1 已含;旧的 memory-memorix 行会被移除,避免两个记忆服务器并存)
+npm install -g @modelcontextprotocol/server-memory@2026.7.4
+#     ~/.dsh/cordis.patch.yml 需要:
+#       - insert:
+#           - id: memory-mcp-reference
+#             name: "@deepseek-ai/dsh-mcp-client"
+#             config: { serverName: reference_memory, transport: stdio,
+#                       command: mcp-server-memory,
+#                       env: { MEMORY_FILE_PATH: '<home>/.dsh-mcp-reference-memory.jsonl' } }
+# 旧版 .dsh-memory/ 笔记导入参考图谱(在对应项目根执行,幂等):
 node "$repo\scripts\migrate-dsh-memory.mjs"
+# 已有 Memorix 数据复制到参考图谱(可重复 --cwd;归档条目自动跳过,幂等):
+node "$repo\scripts\migrate-memorix-to-reference.mjs" --cwd "D:\GitHub\deep-dreaming" --cwd "D:\GitHub\another-project"
 
 # 3. 部署校验(可随时运行,只读):核对 patch 层引用与 junction、
 #    体检共享依赖仓库,并把桌面端生命周期脚本同步到 ~/.dsh/scripts/
@@ -154,10 +164,10 @@ DSH 桌面端对 profile 的 `cordis.patch.yml` 内置热加载(`watchUserPatche
 - **增删插件条目、修改条目 `config` → 保存文件后数秒内事务性生效**,
   host 半与 client 半都会重新装载/卸载,**无需重启 dsh**;
 - 用户层 patch 文件位置有两处,都会被监视:`~/.dsh/profiles/desktop/cordis.patch.yml`
-  (profile 层)与 `~/.dsh/cordis.patch.yml`(home 层,Memorix 的 MCP 行在这里)。
+  (profile 层)与 `~/.dsh/cordis.patch.yml`(home 层,`reference_memory` 的 MCP 行在这里)。
   实测:home 层新增 `@deepseek-ai/dsh-mcp-client` 行后,运行中的 dsh 数秒内就
-  拉起了 `memorix serve`(日志 `[memorix] MCP Server running on stdio`),
-  工具随之出现在会话里。
+  拉起了对应 MCP 子进程(参考记忆服务器的日志是
+  `Knowledge Graph MCP Server running on stdio`),工具随之出现在会话里。
 - 触发条件是**文件内容确有变化**:只改注释、或写回一份内容等价的文件都**不会**
   触发重挂 —— `Entry.update` 对 options 做深比较,无差异即直接返回;热重载不中断
   会话、排队消息不丢。
@@ -213,7 +223,7 @@ node scripts/verify-plugin-meta.mjs                              # 展示元信�
 node patches/session-cleanup/session-cleanup.test.mjs            # 清理规则(超龄/容量/keepSessions/live 跳过)
 node patches/session-cleanup/verify-session-cleanup.mjs          # settings 集成 + 配置卡片
 node patches/session-cleanup/tests/load-smoke.mjs                # 真实 Cordis 加载冒烟(Invalid effect 回归)
-node patches/dsh-project-memory/tests/plugin.smoke.mjs           # Memorix 桥接:Config 校验 + 提示词/事件流(无回顾轮次)
+node patches/dsh-project-memory/tests/plugin.smoke.mjs           # Reference Memory 桥接:Config 校验 + 提示词/事件流(无回顾轮次)
 node patches/dsh-project-memory/tests/client-contract.mjs        # 浏览器半契约(记忆折叠卡注册与渲染)
 node patches/ui-settings-model-capabilities/verify-model-capabilities.mjs  # 模型能力卡片:契约 + jsdom 渲染/交互/保存 ops
 node patches/ui-settings-model-capabilities/tests/load-smoke.mjs          # 真实 Cordis 加载冒烟
@@ -240,15 +250,16 @@ Web 端时期修掉的问题,以及下次升级时要先看的地方:
 3. **profile 的 node_modules 不再有 react**:客户端 UI 已改为预构建浏览器
    bundle,React 被打进前端产物。验证脚本因此改为多锚点解析
    (`scripts/test-deps.mjs`),并由仓库根 `package.json` 提供 react/jsdom。
-4. **Memorix 必须绑定项目**:dsh 全进程只有一个 MCP 实例、工作目录是进程
-   cwd(非 git 仓库),Memorix 会拒绝一切项目级工具,直到会话调用
-   `memorix_session_start({ projectRoot })`;`dsh-project-memory` 的召回提示
-   现在带上本会话工作区根目录。详见该补丁 README。
+4. **Memorix 必须绑定项目(历史)**:dsh 全进程只有一个 MCP 实例、工作目录是
+   进程 cwd(非 git 仓库),Memorix 会拒绝一切项目级工具,直到会话调用
+   `memorix_session_start({ projectRoot })`;当时的召回提示带上本会话工作区
+   根目录。**0.3.0 起后端改为 MCP Reference Memory**:没有绑定调用,项目隔离
+   改为 `<project>/<topic>` 实体命名约定。详见该补丁 README。
 5. **回合后的「记忆回顾」已删除**(实测噪音 + 机制限制):`agent.followup(...)`
    的官方语义是「该条目自成一整轮」,所以旧 autoReview 每轮都多开一轮只含
    Thinking + 一句「无需记录」的对话 —— 本机某 62 轮会话里有 23 轮是这么来的。
    assistant 步骤的 chat node kind 由官方渲染器固定拥有,无法像工具卡片那样
-   折叠,因此不再做回顾;保存改由 guidance 与 Memorix 的 `AGENTS.md` 规约驱动
+   折叠,因此不再做回顾;保存改由 guidance(以及当前记忆后端)的规约驱动
    (保存时本来就是图 2 那种 `记忆 · 保存/更新` 卡片)。
 6. **会话开始召回此前是死代码**(顺带修好):旧实现挂在第一条 `user/message`
    上并用 `ctx.agents.get()` 查 agent,而 agent 是在该消息落盘**之后**才发布
@@ -346,8 +357,9 @@ Web 端时期修掉的问题,以及下次升级时要先看的地方:
 - 7 个补丁的 client 行都在 index 的 `__DSH_BOOT__` 组合里(含重新接线的
   whale-background);`/whale-background.png` 返回 200 + PNG;
 - 改过的 temp-session / dsh-project-memory 客户端 bundle 已按新 rev 下发;
-- Memorix 已装(1.9.4)并按 `memorix setup --agent dsh --global` 接线,
-  `memorix serve` 已由运行中的 dsh 拉起,`mcp__memorix__*` 工具可见可用;
+- (历史,当时后端是 Memorix)Memorix 已装(1.9.4)并按
+  `memorix setup --agent dsh --global` 接线,`memorix serve` 已由运行中的 dsh
+  拉起,`mcp__memorix__*` 工具可见可用;0.3.0 起改为 MCP Reference Memory;
 - 旧笔记已迁移:`node scripts/migrate-dsh-memory.mjs` 导入 `.dsh-memory/`
   的 10 篇(3 篇新建、7 篇命中同名记录被跳过),旧目录保留未删。
 

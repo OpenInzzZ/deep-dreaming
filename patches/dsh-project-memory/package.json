@@ -1,7 +1,7 @@
 {
   "name": "dsh-project-memory",
-  "version": "0.2.1",
-  "description": "Lightweight auto-recall / auto-review bridge to Memorix: injects prompt guidance and session-start recall / session-end review followups that tell the agent when to use mcp__memorix__* tools. Actual storage, search, and deduplication are handled by Memorix.",
+  "version": "0.3.0",
+  "description": "Lightweight auto-recall bridge to MCP Reference Memory (@modelcontextprotocol/server-memory): injects prompt guidance and a session-start recall that tell the agent when to use the mcp__reference_memory__* graph tools and how to keep projects apart. Storage, search, and relations are owned by the reference server.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

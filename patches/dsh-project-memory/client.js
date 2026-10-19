@@ -1,14 +1,15 @@
 /**
- * Browser half of dsh-project-memory: collapsible "memory phase" cards.
+ * Browser half of dsh-project-memory: collapsible "memory phase" cards for the
+ * MCP Reference Memory tools.
  *
- * Registers `tool.call.toolview` for Memorix's MCP tools
- * (mcp__memorix__memorix_session_start / memorix_search / memorix_store /
- * memorix_project_context / memorix_detail), so every memory action in a
- * session renders as one collapsible card. The card reuses the shipped
- * `DisclosureRow` primitive — the same component the official "Think"
- * reasoning row is built on — so the memory phase looks and behaves exactly
- * like the Think rows: leading icon + title + one-line summary, expanding
- * reveals the full result.
+ * Registers `tool.call.toolview` for the official reference server's nine tools
+ * (mcp__reference_memory__search_nodes / read_graph / open_nodes /
+ * create_entities / add_observations / create_relations / delete_entities /
+ * delete_observations / delete_relations), so every memory action in a session
+ * renders as one collapsible card. The card reuses the shipped `DisclosureRow`
+ * primitive — the same component the official "Think" reasoning row is built
+ * on — so the memory phase looks and behaves exactly like the Think rows:
+ * leading icon + title + one-line summary, expanding reveals the full result.
  *
  * Hand-written bundle in the client-module contract: only platform seed
  * words (react, react/jsx-runtime, @deepseek-ai/dsh-client-ui-primitives)
@@ -20,9 +21,20 @@ var module = { exports: {} }; var exports = module.exports;
 const React = require('react');
 const { useState } = React;
 const { jsx, jsxs, Fragment } = require('react/jsx-runtime');
-const { DisclosureRow, IconListPenOutlineRegular, IconSearchOutlineRegular, IconChecklistOutlineMedium, IconSparkleRegular } = require('@deepseek-ai/dsh-client-ui-primitives');
+const {
+  DisclosureRow,
+  IconListPenOutlineRegular,
+  IconSearchOutlineRegular,
+  IconChecklistOutlineMedium,
+  IconSparkleRegular,
+  IconDatabaseOutlineRegular,
+  IconPlusOutlineRegular,
+  IconLinkOutlineRegular,
+  IconTrashOutlineRegular,
+} = require('@deepseek-ai/dsh-client-ui-primitives');
 
 const PLUGIN_ID = 'dsh-project-memory';
+const TOOL_PREFIX = 'mcp__reference_memory__';
 
 /* Memory-card styles: DisclosureRow supplies the row chrome; these mirror the
    official Think row's summary/body look (tertiary text, 22px body indent). */
@@ -51,51 +63,83 @@ const CSS = [
   document.head.appendChild(tag)
 })();
 
-/** Display titles and leading icons per Memorix MCP tool name. */
+/** Display titles and leading icons per reference-memory MCP tool name. */
 const TITLES = {
-  'mcp__memorix__memorix_session_start': '记忆 · 绑定项目/会话开始',
-  'mcp__memorix__memorix_search': '记忆 · 检索',
-  'mcp__memorix__memorix_store': '记忆 · 保存/更新',
-  'mcp__memorix__memorix_project_context': '记忆 · 任务上下文',
-  'mcp__memorix__memorix_detail': '记忆 · 详情',
+  'mcp__reference_memory__search_nodes': '记忆 · 检索',
+  'mcp__reference_memory__read_graph': '记忆 · 读取图谱',
+  'mcp__reference_memory__open_nodes': '记忆 · 打开实体',
+  'mcp__reference_memory__create_entities': '记忆 · 新建实体',
+  'mcp__reference_memory__add_observations': '记忆 · 追加观察',
+  'mcp__reference_memory__create_relations': '记忆 · 新建关联',
+  'mcp__reference_memory__delete_entities': '记忆 · 删除实体',
+  'mcp__reference_memory__delete_observations': '记忆 · 删除观察',
+  'mcp__reference_memory__delete_relations': '记忆 · 删除关联',
 };
 const ICONS = {
-  'mcp__memorix__memorix_session_start': IconSparkleRegular,
-  'mcp__memorix__memorix_search': IconSearchOutlineRegular,
-  'mcp__memorix__memorix_store': IconListPenOutlineRegular,
-  'mcp__memorix__memorix_project_context': IconSparkleRegular,
-  'mcp__memorix__memorix_detail': IconChecklistOutlineMedium,
+  'mcp__reference_memory__search_nodes': IconSearchOutlineRegular,
+  'mcp__reference_memory__read_graph': IconDatabaseOutlineRegular,
+  'mcp__reference_memory__open_nodes': IconChecklistOutlineMedium,
+  'mcp__reference_memory__create_entities': IconPlusOutlineRegular,
+  'mcp__reference_memory__add_observations': IconListPenOutlineRegular,
+  'mcp__reference_memory__create_relations': IconLinkOutlineRegular,
+  'mcp__reference_memory__delete_entities': IconTrashOutlineRegular,
+  'mcp__reference_memory__delete_observations': IconTrashOutlineRegular,
+  'mcp__reference_memory__delete_relations': IconTrashOutlineRegular,
 };
 
-/** Concatenate the result text blocks of a settled tool node. */
-function resultText(block) {
+/** The result text blocks of a settled tool node, in order. */
+function textBlocks(block) {
   const content = block.content
-  if (!Array.isArray(content)) return ''
+  if (!Array.isArray(content)) return []
   return content
     .map((chunk) => (chunk !== null && typeof chunk === 'object' && chunk.type === 'text' ? String(chunk.text) : ''))
-    .join('')
+    .filter((text) => text.length > 0)
 }
 
-/** One-line collapsed summary: first meaningful line of the result. */
-function summarize(name, running, text, isError) {
+/** Concatenate the result text blocks of a settled tool node. */
+function resultText(texts) {
+  return texts.join('\n')
+}
+
+/** Parse the first text block as the JSON payload the reference server returns. */
+function payloadOf(texts) {
+  if (texts.length === 0) return null
+  try {
+    return JSON.parse(texts[0])
+  } catch {
+    return null
+  }
+}
+
+/** One-line collapsed summary: counts for graph tools, first line otherwise. */
+function summarize(name, running, texts, isError) {
   if (running) return '运行中…'
   if (isError) return '失败'
-  const first = text.split('\n')[0].trim()
-  if (name === 'mcp__memorix__memorix_search') {
-    if (/no (results|memories)/i.test(first)) return '无结果'
-    // Try to extract a title-like first line
-    const m = /^[-\u2022*]\s*(.+)/.exec(first)
-    return m !== null ? m[1].trim().slice(0, 60) : (first.slice(0, 60) || '完成')
+  const data = payloadOf(texts)
+  if (name === TOOL_PREFIX + 'search_nodes' || name === TOOL_PREFIX + 'read_graph' || name === TOOL_PREFIX + 'open_nodes') {
+    if (data !== null && Array.isArray(data.entities)) {
+      if (data.entities.length === 0) return '无结果'
+      const relations = Array.isArray(data.relations) ? data.relations.length : 0
+      return `${data.entities.length} 个实体 · ${relations} 条关系`
+    }
+    return '无结果'
   }
-  if (name === 'mcp__memorix__memorix_store') {
-    // Generic: show the first line truncated
-    return first.slice(0, 60) || '完成'
+  if (name === TOOL_PREFIX + 'create_entities' && Array.isArray(data)) {
+    return data.length === 0 ? '未新建(实体已存在)' : `新建 ${data.length} 个实体`
   }
+  if (name === TOOL_PREFIX + 'add_observations' && Array.isArray(data)) {
+    const added = data.reduce((total, item) => total + (Array.isArray(item?.addedObservations) ? item.addedObservations.length : 0), 0)
+    return added === 0 ? '无新增观察' : `追加 ${added} 条观察`
+  }
+  if (name === TOOL_PREFIX + 'create_relations' && Array.isArray(data)) {
+    return data.length === 0 ? '无新增关系' : `新建 ${data.length} 条关系`
+  }
+  const first = (texts[0] ?? '').split('\n')[0].trim()
   return first.slice(0, 60) || '完成'
 }
 
 /**
- * Collapsible card for one Memorix memory tool call, styled like the shipped
+ * Collapsible card for one reference-memory tool call, styled like the shipped
  * "Think" reasoning row (DisclosureRow primitive).
  * @param props.block - frozen RunningToolCall or settled ToolResultNode.
  */
@@ -104,12 +148,13 @@ function MemoryToolCard({ block, callId }) {
   const name = running ? block.name : (block.call?.name ?? '');
   const title = TITLES[name] ?? '记忆';
   const Icon = ICONS[name] ?? IconListPenOutlineRegular;
-  const text = running ? '' : resultText(block);
+  const texts = running ? [] : textBlocks(block);
+  const text = running ? '' : resultText(texts);
   const isError = !running && block.isError === true;
   const [open, setOpen] = useState(false);
 
   const state = running ? 'running' : (isError ? 'error' : 'ok');
-  const summary = summarize(name, running, text, isError);
+  const summary = summarize(name, running, texts, isError);
 
   return jsx('div', {
     className: 'pmem-card',
@@ -137,12 +182,9 @@ function MemoryToolCard({ block, callId }) {
   }, callId);
 }
 
-/** Contribute the collapsible memory cards for Memorix MCP tools. The recall
- *  followup tells the agent to call memorix_session_start FIRST, so that tool
- *  must be registered here too — otherwise its call would fall through to the
- *  default tool card instead of the "记忆" card. */
+/** Contribute the collapsible memory cards for the reference-memory tools. */
 function apply(ctx) {
-  for (const key of ['mcp__memorix__memorix_session_start', 'mcp__memorix__memorix_search', 'mcp__memorix__memorix_store', 'mcp__memorix__memorix_project_context', 'mcp__memorix__memorix_detail']) {
+  for (const key of Object.keys(TITLES)) {
     ctx.slots.inject('tool.call.toolview', () => ctx.slots.register(
       { name: 'tool.call.toolview', key },
       MemoryToolCard,

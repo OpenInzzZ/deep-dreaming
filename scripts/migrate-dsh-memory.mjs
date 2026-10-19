@@ -1,24 +1,27 @@
 #!/usr/bin/env node
 /**
- * migrate-dsh-memory.mjs — move legacy `.dsh-memory/` notes into Memorix.
+ * migrate-dsh-memory.mjs — move legacy `.dsh-memory/` notes into MCP Reference
+ * Memory.
  *
  * Background: before dsh 0.1.2 the `dsh-project-memory` patch owned its own
  * Markdown memory store at `<project>/.dsh-memory/` and the
  * `project_memory_save` / `project_memory_search` / `project_memory_list`
- * tools. Since the Memorix migration (commit 2ce1e73) the patch is only a
- * prompt bridge: storage, search, dedupe, and maturity all live in Memorix,
- * reached through the `mcp__memorix__*` tools. Existing `.dsh-memory/` notes
- * are therefore invisible to the new backend until they are imported — this
- * script is that import, and it is safe to re-run.
+ * tools. The patch is now only a prompt bridge to the official MCP reference
+ * server (@modelcontextprotocol/server-memory), reached through the
+ * `mcp__reference_memory__*` tools. Existing `.dsh-memory/` notes are
+ * invisible to that graph until they are imported — this script is that
+ * import, and it is safe to re-run.
  *
  * What it does, per note:
  *   1. reads the YAML front matter (title / category / keywords /
  *      usage_scenario / usage_count) and the Markdown body;
- *   2. skips the note when Memorix already has an observation with the same
- *      title (idempotent re-runs);
- *   3. stores it through the real `memorix_store` MCP tool over the same stdio
- *      transport dsh uses (`memorix serve --mode lite`), so the import goes
- *      through exactly the path the agent will use later.
+ *   2. derives the project-scoped entity name `<project>/<title>` (the project
+ *      identifier is the workspace basename, lower-cased — the same convention
+ *      the plugin's guidance teaches);
+ *   3. skips the note when the entity already exists (idempotent re-runs);
+ *   4. stores it with the real `create_entities` MCP tool over the same stdio
+ *      transport DSH uses (`mcp-server-memory`), so the import goes through
+ *      exactly the path the agent will use later.
  *
  * The legacy note is NOT deleted: `.dsh-memory/` stays as the source of truth
  * for the migration until the user removes it deliberately.
@@ -26,20 +29,30 @@
  * Usage:
  *   node scripts/migrate-dsh-memory.mjs [projectRoot] [--dry-run]
  *
- * Without `projectRoot` the current working directory is used; Memorix binds
- * the project from that directory, so run it from the repository root the
- * notes belong to.
+ * Without `projectRoot` the current working directory is used; the project
+ * identifier is derived from that directory's basename. The target graph is
+ * `MEMORY_FILE_PATH` when set, else `$HOME/.dsh-mcp-reference-memory.jsonl`
+ * (the same default as the DSH MCP row written by scripts/install.ps1).
  */
 import { readdir, readFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
-import { join, resolve, relative } from 'node:path'
+import { homedir } from 'node:os'
+import { basename, join, resolve, relative } from 'node:path'
 
 const args = process.argv.slice(2)
 const dryRun = args.includes('--dry-run')
 const projectRoot = resolve(args.find(arg => !arg.startsWith('--')) ?? process.cwd())
 const storeDir = join(projectRoot, '.dsh-memory')
 
-/** Legacy category → Memorix observation type. */
+/** Project identifier used as the entity-name prefix: `<project>/<title>`.
+ * Matches `projectSlugOf()` in patches/dsh-project-memory/lib/index.js. */
+const projectSlug = basename(projectRoot).toLowerCase() || 'workspace'
+
+/** Target graph file: the MCP row's default, overridable the same way. */
+const memoryFile = process.env.MEMORY_FILE_PATH?.trim()
+  || join(homedir(), '.dsh-mcp-reference-memory.jsonl')
+
+/** Legacy category → reference-memory entityType. */
 const TYPE_BY_CATEGORY = {
   common_pitfalls_experience: 'gotcha',
   development_code_specification: 'decision',
@@ -98,13 +111,15 @@ async function collectNotes(dir) {
 }
 
 /** Minimal newline-framed JSON-RPC client for one MCP stdio server. */
-function createMcpClient(command, commandArgs, cwd) {
+function createMcpClient(command, commandArgs, cwd, env) {
   const child = spawn(command, commandArgs, {
     cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
-    // shell:true is what lets Windows resolve the `memorix` shim; every
-    // argument here is a static literal, so nothing user-supplied is parsed.
+    // shell:true is what lets Windows resolve the `mcp-server-memory` shim;
+    // every argument here is a static literal, so nothing user-supplied is
+    // parsed.
     shell: process.platform === 'win32',
+    env: { ...process.env, ...env },
   })
   const pending = new Map()
   const stderr = []
@@ -161,12 +176,13 @@ if (notes.length === 0) {
   process.exit(0)
 }
 console.log(`migrate-dsh-memory: ${notes.length} legacy note(s) under ${storeDir}`)
+console.log(`migrate-dsh-memory: project prefix '${projectSlug}/' -> ${memoryFile}`)
 if (dryRun) {
   for (const file of notes) console.log('  would import:', relative(projectRoot, file))
   process.exit(0)
 }
 
-const mcp = createMcpClient('memorix', ['serve', '--mode', 'lite'], projectRoot)
+const mcp = createMcpClient('mcp-server-memory', [], projectRoot, { MEMORY_FILE_PATH: memoryFile })
 let imported = 0
 let skipped = 0
 let failed = 0
@@ -187,12 +203,15 @@ try {
     const keywords = Array.isArray(front.keywords) ? front.keywords : []
     const scenarios = Array.isArray(front.usage_scenario) ? front.usage_scenario : []
 
+    const entityName = `${projectSlug}/${title}`
     const found = await mcp.request('tools/call', {
-      name: 'memorix_search',
-      arguments: { query: title, limit: 5 },
+      name: 'search_nodes',
+      arguments: { query: entityName },
     })
-    if (toolText(found).toLowerCase().includes(title.toLowerCase())) {
-      console.log(`  [SKIP] ${title} (already in Memorix)`)
+    let existing = null
+    try { existing = JSON.parse(toolText(found)) } catch { /* keep null */ }
+    if (Array.isArray(existing?.entities) && existing.entities.some(entity => entity?.name === entityName)) {
+      console.log(`  [SKIP] ${entityName} (already in the graph)`)
       skipped += 1
       continue
     }
@@ -203,17 +222,18 @@ try {
       '---',
       `来源: 旧版 dsh-project-memory 笔记 .dsh-memory/${relative(storeDir, file).split('\\').join('/')}`,
       `原分类: ${category}`,
+      keywords.length > 0 ? `关键词: ${keywords.join('、')}` : '',
       scenarios.length > 0 ? `使用场景:\n${scenarios.map(s => `- ${s}`).join('\n')}` : '',
     ].filter(line => line !== '').join('\n')
 
     const stored = await mcp.request('tools/call', {
-      name: 'memorix_store',
+      name: 'create_entities',
       arguments: {
-        entityName: title,
-        type: TYPE_BY_CATEGORY[category] ?? 'discovery',
-        title,
-        narrative,
-        concepts: keywords,
+        entities: [{
+          name: entityName,
+          entityType: TYPE_BY_CATEGORY[category] ?? 'fact',
+          observations: [narrative],
+        }],
       },
     })
     const text = toolText(stored)
@@ -222,7 +242,7 @@ try {
       failed += 1
       continue
     }
-    console.log(`  [OK]   ${title}`)
+    console.log(`  [OK]   ${entityName}`)
     imported += 1
   }
 } catch (error) {

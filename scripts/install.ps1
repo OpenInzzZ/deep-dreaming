@@ -5,7 +5,8 @@
 # that actually loads the patches, installs every patch as a BUNDLE (pnpm link +
 # dsh.profile.bundles registration, its loader row living in the package's own
 # cordis.patch.yml; legacy profile-layer insert rows are stripped first and
-# restored if an install fails), wires Memorix, and runs the deploy check.
+# restored if an install fails), wires the MCP Reference Memory provider, and
+# runs the deploy check.
 # Run from ANY machine after cloning - no hardcoded repo paths inside:
 #
 #   powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
@@ -14,13 +15,15 @@
 #   -Profile <name>     profile to install into (default: desktop)
 #   -InstallRoot <dir>  DSH desktop installation root (default: auto-detect)
 #   -SkipMemoryBundle   skip the dsh-project-memory install + bundles step
-#   -SkipMemorix        skip the Memorix global install + dsh setup step
+#   -SkipMemoryProvider skip the MCP Reference Memory global install + row step
+#                       (-SkipMemorix is kept as an alias of the same switch)
 #   -Force              overwrite existing junctions (default: keep)
 param(
     [string]$Profile = 'desktop',
     [string]$InstallRoot = '',
     [switch]$SkipMemoryBundle,
-    [switch]$SkipMemorix,
+    [Alias('SkipMemorix')]
+    [switch]$SkipMemoryProvider,
     [switch]$Force
 )
 $ErrorActionPreference = 'Stop'
@@ -45,6 +48,24 @@ function Write-Utf8([string]$Path, [string]$Text) {
 # $ErrorActionPreference = 'Stop', piping native STDERR into the pipeline turns
 # the first stderr line into a terminating NativeCommandError (AGENTS pitfall),
 # so flip to 'Continue' locally and discard output instead of failing on it.
+# Remove one `- id: <id>` item (and its indented fields) from a patch layer,
+# leaving every other patch/item untouched. Used to retire the old Memorix MCP
+# row when converging the home layer on the reference-memory row.
+function Remove-PatchInsertItem([string]$Text, [string]$IdPattern) {
+    $lines = $Text -split "`r?`n"
+    $kept = New-Object System.Collections.Generic.List[string]
+    $skipping = $false
+    foreach ($line in $lines) {
+        if ($skipping) {
+            # A sibling item (4-space `- id:`) or any top-level line ends the block.
+            if ($line -match '^\s*-\s+id:\s*' -or $line -match '^\S') { $skipping = $false } else { continue }
+        }
+        if ($line -match ('^\s*-\s*id:\s*' + $IdPattern + '\s*$')) { $skipping = $true; continue }
+        $kept.Add($line)
+    }
+    return ($kept -join "`r`n")
+}
+
 function Invoke-Native([string]$FilePath, [string[]]$ArgumentList) {
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -283,7 +304,7 @@ foreach ($l in $links) {
 # --- 1b. the mcp-servers umbrella ----------------------------------------------
 # A bundle is registered by `dsh plugin add` below, but its loader row names
 # packages that must resolve by bare @local name from anywhere under
-# ~/.dsh/profiles — that is what the store junction provides, and it is the only
+# ~/.dsh/profiles - that is what the store junction provides, and it is the only
 # way a patch can import another patch package (`@local/dsh-client-mcp-servers`).
 $mcpLinkDirs = @('mcp-servers')
 foreach ($dir in $mcpLinkDirs) {
@@ -537,55 +558,80 @@ foreach ($dir in $bundlePatchDirs) {
     }
 }
 
-# --- 3.5. Memorix MCP memory (idempotent: skips if already installed) ---------
-if (-not $SkipMemorix) {
+# --- 3.5. MCP Reference Memory (the project-memory bridge's backend) ----------
+# The bridge (patches\dsh-project-memory) talks to the official reference
+# memory server (@modelcontextprotocol/server-memory) through
+# @deepseek-ai/dsh-mcp-client. This replaces the former Memorix backend: the
+# legacy memory-memorix row is removed so only one memory server mounts, and
+# the reference row is written into the HOME patch layer (the same layer
+# `memorix setup --agent dsh --global` used).
+if (-not $SkipMemoryProvider) {
     Write-Host ''
-    Write-Host '== Memorix ==' -ForegroundColor Cyan
-    $memorixInstalled = $false
-    try {
-        $memorixVersion = (& memorix --version 2>&1).Trim()
-        if ($LASTEXITCODE -eq 0 -and $memorixVersion -match '\d+\.\d+\.\d+') {
-            Write-Host "  [OK] memorix $memorixVersion already installed"
-            $memorixInstalled = $true
-        }
-    } catch { }
-    if (-not $memorixInstalled) {
-        Write-Host '  [..] installing memorix globally...'
-        try {
-            npm install -g memorix 2>&1 | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                $memorixVersion = (& memorix --version 2>&1).Trim()
-                Write-Host "  [OK] memorix $memorixVersion installed"
-                $memorixInstalled = $true
+    Write-Host '== MCP Reference Memory ==' -ForegroundColor Cyan
+
+    # The reference server is installed as a global npm bin; DSH spawns it by
+    # name, exactly like the official mcp-reference-memory example.
+    $memoryBin = Get-Command 'mcp-server-memory' -ErrorAction SilentlyContinue
+    if ($null -ne $memoryBin) {
+        Write-Host '  [OK] mcp-server-memory already installed'
+    } else {
+        Write-Host '  [..] installing @modelcontextprotocol/server-memory@2026.7.4 globally...'
+        if (Invoke-Native 'npm' @('install', '-g', '@modelcontextprotocol/server-memory@2026.7.4')) {
+            $memoryBin = Get-Command 'mcp-server-memory' -ErrorAction SilentlyContinue
+            if ($null -ne $memoryBin) {
+                Write-Host '  [OK] @modelcontextprotocol/server-memory installed'
             } else {
-                Write-Host '  [WARN] npm install failed; run manually: npm install -g memorix' -ForegroundColor Yellow
+                Write-Host '  [WARN] npm install succeeded but mcp-server-memory is not on PATH; check the npm global bin directory' -ForegroundColor Yellow
             }
-        } catch {
-            Write-Host '  [WARN] npm install failed; run manually: npm install -g memorix' -ForegroundColor Yellow
+        } else {
+            Write-Host '  [WARN] npm install failed; run manually: npm install -g @modelcontextprotocol/server-memory@2026.7.4' -ForegroundColor Yellow
         }
     }
-    if ($memorixInstalled) {
-        $dshPatch = Join-Path $dshHome 'cordis.patch.yml'
-        $alreadySetup = $false
-        if (Test-Path $dshPatch) {
-            $content = Read-Utf8 $dshPatch
-            if ($content -match 'memory-memorix') {
-                Write-Host '  [OK] memorix setup --agent dsh already applied'
-                $alreadySetup = $true
-            }
+
+    # The graph file must live outside the package directory (an upgrade would
+    # otherwise wipe it). The official example uses the home directory; use
+    # forward slashes so the YAML scalar needs no escaping.
+    $memoryFile = (Join-Path (Split-Path -Parent $dshHome) '.dsh-mcp-reference-memory.jsonl') -replace '\\', '/'
+    $homePatch = Join-Path $dshHome 'cordis.patch.yml'
+    $homeText = Read-Utf8 $homePatch
+    if ($homeText -match 'serverName:\s*reference_memory') {
+        Write-Host '  [OK] reference_memory row already present in ~/.dsh/cordis.patch.yml'
+    } else {
+        if ($homeText -match '(?m)^\s*-\s*id:\s*memory-memorix\s*$') {
+            $homeText = Remove-PatchInsertItem -Text $homeText -IdPattern 'memory-memorix'
+            # Drop an `- insert:` header the removal left with no items; an empty
+            # insert list is not a meaningful patch.
+            $homeText = [regex]::Replace($homeText, '(?m)^- insert:[ \t]*\r?\n(?![ \t]+-)', '')
+            if ($homeText.Trim() -eq '- insert:') { $homeText = '' }
+            Write-Host '  [OK] removed the legacy memory-memorix row'
         }
-        if (-not $alreadySetup) {
-            Write-Host '  [..] running memorix setup --agent dsh --global...'
-            try {
-                & memorix setup --agent dsh --global 2>&1 | Out-Null
-                if ($LASTEXITCODE -eq 0) {
-                    Write-Host '  [OK] memorix setup --agent dsh --global done'
-                } else {
-                    Write-Host '  [WARN] memorix setup failed; run manually: memorix setup --agent dsh --global' -ForegroundColor Yellow
-                }
-            } catch {
-                Write-Host '  [WARN] memorix setup failed; run manually: memorix setup --agent dsh --global' -ForegroundColor Yellow
-            }
+        $newRow = @(
+            '- insert:',
+            '    - id: memory-mcp-reference',
+            '      name: "@deepseek-ai/dsh-mcp-client"',
+            '      config:',
+            '        serverName: reference_memory',
+            '        transport: stdio',
+            '        command: mcp-server-memory',
+            '        env:',
+            "          MEMORY_FILE_PATH: '$memoryFile'"
+        ) -join "`r`n"
+        $homeText = if ($homeText.Trim().Length -eq 0) { $newRow } else { $homeText.TrimEnd() + "`r`n`r`n" + $newRow }
+        Write-Utf8 $homePatch ($homeText.TrimEnd() + "`r`n")
+        Write-Host "  [OK] wrote the reference_memory row (graph: $memoryFile)"
+    }
+
+    # `memorix setup --agent dsh --global` also wrote a Memorix skill block into
+    # ~/.dsh/AGENTS.md. It tells every session to call memorix_* tools that no
+    # longer exist, so retire that block; the plugin's own prompt section now
+    # carries the reference-memory rules.
+    $agentsFile = Join-Path $dshHome 'AGENTS.md'
+    if (Test-Path $agentsFile) {
+        $agentsText = Read-Utf8 $agentsFile
+        if ($agentsText -match '(?m)^# Memorix') {
+            $updated = [regex]::Replace($agentsText, '(?ms)^# Memorix[^\r\n]*\r?\n.*?(?=^# |\z)', '').Trim()
+            Write-Utf8 $agentsFile $(if ($updated.Length -eq 0) { '' } else { $updated + "`r`n" })
+            Write-Host '  [OK] removed the legacy Memorix section from ~/.dsh/AGENTS.md'
         }
     }
 }

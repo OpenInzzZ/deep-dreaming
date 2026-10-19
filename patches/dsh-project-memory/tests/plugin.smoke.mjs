@@ -1,24 +1,23 @@
 // Plugin smoke test against the REAL @deepseek-ai/cordis runtime.
 //
-// The plugin under test is the Memorix BRIDGE: it registers no tools of its
-// own, it injects prompt guidance and — on the first admitted step of a
-// reviewable session — one context message that tells the agent when (and
-// against which project root) to call the `mcp__memorix__*` tools. This test
-// mounts it through ctx.plugin() (so the Cordis loader validates the exported
-// Config schema and fills defaults), stubs the injected service with
+// The plugin under test is the MCP Reference Memory BRIDGE: it registers no
+// tools of its own, it injects prompt guidance and — on the first admitted
+// step of a recallable session — one context message that tells the agent the
+// project identifier and which `mcp__reference_memory__*` tool to call. This
+// test mounts it through ctx.plugin() (so the Cordis loader validates the
+// exported Config schema and fills defaults), stubs the injected service with
 // ctx.provide, then verifies:
 //  1. awaiting the fiber does not throw TypeError('Invalid effect') — the
 //     apply-return-value regression guard;
-//  2. config validation fails loudly for wrong-typed values; storage-layer
-//     options moved to Memorix and the retired `autoReview` key are tolerated
-//     (unknown keys are stripped), so an old patch-file config cannot break
-//     startup;
-//  3. the guidance prompt section is registered and teaches the PROJECT
-//     BINDING step — the failure mode this bridge exists to avoid is an agent
-//     calling memory tools on an unbound Memorix instance, which refuses them;
+//  2. config validation fails loudly for wrong-typed values; the retired
+//     `autoReview` key is tolerated (unknown keys are stripped), so an old
+//     patch-file config cannot break startup;
+//  3. the guidance prompt section is registered and teaches the naming
+//     convention that replaces server-side project isolation: entity names are
+//     `<project>/<topic>`, and the graph is NOT per-repository;
 //  4. the session-start recall rides the real `agent/pre-step` waterfall: it is
 //     appended to the step's admitted messages (in-turn, NOT a `followup` turn
-//     of its own), carries THIS session's workspace root and the binding call,
+//     of its own), carries THIS session's workspace root and project slug,
 //     fires once per agent, skips rejected/aborted steps, and never applies to
 //     subagents or workspace-less sessions;
 //  5. NO turn is opened by the plugin afterwards: an idle status, a completed
@@ -83,13 +82,15 @@ try {
 	if (registered.sections.some((s) => s.name !== "project-memory:guidance")) {
 		throw new Error(`unexpected prompt sections: ${registered.sections.map((s) => s.name).join(", ")}`);
 	}
-	// The binding step is the difference between working memory and a refused
-	// tool call, so the guidance must name the call and the parameter.
-	if (!section.text.includes("mcp__memorix__memorix_session_start")) throw new Error("guidance must teach the project-binding call");
-	if (!section.text.includes("projectRoot")) throw new Error("guidance must name the projectRoot parameter");
-	if (!section.text.includes("mcp__memorix__memorix_project_context")) throw new Error("guidance must name the recall tool");
-	if (!section.text.includes("mcp__memorix__memorix_store")) throw new Error("guidance must name the save tool");
+	// The reference server is not project-scoped, so the naming convention is
+	// the only thing keeping projects apart. The guidance must teach both the
+	// convention and the concrete search/save calls.
+	if (!section.text.includes("mcp__reference_memory__search_nodes")) throw new Error("guidance must name the recall tool");
+	if (!section.text.includes("mcp__reference_memory__create_entities")) throw new Error("guidance must name the create tool");
+	if (!section.text.includes("mcp__reference_memory__add_observations")) throw new Error("guidance must name the update tool");
+	if (!section.text.includes("<project>/<topic>")) throw new Error("guidance must teach the entity-name project prefix");
 	if (!section.text.includes("<project_memory>")) throw new Error("guidance must keep the prompt-section wrapper");
+	if (section.text.includes("memorix")) throw new Error("guidance must not mention the retired Memorix backend");
 
 	const agent = (id, header) => ({
 		id,
@@ -118,6 +119,12 @@ try {
 		return (decision.messages ?? []).filter((message) => message?.source?.kind === "plugin:project-memory");
 	};
 
+	// The project identifier is the workspace basename, lower-cased; the recall
+	// and the naming convention both depend on it.
+	if (plugin.projectSlugOf("D:\\GitHub\\deep-dreaming") !== "deep-dreaming") throw new Error("projectSlugOf must lower-case the workspace basename");
+	if (plugin.projectSlugOf("D:\\GitHub\\deep-dreaming\\") !== "deep-dreaming") throw new Error("projectSlugOf must ignore a trailing separator");
+	if (plugin.projectSlugOf("C:\\") !== "workspace") throw new Error("a root without a basename must fall back to 'workspace'");
+
 	const cwd = "D:\\GitHub\\deep-dreaming";
 	const root = agent("session-root", { cwd, origin: void 0 });
 
@@ -136,7 +143,7 @@ try {
 	if ("plugin" in (recall.source ?? {})) {
 		throw new Error(`recall source must not carry the retired plugin field: ${JSON.stringify(recall.source)}`);
 	}
-	if (recall.source?.form !== "notice" || recall.source?.summary !== "项目记忆召回 · memory search") {
+	if (recall.source?.form !== "notice" || recall.source?.summary !== "项目记忆召回 · reference memory") {
 		throw new Error(`recall must render as a folded context notice: ${JSON.stringify(recall.source)}`);
 	}
 	// The REAL session-format encoder is the guard the fake runtime cannot be:
@@ -150,14 +157,16 @@ try {
 	}
 	const recallText = recall.content[0].text;
 	if (!recallText.includes("项目记忆召回")) throw new Error("recall message text wrong");
-	if (!recallText.includes("mcp__memorix__memorix_session_start")) throw new Error("recall must instruct the project binding");
-	// The binding must carry THIS session's workspace, JSON-quoted so a
-	// Windows path's backslashes survive into the tool call.
-	if (!recallText.includes(JSON.stringify(cwd))) {
-		throw new Error(`recall must bind the session workspace root ${JSON.stringify(cwd)}: ${recallText}`);
+	if (!recallText.includes("mcp__reference_memory__search_nodes")) throw new Error("recall must point at the search tool");
+	// The recall must carry THIS session's workspace and its derived slug. The
+	// workspace is prose (not a tool argument), so its raw Windows path is fine;
+	// the slug is the value the agent must pass to search_nodes.
+	if (!recallText.includes(cwd)) {
+		throw new Error(`recall must name the session workspace root ${cwd}: ${recallText}`);
 	}
-	if (!recallText.includes("mcp__memorix__memorix_project_context")) throw new Error("recall must point at the autopilot brief");
-	if (!recallText.includes("git")) throw new Error("recall must cover the non-git workspace case (temp sessions)");
+	if (!recallText.includes(JSON.stringify("deep-dreaming"))) throw new Error("recall must JSON-quote the derived project slug for search_nodes");
+	if (!recallText.includes("不需要绑定项目")) throw new Error("recall must state that no project binding exists");
+	if (recallText.includes("memorix")) throw new Error("recall must not mention the retired Memorix backend");
 	// The step's own batch is preserved and the recall is appended after it.
 	if (first.messages.length !== 2 || first.messages[first.messages.length - 1] !== recall) {
 		throw new Error("recall must be appended to the admitted batch, never replace it");
