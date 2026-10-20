@@ -26,7 +26,10 @@ config:
 - `serverName` 重名会在挂载前被收敛掉（官方 client 全局预留该名字，重名那条是**明确抛错**，
   见 `selectServers()`）。
 - 父 fiber dispose → 全部子 fiber 的工具注销。
-- 改配置（配置级 diff）→ `fiber.update` → `apply` 重跑 → 重新挂载，**热生效**。
+- 改配置 → **volatile 快路径**：Loader 只把新值写进运行中的配置盒子并发
+  `loader/volatile-update`，**不会**重跑 `apply()`（见下节），所以本包自己监听该事件、
+  按"配置要什么"对齐已挂的子 fiber（新增的就挂、删掉的就撕、改过的先撕再挂）。
+  实测：设置页里加一条服务，几秒内工具就出现，不用重启。
 
 ## 编辑入口：设置 → MCP 服务
 
@@ -40,13 +43,26 @@ config:
 写入走 `configForms.get('mcp-servers').mutate([{ op:'set', path:['servers'], value }], revision)`，
 不另开通道；revision 围栏挡住并发覆盖。
 
-## 两个必须知道的 volatile 事实
+## 三个必须知道的 volatile 事实
 
 1. **可编辑分区只收 `.volatile()` 标过的字段**：`settings/src/index.ts:308` 会把
    `volatileForm(Config)` 为空的 entry 整个跳过。漏标 = 卡片在、页面读不到任何东西。
 2. **标了 volatile 之后，校验结果里该字段是 `{ get }` 访问器**，不是值。进 `apply` 后
    必须先摊平（官方同款 `plainOptions()`，`llm-deepseek/src/config.ts:65`；本包即
    `plainConfig()`）。把盒子直接交给别的 schema 会被拒。
+3. **只改 volatile 字段的配置更新不会重跑 `apply()`**（这条最坑，本包踩过）：
+   `vendor/loader/src/config/entry.ts:143` 判出 `volatileOnly` 后只做两件事 ——
+   把新值写进运行中那份配置的 volatile 盒子（`updateVolatile`，同一个盒子原地换值，
+   所以 `apply` 闭包里捕获的 `config` 也能读到新值），然后向该 entry 发
+   `loader/volatile-update`（路径列表）。`config/diff.ts:18` 只要命中
+   `schema.meta.volatile` 就直接判等，所以"删掉一个服务再保存"也属于 volatileOnly。
+   含义：**任何由配置驱动的运行时结构都必须自己监听这个事件**（官方 `llm-pi-ai` 的
+   `providers`、`llm-deepseek` 的 key 同理）。漏掉的表现是"配置里有、设置页显示运行中、
+   模型却拿不到工具"，重启后才好 —— 因为重启时 `apply()` 才会按当前配置重挂。
+
+   本包的实现：`planReconcile()` 给出要撕/要挂的名单，`reconcile()` 串行执行，
+   **先 `await fiber.dispose()` 再挂同名的下一个**（官方 client 的 `serverName` 是全局
+   预留，旧子 fiber 注销是异步的，不等就会在加载阶段撞名抛错）。
 
 `.volatile()` 需要 schemastery ≥ 3.18.4。共享 store 曾经是 web 时代 npx 缓存的 250 条软链
 （3.18.2，没这个 API），已于 2026-10-13 按运行时版本重新物化，`deploy.ps1` 现在会守住
@@ -109,7 +125,8 @@ config:
 
 ## 加一个服务
 
-1. 打开 设置 → MCP 服务 → 添加服务，填名称与端点，保存即挂。
+1. 打开 设置 → MCP 服务 → 添加服务，填名称与端点，保存后几秒内挂上（不需要重启；
+   走的是 `loader/volatile-update` 那套热对齐，见上节第 3 条）。
 2. 想让它成为**出厂默认**（换机也要有），再往 `cordis.patch.yml` 的 `servers` 里加一条。
 3. 需要鉴权（如 DBX）就在 `headers` 里填 JSON 对象，例如
    `{"Authorization": "Bearer <token>"}`；地址栏只填到 `/mcp`，**不要多写一个斜杠**。
@@ -138,4 +155,7 @@ node scripts/verify-bundle-rows.mjs                  # bundle 声明与 cordis.p
 
 - 诊断/工具质量绑在对方应用的模型上（IDEA 索引没跑完会吐假错误）。
 - 目标应用没开着时工具静默消失（`failOnStartupError: false` 的代价）。
-- 页面上的启停是"配置里关掉就不挂"，不是运行时热拔：改完会重挂整个 entry。
+- 页面上的启停是"配置里关掉就不挂"：保存后数秒内撕掉那条子 fiber（工具随之消失），
+  再打开会重新连接；不是把已连着的连接"热拔"，而是按变更逐条对齐。
+- 对方应用在 dsh 启动时没开着时，官方 client 的重连预算（10 次、约 2 分钟）耗尽后
+  就不再尝试了，工具会一直缺席；此时改一下配置（任意一条保存）或重启桌面端即可重挂。

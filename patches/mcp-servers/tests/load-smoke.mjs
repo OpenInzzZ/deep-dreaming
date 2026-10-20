@@ -20,7 +20,11 @@
  *     schema still fills its own defaults (`headers`, the whole `reconnect`
  *     policy);
  *  6. against a live MCP server, one mount per entry really registers tools under
- *     `mcp__<serverName>__…`, and disposing the parent unregisters all of them.
+ *     `mcp__<serverName>__…`, and disposing the parent unregisters all of them;
+ *  7. a **volatile-only** `servers` edit (what the settings page writes) is
+ *     reconciled by the plugin itself: the Loader commits the new value, emits
+ *     `loader/volatile-update` and deliberately does NOT re-apply, so the mount
+ *     may only change because `apply()` listens for that event.
  *
  * Package resolution: `patches/mcp-servers/node_modules` must be the
  * host-dependency junction into `~/.dsh/profiles/node_modules`
@@ -127,6 +131,46 @@ assert.ok(Object.isFrozen(viaConfig([{ serverName: 'x', url: 'http://127.0.0.1:1
 assert.deepEqual(host.toMcpConfig({ serverName: 'dbx', url: 'http://127.0.0.1:5225/mcp', headers: { Authorization: 'Bearer t0ken' } }).headers,
   { Authorization: 'Bearer t0ken' }, 'the literal form must keep working too')
 
+// --- 5b. reconciliation plan: what a live `servers` edit must do -----------------
+// The settings page writes a `.volatile()` field, and the Loader treats a
+// volatile-only config diff as "no remount" — so `apply()` never re-runs and the
+// patch itself has to reconcile. These are the pure decisions that drives.
+assert.equal(
+  host.serverSignature({ url: 'http://x/mcp', headers: { b: '2', A: '1' } }),
+  host.serverSignature({ url: 'http://x/mcp', headers: { A: '1', b: '2' } }),
+  'header order and case must not count as a change (an unchanged server must not be remounted)',
+)
+assert.notEqual(host.serverSignature({ url: 'http://x/mcp' }), host.serverSignature({ url: 'http://y/mcp' }), 'a URL change must count')
+assert.notEqual(host.serverSignature({ url: 'u' }), host.serverSignature({ url: 'u', headers: { Authorization: 'Bearer t' } }),
+  'adding headers must count (that is the whole point of the signature)')
+assert.notEqual(host.serverSignature({ url: 'u' }), host.serverSignature({ url: 'u', toolCallTimeoutMs: 5000 }),
+  'a timeout change must count')
+
+const signatureOf = (server) => host.serverSignature(server)
+const unchanged = host.planReconcile(new Map([['a', signatureOf({ serverName: 'a', url: 'u' })]]), [
+  { serverName: 'a', url: 'u' },
+  { serverName: 'b', url: 'v' },
+])
+assert.deepEqual(unchanged.unmount, [], 'an unchanged mounted server must survive a reconcile')
+assert.deepEqual(unchanged.mount.map((server) => server.serverName), ['b'], 'only the new server mounts')
+
+const edited = host.planReconcile(new Map([
+  ['a', signatureOf({ serverName: 'a', url: 'u' })],
+  ['b', signatureOf({ serverName: 'b', url: 'v' })],
+]), [
+  { serverName: 'a', url: 'u' },
+  { serverName: 'b', url: 'v2' },
+])
+assert.deepEqual(edited.unmount, ['b'], 'a changed server unmounts before it mounts again')
+assert.deepEqual(edited.mount.map((server) => server.serverName), ['b'], 'a changed server mounts with the new config')
+
+const removed = host.planReconcile(new Map([['a', signatureOf({ serverName: 'a', url: 'u' })]]), [
+  { serverName: 'a', url: 'u', enabled: false },
+])
+assert.deepEqual(removed, { unmount: ['a'], mount: [] }, 'disabling a server unmounts it and mounts nothing')
+assert.deepEqual(host.planReconcile(new Map([['a', signatureOf({ serverName: 'a', url: 'u' })]]), undefined),
+  { unmount: ['a'], mount: [] }, 'an emptied list unmounts everything')
+
 // --- 6. mount for real when IDEA is listening ------------------------------------
 const listening = await new Promise((resolve) => {
   const sock = net.connect({ host: '127.0.0.1', port: 64342 })
@@ -136,7 +180,17 @@ const listening = await new Promise((resolve) => {
   sock.once('error', () => resolve(false))
 })
 
-let liveNote = 'IDEA MCP server not listening: live mount skipped'
+/** Poll until `predicate()` holds; returns false on timeout. */
+const waitFor = async (predicate, timeoutMs = 30000) => {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) return true
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
+  return predicate()
+}
+
+let liveNote = 'IDEA MCP server not listening: live mount and volatile reconcile skipped'
 if (listening) {
   const registered = []
   const ctx = new Context()
@@ -149,6 +203,9 @@ if (listening) {
       }
     },
   })
+  // The REAL shape: Cordis validates this raw config into `fiber.config`, whose
+  // `servers` is a volatile `{ get }` box — that box is what `apply()` receives
+  // and what the Loader writes on a live settings save.
   const fiber = ctx.plugin(host, {
     servers: [
       { serverName: 'probeA', url: IDEA_URL, enabled: true },
@@ -165,16 +222,32 @@ if (listening) {
   // tools land within a few seconds of activation. Poll instead of asserting
   // immediately, or the check is a coin flip.
   const namespaces = () => new Set(registered.map((t) => t?.name?.split('__')[1]).filter(Boolean))
-  const deadline = Date.now() + 20000
-  while (namespaces().size < 2 && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 200))
-  }
+  await waitFor(() => namespaces().size >= 2, 20000)
   const seen = [...namespaces()]
   assert.deepEqual(seen.sort(), ['probeA', 'probeB'], `exactly the two enabled, de-duplicated servers may mount, got ${seen.join(', ')}`)
   assert.ok(registered.every((t) => /^mcp__probe[AB]__/.test(t.name)), 'every tool must carry its server namespace')
+
+  // Drive the Loader's volatile-only path by hand: write the box, emit the event.
+  // The Loader does exactly these two steps and deliberately does NOT re-apply,
+  // so the mount can only change because this patch reconciles on the event.
+  const write = Symbol.for('cosmokit.volatile.write')
+  const box = fiber.config.servers
+  assert.equal(typeof box?.[write], 'function', 'the volatile box must be writable through the shared symbol')
+  box[write]([
+    { serverName: 'probeA', url: IDEA_URL, enabled: true },
+    { serverName: 'probeD', url: IDEA_URL, enabled: true },
+  ])
+  ctx.emit('loader/volatile-update', [['servers']])
+  const reconciled = await waitFor(() => {
+    const current = [...namespaces()].sort()
+    return current.length === 2 && current[0] === 'probeA' && current[1] === 'probeD'
+  }, 30000)
+  assert.ok(reconciled, `a volatile servers update must mount the new server and drop the old one, got ${[...namespaces()].sort().join(', ')}`)
+  assert.ok(registered.every((t) => /^mcp__probe[AD]__/.test(t.name)), 'the dropped server must have unregistered every tool')
+
   await fiber.dispose()
   assert.equal(registered.length, 0, 'dispose must unregister every child’s tools')
-  liveNote = `live mount registered ${seen.join(' + ')} namespaces and unregistered them on dispose`
+  liveNote = `live mount registered ${seen.join(' + ')} namespaces, a volatile edit swapped probeB for probeD, and dispose unregistered them`
 }
 
 // --- 7. source guards on the retired / duplicated machinery -----------------------
@@ -182,5 +255,7 @@ const src = await readFile(hostPath, 'utf8')
 assert.ok(!src.includes('StreamableHTTPClientTransport'), 'the transport must stay inside the official package')
 assert.ok(!src.includes('ctx.settings.register'), '0.2.0-rc.2 has no settings registration call')
 assert.ok(!/return\s+ctx\.plugin\(/.test(src), 'apply() must not return a child fiber (Cordis reads it as an Effect)')
+assert.ok(src.includes("'loader/volatile-update'"),
+  'a volatile-only servers edit never re-applies; apply() must reconcile on loader/volatile-update')
 
-console.log(`load-smoke OK: real Cordis loaded mcp-servers; inject=["tools"], servers volatile, box unwrapped, disabled skipped, duplicates collapsed, transport pinned with the official defaults filled; ${liveNote}`)
+console.log(`load-smoke OK: real Cordis loaded mcp-servers; inject=["tools"], servers volatile, box unwrapped, disabled skipped, duplicates collapsed, transport pinned with the official defaults filled, volatile edits reconciled; ${liveNote}`)

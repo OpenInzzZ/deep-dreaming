@@ -18,8 +18,10 @@
  * concurrent edits fence on the revision.
  *
  * The list lives in *config*, not in loader rows: adding a server therefore
- * needs no yml edit and no restart — a config-only diff re-runs `apply()` on
- * the fiber, which mounts one child of the official MCP client per entry.
+ * needs no yml edit and no restart — this page writes the whole `servers` array
+ * through the shared settings form, and the host half reconciles its mounted
+ * children when the Loader reports the volatile update (a volatile-only config
+ * diff deliberately does NOT re-run `apply()`).
  *
  * Hand-written to the client-bundle contract (no build step): the shell loads
  * this file through `window.__ModuleLoader__.load` and answers every

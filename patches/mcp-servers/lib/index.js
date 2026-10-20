@@ -72,6 +72,28 @@ export function plainConfig(config) {
 }
 
 /**
+ * 一条服务里会影响子 fiber 行为的全部字段的稳定签名。
+ *
+ * 用途只有一个：配置热更新时判断"这一条到底变没变"。变了就撤掉子 fiber 重挂，
+ * 没变就不动（避免把正在工作的连接平白断一次）。
+ *
+ * header 名按小写排序后比较：HTTP 头名不区分大小写，顺序也不该算差异。
+ * 只列这四项，是因为别的字段进不了子 fiber（`transport` 是钉死的，`enabled`
+ * 在 `selectServers()` 那层就决定挂不挂）。
+ */
+export function serverSignature(server) {
+  const headers = Object.entries(server?.headers ?? {})
+    .map(([name, value]) => [String(name).toLowerCase(), String(value)])
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+  return JSON.stringify([
+    server?.url ?? '',
+    headers,
+    server?.toolCallTimeoutMs ?? null,
+    server?.failOnStartupError === true,
+  ])
+}
+
+/**
  * 一条服务 -> 官方 client 认得的 streamable 配置（含它自己的默认值）。
  *
  * `headers` 必须换成一份**可变**副本：`.volatile()` 字段校验出来的对象是冻结的，
@@ -115,16 +137,86 @@ export function selectServers(servers) {
   return { taken, duplicates }
 }
 
+/**
+ * 对比"当前挂着什么"与"配置要什么"，给出撤销与新增两组。
+ *
+ * @param mounted `serverName` -> 签名 的映射（本实例已挂的子 fiber）
+ * @param servers 已摊平的服务列表（配置里的原样）
+ * @returns `{ unmount, mount }`：要撕掉的名字、要新挂的服务（改过的服务两边都有）
+ */
+export function planReconcile(mounted, servers) {
+  const { taken } = selectServers(servers)
+  const wanted = new Map(taken.map((server) => [server.serverName, server]))
+  const unmount = []
+  for (const [name, signature] of mounted) {
+    const next = wanted.get(name)
+    if (next === undefined || serverSignature(next) !== signature) unmount.push(name)
+  }
+  const mount = taken.filter((server) => mounted.get(server.serverName) !== serverSignature(server))
+  return { unmount, mount }
+}
+
 export function apply(ctx, config) {
-  const { taken } = selectServers(plainConfig(config).servers)
-  for (const server of taken) {
+  /** `serverName` -> `{ fiber, signature }`：本实例此刻挂着的子 fiber。 */
+  const mounted = new Map()
+
+  const mount = (server) => {
     // 一台坏配置不能带走其它服务：官方 apply 在建连失败且 failOnStartupError 为真时抛错。
     try {
       // 子模块对象按值传（官方 client 的 apply/Config/inject 都在上面）。
       // 不要 return 子 fiber：ctx.plugin 返回的是 thenable，apply 的返回值会被当作 Effect。
-      ctx.plugin({ ...mcpClient, name: `mcp-servers:${server.serverName}` }, toMcpConfig(server))
+      const fiber = ctx.plugin({ ...mcpClient, name: `mcp-servers:${server.serverName}` }, toMcpConfig(server))
+      mounted.set(server.serverName, { fiber, signature: serverSignature(server) })
     } catch (error) {
       ctx.logger?.warn?.(`mcp-servers: ${server.serverName} 挂载失败`, error)
     }
   }
+
+  const signatures = () => new Map([...mounted].map(([name, entry]) => [name, entry.signature]))
+
+  /**
+   * 把挂载状态对齐到配置。
+   *
+   * 先撤后挂：官方 client 在**全局**预留 `serverName`，旧子 fiber 的注销是异步的，
+   * 同名的下一个必须等它真的 dispose 完再 `ctx.plugin()`，否则加载阶段就撞名抛错。
+   * 这也是整个函数串行化的原因。
+   */
+  async function reconcile() {
+    const { unmount, mount: added } = planReconcile(signatures(), plainConfig(config).servers)
+    for (const name of unmount) {
+      const entry = mounted.get(name)
+      mounted.delete(name)
+      try {
+        await entry.fiber.dispose()
+      } catch (error) {
+        ctx.logger?.warn?.(`mcp-servers: ${name} 卸载失败`, error)
+      }
+    }
+    for (const server of added) mount(server)
+  }
+
+  // 激活时先把配置里的服务全挂上（和以前一样同步完成，激活即可用）。
+  for (const server of selectServers(plainConfig(config).servers).taken) mount(server)
+
+  /**
+   * 运行期的增删改：**必须**自己对齐，`apply()` 不会重跑。
+   *
+   * `servers` 是 `.volatile()` 字段（设置分区只收 volatile 字段），而 Loader 对
+   * "只改了 volatile 值"的更新有一条快路径：把新值写进运行中的配置盒子、发这个事件，
+   * 然后**不重跑 apply()**（`vendor/loader/src/config/entry.ts:143` 的 volatileOnly，
+   * 判等是 `equalExceptVolatile`，命中 `schema.meta.volatile` 就返回相等，
+   * 见 `config/diff.ts:18`）。所以设置页里新加的服务如果只靠 apply() 挂，
+   * 会一直是"配置里有、页面上显示运行中、模型却拿不到工具"。
+   * 官方 llm-pi-ai / llm-deepseek 的 providers 也是同一个原因才监听这个事件。
+   *
+   * 事件里带的 `paths` 是本次变动的 volatile 字段路径；只关心 `servers`。
+   */
+  let queue = Promise.resolve()
+  ctx.on('loader/volatile-update', (paths) => {
+    if (!Array.isArray(paths) || !paths.some((path) => path?.[0] === 'servers')) return
+    // 串行化：上一次 reconcile 还在 dispose 时不能开始下一次。
+    queue = queue.then(reconcile, reconcile).catch((error) => {
+      ctx.logger?.warn?.('mcp-servers: 配置同步失败', error)
+    })
+  })
 }
