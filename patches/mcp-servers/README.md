@@ -43,6 +43,11 @@ config:
 写入走 `configForms.get('mcp-servers').mutate([{ op:'set', path:['servers'], value }], revision)`，
 不另开通道；revision 围栏挡住并发覆盖。
 
+请求头是**键/值表单**，不是一段 JSON：每行一个头，可增、可删。空行在保存时忽略
+（不写 `{}`，保持"未配置"的状态，也就不会无故改变签名、触发重连）；名称按 HTTP 规则
+不区分大小写地查重，不能含空格或冒号；值不能含换行（`fetch` 会直接拒绝）。表单写的仍是
+配置里的普通 `{ 名称: 值 }` 映射，存储形状与挂载逻辑都不变。
+
 ## 三个必须知道的 volatile 事实
 
 1. **可编辑分区只收 `.volatile()` 标过的字段**：`settings/src/index.ts:308` 会把
@@ -128,8 +133,9 @@ config:
 1. 打开 设置 → MCP 服务 → 添加服务，填名称与端点，保存后几秒内挂上（不需要重启；
    走的是 `loader/volatile-update` 那套热对齐，见上节第 3 条）。
 2. 想让它成为**出厂默认**（换机也要有），再往 `cordis.patch.yml` 的 `servers` 里加一条。
-3. 需要鉴权（如 DBX）就在 `headers` 里填 JSON 对象，例如
-   `{"Authorization": "Bearer <token>"}`；地址栏只填到 `/mcp`，**不要多写一个斜杠**。
+3. 需要鉴权（如 DBX）就在「请求头」里点「添加请求头」：名称填 `Authorization`、
+   值填 `Bearer <token>`（键/值表单，不需要手写 JSON）；地址栏只填到 `/mcp`，
+   **不要多写一个斜杠**。
 
 ## 已接入的服务：DBX 数据库工具
 

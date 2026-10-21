@@ -27,6 +27,10 @@
  * this file through `window.__ModuleLoader__.load` and answers every
  * `require()` from the frozen module table, so only seed words appear here and
  * there is no JSX — `jsx()` / `jsxs()` only.
+ *
+ * Request headers are edited as key/value rows, not as a JSON blob. The stored
+ * shape is still the plain `{ name: value }` map the Host's schema expects, so
+ * neither the config nor the mounted clients change — only this editor does.
  */
 window.__ModuleLoader__.load({ id: '@local/dsh-client-mcp-servers', factory: (require) => {
 var module = { exports: {} }; var exports = module.exports;
@@ -64,8 +68,15 @@ const zh = {
   nameHint: '字母、数字、下划线或短横线，最长 32 个字符，且不能与其它服务重名。',
   url: '服务地址',
   urlHint: 'Streamable HTTP 端点，例如 http://127.0.0.1:64342/stream',
-  headers: '请求头（JSON）',
-  headersHint: '留空表示不带额外头。需要鉴权的服务写在这里，例如 {"Authorization": "Bearer <token>"}。',
+  headers: '请求头',
+  headersHint: '留空表示不带额外头。需要鉴权的服务在这里加一行：名称填 Authorization，值填 Bearer <token>。',
+  headersEmpty: '还没有请求头。',
+  headerAdd: '添加请求头',
+  headerName: '请求头名称',
+  headerValue: '请求头值',
+  headerNamePlaceholder: 'Authorization',
+  headerValuePlaceholder: 'Bearer <token>',
+  headerRemove: '删除这一行请求头',
   timeout: '单次调用超时（毫秒）',
   timeoutHint: '留空按 90000 处理；IDEA 冷分析一个文件约 3.6 秒。',
   enabled: '启用',
@@ -73,7 +84,9 @@ const zh = {
   errorName: '名称不合法：只允许字母、数字、下划线、短横线，且不超过 32 个字符。',
   errorDuplicate: '名称已被另一个服务使用。',
   errorUrl: '地址必须以 http:// 或 https:// 开头。',
-  errorHeaders: '请求头必须是 JSON 对象，且每个值都是字符串，例如 {"Authorization": "Bearer ..."}。',
+  errorHeaderName: '请求头名称不能为空，也不能含空格或冒号。',
+  errorHeaderValue: '请求头值不能包含换行符。',
+  errorHeaderDuplicate: '这一行与上面的请求头重名了（名称不区分大小写）。',
   errorTimeout: '超时至少 1000 毫秒。',
   stateOn: '运行中',
   stateOff: '已停用',
@@ -97,8 +110,15 @@ const en = {
   nameHint: 'Letters, digits, underscore or dash, up to 32 characters, unique across servers.',
   url: 'Endpoint',
   urlHint: 'A Streamable HTTP endpoint, e.g. http://127.0.0.1:64342/stream',
-  headers: 'Request headers (JSON)',
-  headersHint: 'Blank means no extra headers. An authenticated server\u2019s headers go here, e.g. {"Authorization": "Bearer <token>"}.',
+  headers: 'Request headers',
+  headersHint: 'Blank means no extra headers. For an authenticated server add a row: name Authorization, value Bearer <token>.',
+  headersEmpty: 'No request headers yet.',
+  headerAdd: 'Add header',
+  headerName: 'Header name',
+  headerValue: 'Header value',
+  headerNamePlaceholder: 'Authorization',
+  headerValuePlaceholder: 'Bearer <token>',
+  headerRemove: 'Remove this header row',
   timeout: 'Per-call timeout (ms)',
   timeoutHint: 'Blank means 90000; a cold IDEA analysis of one file takes about 3.6s.',
   enabled: 'Enabled',
@@ -106,7 +126,9 @@ const en = {
   errorName: 'Invalid name: letters, digits, underscore and dash only, at most 32 characters.',
   errorDuplicate: 'Another server already uses this name.',
   errorUrl: 'The endpoint must start with http:// or https://.',
-  errorHeaders: 'Request headers must be a JSON object whose values are all strings, e.g. {"Authorization": "Bearer ..."}.',
+  errorHeaderName: 'A header name is required, and cannot contain spaces or colons.',
+  errorHeaderValue: 'A header value cannot contain line breaks.',
+  errorHeaderDuplicate: 'This name is already used by a row above (header names are case-insensitive).',
   errorTimeout: 'The timeout must be at least 1000 ms.',
   stateOn: 'Running',
   stateOff: 'Disabled',
@@ -121,18 +143,25 @@ function serversOf(value) {
   return Array.isArray(value?.servers) ? value.servers : [];
 }
 
-/** An empty draft for the add form. `headers` is the JSON text the user types. */
+/** A user-filled header name must be an RFC 7230 token — the only shape `fetch` accepts. */
+const HEADER_NAME_PATTERN = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+
+/** One blank row of the key/value header editor. */
+function blankHeaderRow() {
+  return { name: '', value: '' };
+}
+
+/** An empty draft for the add form. `headers` is the row list the editor renders. */
 function emptyDraft() {
-  return { serverName: '', url: '', headers: '', toolCallTimeoutMs: '', failOnStartupError: false, enabled: true };
+  return { serverName: '', url: '', headers: [blankHeaderRow()], toolCallTimeoutMs: '', failOnStartupError: false, enabled: true };
 }
 
 /** Pre-fill the edit form from a stored server (blank timeout means "use the default"). */
 function draftOf(server) {
-  const headers = server?.headers;
   return {
     serverName: server?.serverName ?? '',
     url: server?.url ?? '',
-    headers: headers && Object.keys(headers).length > 0 ? JSON.stringify(headers) : '',
+    headers: headerRowsOf(server?.headers),
     toolCallTimeoutMs: server?.toolCallTimeoutMs === undefined ? '' : String(server.toolCallTimeoutMs),
     failOnStartupError: server?.failOnStartupError === true,
     enabled: server?.enabled !== false,
@@ -140,27 +169,77 @@ function draftOf(server) {
 }
 
 /**
- * Parse the headers textarea.
+ * Stored header map -> editor rows.
  *
- * @returns `{ ok: true, value }` with an omitted `value` for blank input (so the
- *   Host default `{}` wins), or `{ ok: false }` when the text is not a JSON
- *   object of strings. Returning a flag — not a thrown error — keeps the caller
- *   in charge of which copy key to show.
+ * The editor always opens with one usable row, so a server that has no headers
+ * yet shows a row to type into rather than an empty box plus a button.
  */
-function parseHeaders(text) {
-  const raw = String(text ?? '').trim();
-  if (raw === '') return { ok: true };
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return { ok: false };
+function headerRowsOf(headers) {
+  const map = headers !== null && typeof headers === 'object' && !Array.isArray(headers) ? headers : {};
+  const rows = Object.entries(map).map(([name, value]) => ({ name: String(name), value: String(value ?? '') }));
+  return rows.length > 0 ? rows : [blankHeaderRow()];
+}
+
+/** A row the user has not filled in: both cells blank, therefore ignored on save. */
+function isBlankHeaderRow(row) {
+  return String(row?.name ?? '').trim() === '' && String(row?.value ?? '').trim() === '';
+}
+
+/**
+ * Validate one header row on its own.
+ *
+ * A blank row is "not used yet", not an error; a named row with an empty value
+ * is allowed (that is still a legal HTTP header, and refusing it would surprise
+ * someone mid-edit).
+ *
+ * @returns the dictionary key of the violation, or null.
+ */
+function validateHeaderRow(row) {
+  const name = String(row?.name ?? '').trim();
+  const value = String(row?.value ?? '').trim();
+  if (name === '' && value === '') return null;
+  if (!HEADER_NAME_PATTERN.test(name)) return 'errorHeaderName';
+  if (/[\r\n]/.test(value)) return 'errorHeaderValue';
+  return null;
+}
+
+/**
+ * Validate the whole row list.
+ *
+ * Names compare case-insensitively: HTTP header names are, and two rows that
+ * differ only in case would otherwise be stored as two map keys and sent twice.
+ *
+ * @returns `{ key, at }` for the first offending row (`at` is the row index, used
+ *   to paint that row) or null when every row is acceptable.
+ */
+function validateHeaders(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const seen = new Set();
+  for (let at = 0; at < list.length; at += 1) {
+    if (isBlankHeaderRow(list[at])) continue;
+    const key = validateHeaderRow(list[at]);
+    if (key !== null) return { key, at };
+    const name = String(list[at]?.name ?? '').trim().toLowerCase();
+    if (seen.has(name)) return { key: 'errorHeaderDuplicate', at };
+    seen.add(name);
   }
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return { ok: false };
-  for (const value of Object.values(parsed)) {
-    if (typeof value !== 'string') return { ok: false };
+  return null;
+}
+
+/**
+ * Editor rows -> the stored header map.
+ *
+ * @returns the map, or `undefined` when every row is blank — the key is then
+ *   omitted on save so the Host's `{}` default wins. Writing `{}` instead would
+ *   be a needless config diff (it changes the server signature and reconnects).
+ */
+function headersOf(rows) {
+  const entries = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (isBlankHeaderRow(row)) continue;
+    entries.push([String(row?.name ?? '').trim(), String(row?.value ?? '').trim()]);
   }
-  return { ok: true, value: parsed };
+  return entries.length === 0 ? undefined : Object.fromEntries(entries);
 }
 
 /**
@@ -174,7 +253,8 @@ function validateDraft(draft, servers, index) {
   if (!NAME_PATTERN.test(draft.serverName ?? '')) return 'errorName';
   if (servers.some((row, at) => at !== index && row?.serverName === draft.serverName)) return 'errorDuplicate';
   if (!/^https?:\/\//.test(draft.url ?? '')) return 'errorUrl';
-  if (!parseHeaders(draft.headers).ok) return 'errorHeaders';
+  const headers = validateHeaders(draft.headers);
+  if (headers !== null) return headers.key;
   const text = String(draft.toolCallTimeoutMs ?? '').trim();
   if (text !== '' && (!Number.isFinite(Number(text)) || Number(text) < 1000)) return 'errorTimeout';
   return null;
@@ -183,13 +263,13 @@ function validateDraft(draft, servers, index) {
 /** Turn a draft into a stored server entry (blank timeout is omitted so the Host default applies). */
 function serverOf(draft) {
   const text = String(draft.toolCallTimeoutMs ?? '').trim();
-  const headers = parseHeaders(draft.headers);
+  const headers = headersOf(draft.headers);
   return {
     serverName: draft.serverName.trim(),
     url: draft.url.trim(),
     failOnStartupError: draft.failOnStartupError === true,
     enabled: draft.enabled !== false,
-    ...(headers.ok && headers.value !== undefined ? { headers: headers.value } : {}),
+    ...(headers === undefined ? {} : { headers }),
     ...(text === '' ? {} : { toolCallTimeoutMs: Number(text) }),
   };
 }
@@ -225,6 +305,11 @@ const CSS = [
   '.ms-hint{font-size:11px;line-height:16px;color:var(--dsw-alias-label-caption)}',
   '.ms-error{margin:0;font-size:11px;line-height:16px;color:var(--dsw-alias-state-error-primary)}',
   '.ms-control{display:block;width:100%;max-width:420px}',
+  '.ms-control-wide{max-width:none}',
+  '.ms-headers{display:flex;flex-direction:column;gap:8px}',
+  '.ms-header-row{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,3fr) auto;gap:8px;align-items:center}',
+  '.ms-header-row-bad .ms-input{border-color:var(--dsw-alias-state-error-primary)}',
+  '.ms-header-add{align-self:flex-start}',
   '.ms-input{box-sizing:border-box;width:100%;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px}',
   '.ms-input:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:none}',
   '.ms-input:disabled{opacity:.6}',
@@ -248,10 +333,88 @@ function Field({ label, hint, error, children }) {
   ] });
 }
 
+/**
+ * The same layout for a field whose control is a *group* of inputs.
+ *
+ * The header editor holds several inputs plus buttons, so it cannot live inside
+ * the native `<label>` that `Field` renders: a label is meant to wrap a single
+ * control, and a button inside one would also forward its click to the first
+ * input.
+ */
+function FieldGroup({ label, hint, error, children }) {
+  return jsxs('div', { className: 'ms-field', children: [
+    jsx('span', { className: 'ms-label', children: label }, 'label'),
+    jsx('div', { className: 'ms-control ms-control-wide', children: children }, 'control'),
+    error ? jsx('span', { className: 'ms-error', role: 'alert', children: error }, 'error')
+      : (hint ? jsx('span', { className: 'ms-hint', children: hint }, 'hint') : null),
+  ] });
+}
+
+/** Copy keys that belong to the header editor (they paint the header field, not another one). */
+const HEADER_ERROR_KEYS = ['errorHeaderName', 'errorHeaderValue', 'errorHeaderDuplicate'];
+
+/**
+ * The key/value editor for the request-header map.
+ *
+ * Rows are plain `{ name, value }` objects and are addressed by index: the list
+ * only ever grows at the end or loses a row, and every cell is controlled, so an
+ * index key cannot desynchronise the DOM from the draft. `onChange` receives the
+ * next rows array; the parent folds it back into the draft.
+ */
+function HeaderRows({ t, rows, error, saving, onChange }) {
+  const list = Array.isArray(rows) ? rows : [];
+  const replace = (at, patch) => onChange(list.map((row, index) => (index === at ? { ...row, ...patch } : row)));
+  return jsxs('div', { className: 'ms-headers', children: [
+    list.length === 0 ? jsx('span', { className: 'ms-hint', children: t('headersEmpty') }, 'empty') : null,
+    ...list.map((row, at) => jsxs('div', {
+      className: 'ms-header-row' + (error !== null && error.at === at ? ' ms-header-row-bad' : ''),
+      children: [
+        jsx(Input, {
+          className: 'ms-input',
+          value: row.name,
+          placeholder: t('headerNamePlaceholder'),
+          'aria-label': t('headerName'),
+          autoComplete: 'off',
+          spellCheck: false,
+          disabled: saving,
+          onChange: (event) => replace(at, { name: event.target.value }),
+        }, 'name'),
+        jsx(Input, {
+          className: 'ms-input',
+          value: row.value,
+          placeholder: t('headerValuePlaceholder'),
+          'aria-label': t('headerValue'),
+          autoComplete: 'off',
+          spellCheck: false,
+          disabled: saving,
+          onChange: (event) => replace(at, { value: event.target.value }),
+        }, 'value'),
+        jsx('button', {
+          type: 'button',
+          className: 'ms-link',
+          'aria-label': t('headerRemove'),
+          disabled: saving,
+          onClick: () => onChange(list.filter((_row, index) => index !== at)),
+          children: t('remove'),
+        }, 'remove'),
+      ],
+    }, String(at))),
+    jsx('button', {
+      type: 'button',
+      className: 'ms-link ms-header-add',
+      disabled: saving,
+      onClick: () => onChange([...list, blankHeaderRow()]),
+      children: t('headerAdd'),
+    }, 'add'),
+  ] });
+}
+
 /** The add / edit form. `onSubmit` receives the validated draft. */
 function ServerForm({ t, draft, onChange, onSubmit, onCancel, saving }) {
   const errorOf = (key) => (draft.touched && draft.errorKey === key ? t(draft.errorKey) : null);
-  const blocked = saving || (draft.errorKey !== null && draft.errorKey !== undefined);
+  // Re-derive the offending row while the draft is invalid, so the hint text and
+  // the red cell follow edits instead of freezing on the first failed submit.
+  const headerError = draft.touched && HEADER_ERROR_KEYS.includes(draft.errorKey) ? validateHeaders(draft.headers) : null;
   return jsxs('div', { className: 'ms-form', children: [
     jsx(Field, {
       label: t('name'),
@@ -265,11 +428,17 @@ function ServerForm({ t, draft, onChange, onSubmit, onCancel, saving }) {
       error: errorOf('errorUrl'),
       children: jsx(Input, { className: 'ms-input', value: draft.url, placeholder: 'http://127.0.0.1:64342/stream', disabled: saving, onChange: (event) => onChange({ ...draft, url: event.target.value, touched: true }) }),
     }, 'url'),
-    jsx(Field, {
+    jsx(FieldGroup, {
       label: t('headers'),
       hint: t('headersHint'),
-      error: errorOf('errorHeaders'),
-      children: jsx(Input, { className: 'ms-input', value: draft.headers, placeholder: '{"Authorization": "Bearer ..."}', disabled: saving, onChange: (event) => onChange({ ...draft, headers: event.target.value, touched: true }) }),
+      error: headerError === null ? null : t(headerError.key),
+      children: jsx(HeaderRows, {
+        t,
+        rows: draft.headers,
+        error: headerError,
+        saving,
+        onChange: (headers) => onChange({ ...draft, headers, touched: true }),
+      }),
     }, 'headers'),
     jsx(Field, {
       label: t('timeout'),
@@ -284,7 +453,11 @@ function ServerForm({ t, draft, onChange, onSubmit, onCancel, saving }) {
     jsxs('div', { className: 'ms-foot', children: [
       jsx('span', { className: 'ms-foot-spacer' }, 'spacer'),
       jsx('button', { type: 'button', className: 'ms-link', disabled: saving, onClick: onCancel, children: t('cancel') }, 'cancel'),
-      jsx('button', { type: 'button', className: 'ms-button', disabled: blocked, onClick: () => onSubmit(draft), children: saving ? t('saving') : t('save') }, 'save'),
+      // Not disabled on an invalid draft: the error keys stay in the draft while
+      // the user fixes the field, and a disabled button would then never let the
+      // corrected value through. A click revalidates and either saves or repaints
+      // the same message.
+      jsx('button', { type: 'button', className: 'ms-button', disabled: saving, onClick: () => onSubmit(draft), children: saving ? t('saving') : t('save') }, 'save'),
     ] }, 'foot'),
   ] });
 }
@@ -387,6 +560,6 @@ function apply(ctx) {
   document.head.appendChild(style);
 })();
 
-module.exports = { apply, inject, NS, ENTRY_ID, serversOf, emptyDraft, draftOf, parseHeaders, validateDraft, serverOf, replaceAt, removeAt };
+module.exports = { apply, inject, NS, ENTRY_ID, serversOf, emptyDraft, draftOf, blankHeaderRow, headerRowsOf, isBlankHeaderRow, validateHeaderRow, validateHeaders, headersOf, validateDraft, serverOf, replaceAt, removeAt, ServerForm };
 return module.exports;
 }});
