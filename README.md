@@ -1,6 +1,6 @@
 # deep-dreaming
 
-> **目标平台**: DSH **桌面端**(Electron,`@deepseek-ai/dsh-desktop`),当前适配 **`0.2.1-rc.2`**
+> **目标平台**: DSH **桌面端**(Electron,`@deepseek-ai/dsh-desktop`),当前适配 **`0.2.1-rc.5`**
 > (profile:`~/.dsh/profiles/desktop`;宿主:打包运行时 `resources/app.asar/dsh`;宿主端口由桌面端动态分配)
 > Web 端(`dsh web`)已**不再维护**,其生命周期脚本归档在 [`archive/`](archive/README.md)
 
@@ -126,6 +126,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 - **不要在 `patches/` 下做递归扫描**:`patches/<p>/node_modules` 是指向 `~/.dsh/profiles/node_modules` 的 junction,而 profile 里的 `@local/*` 又指回 `patches/*`,形成环;`Get-ChildItem -Recurse` 之类的命令不会结束。
 - **`~/.dsh/profiles/node_modules` 必须是按运行时版本物化的实目录。** 它曾经是 web 时代 npx 缓存留下的 **250 条指向 `%LOCALAPPDATA%\npm-cache\_npx\<hash>\node_modules` 的软链**:一次 `npm cache clean`(或缓存 GC)就能让全部补丁同时 `MODULE_NOT_FOUND`;而且那套包比打包运行时落后一个 minor(schemastery 3.18.2 vs 3.18.4)—— 这正是「卡片在、设置表单没有」的根因,因为 `.volatile()` 在 3.18.2 里不存在(可编辑分区只收 volatile 字段)。2026-10-13 已按运行时版本重物化:临时目录里 `npm i @deepseek-ai/dsh-llm@0.2.0-rc.2 @deepseek-ai/dsh-mcp-client@0.2.0-rc.2`(cordis / schemastery 交给 npm 自己解析,**不要手抄版本号**),旧目录**移出**到 `~/.dsh/store-npx-era-<ts>`(未删除),`@local/*` 链接按快照 `~/.dsh/store-snapshot-<ts>.tsv` 恢复。
   **2026-10-18 又按 `0.2.1-rc.2` 重物化了一次**(`npm i @deepseek-ai/dsh-llm@0.2.1-rc.2 @deepseek-ai/dsh-mcp-client@0.2.1-rc.2 @deepseek-ai/dsh-session-format-catalog@0.2.1-rc.2`,最后一个供测试里的真实 v4 编码器使用),旧树保留在 `~/.dsh/store-npx-era-20261017-190810`。`deploy.ps1` 现在**既**检查任何指向 `npm-cache\_npx` 的 store 条目,**也**比对 store 里 `@deepseek-ai/dsh-llm` 与桌面端版本 —— 不一致即 FAIL(此前只检查"可解析",实测 app 0.2.1 + store 0.2.0 曾被误判为 OK)。
+  **2026-10-30 再按 `0.2.1-rc.5` 物化**(桌面端在 2026-10-29 自动更新,而 store 已退回 `dsh-llm` 0.2.0-rc.2 / `cordis` 4.0.4 / `schemastery` 3.18.4,deploy 直接 FAIL):`npm i @deepseek-ai/dsh-llm@0.2.1-rc.5 @deepseek-ai/dsh-mcp-client@0.2.1-rc.5 @deepseek-ai/dsh-session-format-catalog@0.2.1-rc.5`;新树为 `cordis` 4.0.5 / `schemastery` 3.18.5 / `cosmokit` 1.8.6,旧树保留在 `~/.dsh/store-0.2.0-rc.2-20261030-105152`,快照 `~/.dsh/store-snapshot-20261030-105152.tsv`。顺带清掉了归档补丁留下的 `@local/dsh-client-ui-settings-other` 断链。
 
 ## 故障恢复
 
@@ -347,6 +348,44 @@ Web 端时期修掉的问题,以及下次升级时要先看的地方:
    continuable 子代理、工厂渲染),只保留全文 Tooltip + 拖拽排序;
    `ui-settings-model-capabilities` 在声明型路由上隐藏思考区(官方
    `ModelReasoningEfforts` 负责),保存时 `reasoningEfforts` 原样透传。
+
+### 0.2.1-rc.5 适配补记(2026-10-30)
+
+桌面端 2026-10-29 自动更新到 **0.2.1-rc.5**(打包运行时自报 release commit
+`d4db512`)。rc.2→rc.5 共 19 个提交、667 个变更文件,但**真实源码改动只有 83 个**
+(其余都是 monorepo 的 `package.json` 版本号),且 `packages/host/webserver`、
+`packages/settings`、`packages/agent`、`packages/session` **源码零改动** ——
+补丁依赖的宿主 API 面没有变。
+
+改动集中在客户端(`ui-entry-customization` 新增、`ui-sidebar` /
+`ui-conversation` 的 More 菜单与视图 pin、思考块渲染 `ui-chat`、tooltip、
+ACP stdout)与 LLM(`llm-deepseek-api-key` 跟随官方 `/models` 列表)、
+`mcp-client` 的 resources 能力探测。**没有任何补丁被官方功能取代**,也无需改代码:
+
+1. 补丁用到的扩展位与图标在 rc.5 全部仍在:`settings.section`、
+   `settings.models.provider-card`、`conversation.input.dock`、
+   `sidebar.footer.action`、`tool.call.toolview`,以及 15 个
+   `@deepseek-ai/dsh-client-ui-primitives` 图标导出。
+2. **官方仍无** MCP 服务设置页、会话自动清理、临时会话、队列坞拖拽排序/全文预览,
+   因此 `mcp-servers`、`session-cleanup`、`temp-session`、`ui-queue-tools` 继续互补。
+3. **rc.3 新增的 `ui-entry-customization`**(侧边栏面板/会话视图的 More 菜单:
+   pin/unpin、浏览插件、创建插件)只作用于 panellist 与 view tab;
+   `temp-session` 挂在 `sidebar.footer.action` 上,不是可 pin 的面板,二者不冲突。
+4. **模型能力**:官方 `ModelReasoningEfforts` 仍只对手写声明(declared)的 pi-ai
+   路由渲染,目录型路由没有思考入口;图片输入仍是勾选框、表达不了「继承」。
+   `ui-settings-model-capabilities` 的分工(目录型思考 + 三态图片)保持有效。
+5. 实测:测试矩阵 16/16(load-smoke 跑在新的 store 上:real Cordis 4.0.5 /
+   schemastery 3.18.5 / `dsh-mcp-client` 0.2.1-rc.5);`deploy.ps1` PASS(stage
+   34/34);运行中的宿主上 `/session-cleanup/getConfig`、`/temp-session/*`、
+   `/queue/*`、`/whale-background.png` 全部 200;`GET /plugins/events` 的
+   0.2.1-rc.5 客户端图里 7 个补丁 client 行齐全且各自的 `client.js` 都能下载(200)。
+6. **仍需重启才生效**:运行中的宿主仍持有旧 store 载入的 `dsh-mcp-client`
+   0.2.0-rc.2(补丁把它挂成每个服务一个子 fiber)。`scripts/restart-desktop.ps1 -Force`
+   之后才会用上 0.2.1-rc.5 的模块。
+7. `llm-deepseek-account.config.models` 在 profile 层又出现了(0.2.1 起该键会让该
+   entry 在 `resolveAccountOptions` 抛 `models is no longer configurable` 而不激活;
+   schemastery 会保留未知键)。已再次从
+   `~/.dsh/profiles/desktop/cordis.patch.yml` 删除 —— 注意设置页面保存模型时可能把它写回。
 
 ### 本轮部署状态(2026-09-18,Web 端)
 
