@@ -17,7 +17,6 @@ deep-dreaming/
 ├── patches/                      # 全部补丁,一补丁一目录(代码 + 测试 + README)
 │   ├── dsh-project-memory/       # 跨会话项目记忆(MCP Reference Memory 桥接,组合包插件)
 │   ├── session-cleanup/          # 会话日志自动清理(目录包插件)
-│   ├── ui-settings-model-capabilities/  # 设置「模型」页扩展:目录型路由的思考 + 全路由图片输入三态(声明型路由的思考交给官方)
 │   ├── ui-queue-tools/           # 排队消息增强:hover 全文预览 + 拖拽排序,并与官方 0.2.1 坞同步(附件/本地回显)
 │   ├── temp-session/             # 侧边栏一键发起不绑定项目的临时会话 + verify
 │   ├── whale-background/         # 会话区域鲸鱼娘背景图(bundle 补丁)
@@ -25,7 +24,7 @@ deep-dreaming/
 ├── assets/                       # 品牌资产(鲸鱼娘 favicon;不归任何补丁,由 deploy.ps1 同步到 ~/.dsh/assets)
 ├── archive/                      # 已退役的脚本 / 资产 / 补丁(只读保留,不再部署)
 ├── scripts/
-│   ├── install.ps1               # 一键安装:建 junction 兜底(含 @local 自引用)+ 7 个 bundle 补丁全部装成 bundle(先剥遗留行) + MCP Reference Memory + 部署校验(幂等)
+│   ├── install.ps1               # 一键安装:建 junction 兜底(含 @local 自引用)+ 6 个 bundle 补丁全部装成 bundle(先剥遗留行) + MCP Reference Memory + 部署校验(幂等)
 │   ├── deploy.ps1                # 只读校验:同步脚本与资产 + bundle 登记/行属主 + junction + 体检宿主依赖仓库
 │   ├── start-desktop.ps1         # 启动桌面端(已在运行则聚焦窗口)
 │   ├── restart-desktop.ps1       # 重启桌面端(改补丁源码后必须;需 -Force)
@@ -48,7 +47,6 @@ deep-dreaming/
 | [dsh-project-memory](patches/dsh-project-memory/) | 跨会话项目记忆:**MCP Reference Memory 桥接**(图谱存储/检索/关系都在官方 `@modelcontextprotocol/server-memory`)——注入提示词引导,并在会话**首个被准入步骤**(`agent/pre-step`)召回既有记忆(带上本会话工作区与 `<project>/<topic>` 项目前缀),记忆存取由 `mcp__reference_memory__*` 完成;九个记忆工具调用以**可折叠「记忆阶段」卡片**展示,**不产生额外对话轮次** | 作为 **bundle** 安装:`dsh plugin --profile desktop add`(或 `pnpm add`)进 profile 并登记到 `dsh.profile.bundles` + 全局安装 `@modelcontextprotocol/server-memory` 与 home 层 `reference_memory` MCP 行 | [README](patches/dsh-project-memory/README.md) |
 | [session-cleanup](patches/session-cleanup/) | 按天数/容量定期清理归档会话,跳过活跃会话 | **bundle**:包内 `cordis.patch.yml` 行 + `install.ps1` pnpm link 进 profile 并登记 `dsh.profile.bundles` | [README](patches/session-cleanup/README.md) |
 | [ui-queue-tools](patches/ui-queue-tools/) | 排队消息增强:hover 预览全文 + **拖拽排序**(host 半经 Inbox.splice 重排);其余行为与官方 0.2.1 队列坞同步(附件缩略图/文件块、本地排队回显、可继续子代理) | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/ui-queue-tools/README.md) |
-| [ui-settings-model-capabilities](patches/ui-settings-model-capabilities/) | 设置「模型」页扩展:给 llm-pi-ai 路由逐模型配置**能力**——**目录型路由**的**思考开关 + 等级(档位与发送值)**写回 `reasoningEfforts`(声明型路由的思考由 0.2.1 官方模型行负责,本卡不再重复);**图片输入三态**(跟随上游 / 仅文本 / 支持图片)写回 `input`,补上官方勾选框表达不了的「继承」状态 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/ui-settings-model-capabilities/README.md) |
 | [temp-session](patches/temp-session/) | 侧边栏底部「临时会话」按钮:一键发起绑定**用户级临时目录**的会话,不关联任何项目 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/temp-session/README.md) |
 | [whale-background](patches/whale-background/) | 会话区域背景:在对话滚动区居中偏右显示鲸鱼娘透明图(13% 透明度),资源缺失时自动跳过而不影响启动 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/whale-background/README.md) |
 | [mcp-servers](patches/mcp-servers/) | **MCP 服务接入**:一张设置页管理多个外部 MCP 服务,清单存在配置里,加/删服务不用改 yml、不用重启。出厂默认那条是 **IDEA 代码诊断**——模型改完代码直接调 `mcp__idea__lint_files` / `get_file_problems` 拿 IDE 实时检查结果(实测冷分析 3.6s、8 文件批量 4.9s、59 个工具),不必为「符号解析不了」跑一遍编译。宿主端对每项挂一个官方 `@deepseek-ai/dsh-mcp-client` 子 fiber(官方一个 entry 只连一个 server,且它的 `z.union` 展不开成表单);客户端半端注册 `settings.section` 页——**运行时没有任何插件贡献 `plugins.row.config`,官方根本没有通用配置编辑器** | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/mcp-servers/README.md) |
@@ -79,7 +77,6 @@ $repo = (Resolve-Path .).Path          # 在仓库根执行;其它位置请指�
 # 1. 全部补丁都是 bundle:包内自带 cordis.patch.yml 行,install.ps1 负责
 #    pnpm link 进 profile + 登记 dsh.profile.bundles(下面的 junction 只是解析兜底)
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-plugin-session-cleanup" -Target "$repo\patches\session-cleanup"
-New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-settings-model-capabilities" -Target "$repo\patches\ui-settings-model-capabilities"
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-queue-tools" -Target "$repo\patches\ui-queue-tools"
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-temp-session" -Target "$repo\patches\temp-session"
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-whale-background" -Target "$repo\patches\whale-background"
@@ -88,7 +85,6 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 #    装之前先删掉 profile 层同 id 的 - insert: 行,否则两层同 id 会让启动 fail-loud
 $cli = "D:\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
 & $cli plugin --profile desktop add "$repo\patches\session-cleanup"
-& $cli plugin --profile desktop add "$repo\patches\ui-settings-model-capabilities"
 & $cli plugin --profile desktop add "$repo\patches\ui-queue-tools"
 & $cli plugin --profile desktop add "$repo\patches\temp-session"
 & $cli plugin --profile desktop add "$repo\patches\whale-background"
@@ -191,7 +187,7 @@ DSH 桌面端对 profile 的 `cordis.patch.yml` 内置热加载(`watchUserPatche
     无谓的整层重载)。
 - **profile manifest(`package.json`)改动热应用**(2026-09-24 实测:`install.ps1`
   通过桌面 CLI 把 6 个补丁登记进 `dsh.profile.bundles` 并剥离 profile 层遗留行,
-  —— 该数字是当时的实测样本;2026-10-13 起 bundle 数为 7(新增 `mcp-servers`),机制不变)
+  —— 该数字是当时的实测样本;2026-10-13 起 7(新增 `mcp-servers`),2026-11-03 起 6(退役 `ui-settings-model-capabilities`),机制不变)
   运行中的宿主数秒内挂上 bundle 行,四条 host 路由全部 200,无需重启)。
 - **补丁源码(仓库文件)改动不热加载**:模块级 HMR 对 `node_modules` 下的补丁不生效;
   改完源码需**重启桌面端**(`scripts/restart-desktop.ps1`,会结束当前会话,请在空闲时进行);
@@ -226,8 +222,6 @@ node patches/session-cleanup/verify-session-cleanup.mjs          # settings 集�
 node patches/session-cleanup/tests/load-smoke.mjs                # 真实 Cordis 加载冒烟(Invalid effect 回归)
 node patches/dsh-project-memory/tests/plugin.smoke.mjs           # Reference Memory 桥接:Config 校验 + 提示词/事件流(无回顾轮次)
 node patches/dsh-project-memory/tests/client-contract.mjs        # 浏览器半契约(记忆折叠卡注册与渲染)
-node patches/ui-settings-model-capabilities/verify-model-capabilities.mjs  # 模型能力卡片:契约 + jsdom 渲染/交互/保存 ops
-node patches/ui-settings-model-capabilities/tests/load-smoke.mjs          # 真实 Cordis 加载冒烟
 node patches/ui-queue-tools/verify-queue-tools.mjs               # 排队工具 host 契约 + jsdom 拖拽/预览交互
 node patches/ui-queue-tools/tests/load-smoke.mjs                 # 真实 Cordis 加载冒烟(静态 inject 声明 + 前缀路由)
 node patches/temp-session/verify-temp-session.mjs                # temp-session host + client 契约 + 点击流程
@@ -373,7 +367,7 @@ ACP stdout)与 LLM(`llm-deepseek-api-key` 跟随官方 `/models` 列表)、
    `temp-session` 挂在 `sidebar.footer.action` 上,不是可 pin 的面板,二者不冲突。
 4. **模型能力**:官方 `ModelReasoningEfforts` 仍只对手写声明(declared)的 pi-ai
    路由渲染,目录型路由没有思考入口;图片输入仍是勾选框、表达不了「继承」。
-   `ui-settings-model-capabilities` 的分工(目录型思考 + 三态图片)保持有效。
+   该能力卡片已于 2026-11-03 退役(见下节),目录型路由因此没有思考入口。
 5. 实测:测试矩阵 16/16(load-smoke 跑在新的 store 上:real Cordis 4.0.5 /
    schemastery 3.18.5 / `dsh-mcp-client` 0.2.1-rc.5);`deploy.ps1` PASS(stage
    34/34);运行中的宿主上 `/session-cleanup/getConfig`、`/temp-session/*`、
@@ -386,6 +380,27 @@ ACP stdout)与 LLM(`llm-deepseek-api-key` 跟随官方 `/models` 列表)、
    entry 在 `resolveAccountOptions` 抛 `models is no longer configurable` 而不激活;
    schemastery 会保留未知键)。已再次从
    `~/.dsh/profiles/desktop/cordis.patch.yml` 删除 —— 注意设置页面保存模型时可能把它写回。
+
+### ui-settings-model-capabilities 退役(2026-11-03)
+
+应要求移除「我们自己写的思考等级与多模态支持配置」,两层同时做:
+
+1. **配置数据**:`~/.dsh/profiles/desktop/cordis.patch.yml` 里 `llm-pi-ai` 各模型的
+   `reasoningEfforts`(taikoo-cgh 的 `deepseek-v4-pro`、`deepseek-v4.1-flash`)与
+   `input`(xiaomi 的两个 mimo、`deepseek-v4.1-flash`)全部删除,模型回到
+   「跟随继承」:思考档位由官方目录/模型行决定,图片输入不再声明。
+   **副作用**:`deepseek-v4.1-flash` 不再声明 `input: [text, image]`,官方会按
+   纯文本处理该模型 —— 附件与 `read_image` 会被拒;要恢复图片支持需重新声明。
+2. **补丁本体**:目录移入 `archive/patches/ui-settings-model-capabilities/`,
+   从 `install.ps1`、`deploy.ps1`、`run-tests.mjs`、`verify-plugin-meta.mjs`、
+   `verify-bundle-rows.mjs` 摘除,并注销 profile 的依赖与 `dsh.profile.bundles`
+   条目 + 两条 junction(store 的 `@local` 与 profile 各一)。热重载后
+   `/plugins/events` 的客户端图里该行消失,其余 6 个补丁不受影响。
+
+`install.ps1` 的 `$renamedBundles` 顺带推广为「改名或退役」通用机制:
+`New = $null` 表示无后继包、只要 profile 还有登记就注销(`deploy.ps1` 只校验
+仓库 → profile 方向,反方向只有这里兜底);注销 junction 改用 `cmd /c rmdir`
+—— `Remove-Item -Recurse` 会走进 junction 目标。
 
 ### 本轮部署状态(2026-09-18,Web 端)
 

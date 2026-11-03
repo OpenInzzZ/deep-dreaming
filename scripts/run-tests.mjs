@@ -33,8 +33,6 @@ const CHECKS = [
   { path: 'patches/session-cleanup/tests/load-smoke.mjs', label: 'session-cleanup: real Cordis load' },
   { path: 'patches/dsh-project-memory/tests/plugin.smoke.mjs', label: 'project-memory: bridge + config' },
   { path: 'patches/dsh-project-memory/tests/client-contract.mjs', label: 'project-memory: memory cards' },
-  { path: 'patches/ui-settings-model-capabilities/verify-model-capabilities.mjs', label: 'model-capabilities: thinking + image rows' },
-  { path: 'patches/ui-settings-model-capabilities/tests/load-smoke.mjs', label: 'model-capabilities: real Cordis load' },
   { path: 'patches/ui-queue-tools/verify-queue-tools.mjs', label: 'queue-tools: dock + reorder' },
   { path: 'patches/ui-queue-tools/tests/load-smoke.mjs', label: 'queue-tools: real Cordis load' },
   { path: 'patches/temp-session/verify-temp-session.mjs', label: 'temp-session: host + button flow' },

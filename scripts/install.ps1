@@ -280,7 +280,6 @@ function Add-InsertRow([string]$Content, [string]$Id, [string]$Name) {
 # --- 1. profile-side junctions for the directory-package patches --------------
 $links = @(
     @{ n = 'dsh-plugin-session-cleanup';            d = 'session-cleanup' },
-    @{ n = 'dsh-client-ui-settings-model-capabilities'; d = 'ui-settings-model-capabilities' },
     @{ n = 'dsh-client-ui-queue-tools';             d = 'ui-queue-tools' },
     @{ n = 'dsh-client-ui-temp-session';             d = 'temp-session' },
     @{ n = 'dsh-client-whale-background';            d = 'whale-background' }
@@ -337,31 +336,40 @@ foreach ($dir in $mcpLinkDirs) {
 # The strip happens per patch inside step 3 (immediately before that patch's
 # bundle install) so a crash between the two steps can only ever leave ONE
 # patch without a row, and the removed block is stashed for restore on failure.
-$bundlePatchDirs = @('session-cleanup', 'ui-settings-model-capabilities', 'ui-queue-tools', 'temp-session', 'whale-background', 'dsh-project-memory', 'mcp-servers')
+$bundlePatchDirs = @('session-cleanup', 'ui-queue-tools', 'temp-session', 'whale-background', 'dsh-project-memory', 'mcp-servers')
 $removedRows = @{}
 $failed = 0
 
-# --- 2.4. Retire renamed bundles (old package name -> current directory) -------
-# A renamed bundle leaves BOTH of its old owners in the profile: a dependency
-# (pnpm link or `file:` copy into the profile's node_modules) and a
+# --- 2.4. Retire renamed or removed bundles (old package name -> row id) -------
+# A renamed or removed bundle leaves BOTH of its old owners in the profile: a
+# dependency (pnpm link or `file:` copy into the profile's node_modules) and a
 # `dsh.profile.bundles` entry. The old package directory is gone from the repo,
-# so the Loader cannot resolve the row it still owns and fails the whole profile
-# load. Retire the entry, the dependency and the stray junction HERE, before the
-# store is inspected, so an upgraded copy of the repo converges on one owner per
-# row exactly like a fresh clone does.
+# so the Loader cannot resolve the row it still owns and the row silently never
+# mounts (deploy.ps1 only checks the repo -> profile direction, never the
+# reverse). Retire the entry, the dependency and the stray junction HERE, before
+# the store is inspected, so an upgraded copy of the repo converges on one owner
+# per row exactly like a fresh clone does. `New = $null` means "no successor
+# package" (retired rather than renamed) and is always eligible.
 $renamedBundles = @(
     @{
         Old   = '@local/dsh-client-ui-settings-model-reasoning'
         RowId = 'ui-settings-model-reasoning'
-        New   = '@local/dsh-client-ui-settings-model-capabilities'
+        New   = $null
+    }
+    @{
+        Old   = '@local/dsh-client-ui-settings-model-capabilities'
+        RowId = 'ui-settings-model-capabilities'
+        New   = $null
     }
 )
 foreach ($rename in $renamedBundles) {
-    $active = $false
-    foreach ($dir in $bundlePatchDirs) {
-        $candidate = Join-Path $dev "patches\$dir\package.json"
-        if (-not (Test-Path $candidate)) { continue }
-        if ((Read-Utf8 $candidate | ConvertFrom-Json).name -eq $rename.New) { $active = $true; break }
+    $active = $null -eq $rename.New
+    if (-not $active) {
+        foreach ($dir in $bundlePatchDirs) {
+            $candidate = Join-Path $dev "patches\$dir\package.json"
+            if (-not (Test-Path $candidate)) { continue }
+            if ((Read-Utf8 $candidate | ConvertFrom-Json).name -eq $rename.New) { $active = $true; break }
+        }
     }
     if (-not $active) { continue }
 
@@ -395,10 +403,18 @@ foreach ($rename in $renamedBundles) {
         (Join-Path $profileDir ('node_modules\' + $rename.Old)),
         (Join-Path $localDir ($rename.Old -replace '^@local/', ''))
     )) {
-        if (Test-Path $stray) {
-            Remove-Item $stray -Recurse -Force -ErrorAction SilentlyContinue
-            Write-Host "  [FIX] removed stray link $stray"
+        if (-not (Test-Path $stray)) { continue }
+        $item = Get-Item $stray -Force
+        # A stray entry is a junction into the repo: rmdir removes the LINK
+        # itself, while `Remove-Item -Recurse` can walk INTO the target and take
+        # the patch directory with it. The tree is cyclic through node_modules
+        # anyway (AGENTS.md), so never recurse through one of these.
+        if ($item.LinkType) {
+            & cmd /c rmdir "$stray" 2>$null | Out-Null
+        } else {
+            Remove-Item -LiteralPath $stray -Recurse -Force -ErrorAction SilentlyContinue
         }
+        Write-Host "  [FIX] removed stray link $stray"
     }
 }
 
