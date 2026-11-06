@@ -60,8 +60,9 @@ loader 行来自包内 `patches/whale-background/cordis.patch.yml`(勿在 profil
 需重启 DSH 桌面端。验证路由是否在服务:
 
 ```powershell
-Invoke-WebRequest http://127.0.0.1:19387/whale-background.png -UseBasicParsing | Select-Object StatusCode, RawContentLength
-# 期望 200 且约 816 KB(image/png)
+# 端口随桌面端每次启动变化，先看运行中宿主的实际端口
+Invoke-WebRequest http://127.0.0.1:<port>/whale-background.png -UseBasicParsing | Select-Object StatusCode, RawContentLength
+# 期望 200 且约 504 KB(image/png)，903x1024 的 RGBA 图
 ```
 
 ## 测试
