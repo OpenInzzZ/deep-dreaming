@@ -1,4 +1,4 @@
-# session-cleanup: 按天数/容量定期清理归档会话日志（bundle 层行）。
+# session-cleanup: 为已归档会话提供手动物理删除（bundle 层行）。
 #
 # 本包声明了 dsh.bundle（package.json -> dsh.bundle.patch），此文件由 dsh 在
 # 加载 profile 时自动作为 bundle 层合成；**不要**再往 profile 的
@@ -7,12 +7,11 @@
 #
 # 行上的 config 是组合层默认值；设置卡片的用户修改写在设置文档里，
 # 优先级高于这里（见 session-cleanup.mjs 的配置分层注释）。
+#
+# 这里**只有** enabled 与 sessionsRoot 两个键：自动清理（保留天数 / 容量上限 /
+# 最少保留数 / 清理间隔 / 演练模式）已整体移除，写在这里也不会被读取。
 - insert:
     - id: session-cleanup
       name: '@local/dsh-plugin-session-cleanup'
       config:
-        maxAgeDays: 30
-        maxTotalMB: 1024
-        keepSessions: 5
-        intervalMinutes: 360
-        dryRun: false
+        enabled: true

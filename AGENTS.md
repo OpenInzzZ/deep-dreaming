@@ -44,7 +44,7 @@ deep-dreaming/
 │   └── test-deps.mjs              # Resolve react/jsdom for the verify scripts (repo → NODE_PATH → profile)
 ├── patches/                       # One directory per patch
 │   ├── dsh-project-memory/        # MCP Reference Memory bridge: guidance section + first-admitted-step auto-recall
-│   ├── session-cleanup/           # Auto-clean archived sessions by age/size
+│   ├── session-cleanup/           # Manual physical deletion of archived sessions
 │   ├── ui-queue-tools/            # Queue dock synced with official 0.2.1 + full-text preview + drag reorder
 │   ├── temp-session/              # Sidebar button for ad-hoc temp sessions
 │   ├── whale-background/          # Whale-girl background image in chat area
@@ -120,7 +120,7 @@ Every patch is a Cordis plugin with a host half and optionally a client (browser
 Every patch ships `locale/en.json` + `locale/zh.json` so the plugin management page and the settings plugin list show a real name and a real sentence instead of the package name and a technical English description:
 
 ```json
-{ "meta": { "title": "会话日志清理", "description": "按保留天数与磁盘总占用定期清理旧的会话日志……" } }
+{ "meta": { "title": "会话清理", "description": "手动删除已归档会话，释放磁盘占用……" } }
 ```
 
 - The reader is `readPluginMeta` (`packages/boot/app-boot/src/package-meta.ts`). It does **not** load the plugin: it resolves `<pkg>/locale/en.json` (the discovery entry; sibling `*.json` in that directory are the other languages) and `<pkg>/package.json` through the active Node resolver. **Both subpaths must be exported** or the whole thing silently falls back.

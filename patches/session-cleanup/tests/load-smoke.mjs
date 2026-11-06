@@ -12,37 +12,28 @@
  * mock `inject` returning the callback result masks the thenable semantics.
  *
  * Also guards:
- *  - the entry config is validated against `plugin.Config` (an intervalMinutes
- *    of 0 must be rejected by the `.min(1)` bound);
+ *  - the plugin registers NO timer: the automatic-cleanup feature was removed
+ *    on request, so loading must leave the process with nothing scheduled;
  *  - the transport is a fenced PREFIX route on the `webServer` service, which
- *    is a DECLARED dependency of the plugin's `ctx.inject` gate — never a
- *    `connection.rpc` channel, which dsh 0.1.5-rc.1 cannot register for a
- *    plugin outside the connection package (`HostConnectionService.register`
- *    ends in `owner.effect(() => owner.webServer.register(route))` on an
- *    `owner` that never declared `webServer`) — registered through `ctx.effect`
- *    so it is released with the fiber, and really answering a `POST` end to end
- *    (`getConfig` from the entry config). Declaring the carrier is what makes
- *    the registration unconditional: an optional `ctx.get('webServer')` read
- *    inside the callback races the carrier's later binding, sees `undefined`
- *    and silently drops the page's transport;
- *  - `enabled: false` loads without registering anything;
- *  - a boot whose `webServer` service arrives LATE still registers the route
- *    when it appears (the child fiber waits, it never skips).
+ *    is a DECLARED dependency — never a `connection.rpc` channel, which dsh
+ *    0.1.5-rc.1 cannot register for a plugin outside the connection package;
+ *  - `listArchived` reads the archive set from `workspaceRegistry`, never
+ *    guesses it from directory names;
+ *  - `deleteArchived` refuses a live session and deletes an archived one end
+ *    to end over the real route;
+ *  - `enabled: false` refuses deletion;
+ *  - a boot whose `webServer` arrives LATE still registers the route.
  *
  * @deepseek-ai/cordis resolution: this file resolves packages from the patch
- * dir's node_modules (`npm install` in patches/session-cleanup installs
- * @deepseek-ai/cordis + @deepseek-ai/schemastery as dev/peer deps), so no
- * NODE_PATH is needed:
+ * dir's node_modules or the deployed profile tree (~/.dsh/profiles/node_modules).
  *   node patches/session-cleanup/tests/load-smoke.mjs
- * Fallbacks (in order): ancestor node_modules of this patch, `$NODE_PATH`
- * entries, then the deployed profile tree `~/.dsh/profiles/node_modules`.
  */
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join, delimiter } from 'node:path'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -65,22 +56,14 @@ function resolveCordisEntry() {
   } catch {}
   throw new Error(
     "cannot resolve '@deepseek-ai/cordis' from this patch, $NODE_PATH, or the deployed profile " +
-    'node_modules; run `npm install` in the patch dir or point NODE_PATH at a node_modules that ' +
-    'contains it (e.g. C:\\Users\\98645\\.dsh\\profiles\\node_modules)',
+    'node_modules; run `npm install` in the patch dir or point NODE_PATH at a node_modules that contains it',
   )
 }
 
 const { Context } = await import(pathToFileURL(resolveCordisEntry()).href)
 const host = await import(pathToFileURL(hostPath).href)
 
-/**
- * `webServer` service double.
- *
- * `service` is the plain object handed to `ctx.provide()`; the assertions drive
- * the routes captured from THAT object, never from `ctx.get('webServer')`,
- * which Cordis wraps in a traceable proxy whose `on()`/`register()` calls are
- * intercepted.
- */
+/** `webServer` service double; routes are driven from THIS object, not from ctx.get(). */
 const makeWebServer = () => {
   const routes = []
   let disposers = 0
@@ -101,13 +84,7 @@ const makeWebServer = () => {
   }
 }
 
-/**
- * Drive one registered prefix route with a fake req/res.
- *
- * The route registers its request listeners synchronously and answers from a
- * promise continuation, so the body is delivered only after `handler()`
- * returned and the helper resolves when `res.end()` really happened.
- */
+/** Drive one registered prefix route with a fake req/res. */
 const postRoute = async (route, pathname, payload, headers = {}) => {
   let settle
   const done = new Promise((resolve) => { settle = resolve })
@@ -152,10 +129,29 @@ const postRoute = async (route, pathname, payload, headers = {}) => {
   ])
 }
 
+const callRoute = async (route, endpoint, args) => {
+  const res = await postRoute(route, `/session-cleanup/${endpoint}`, { args })
+  return { status: res.status, envelope: JSON.parse(res.body) }
+}
+
+/** Build a fake session directory tree under a temp root. */
+const makeSessionDir = (root, project, dirName) => {
+  const dir = join(root, project, dirName)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'session.v4.jsonl.zstd'), Buffer.alloc(256, 0x61))
+  return dir
+}
+
 // --- enabled: true — provide the services, then load for real -------------------
 const sessionsRoot = mkdtempSync(join(tmpdir(), 'cleanup-smoke-'))
-const ctx = new Context()
+const archivedOwned = 'session-archived-owned-1'
+const archivedLive = 'session-archived-live-2'
+const notArchived = 'session-not-archived-3'
+const archivedDir = makeSessionDir(sessionsRoot, 'proj-a', archivedOwned)
+makeSessionDir(sessionsRoot, 'proj-a', archivedLive)
+makeSessionDir(sessionsRoot, 'proj-a', notArchived)
 
+const ctx = new Context()
 const connectionCalls = []
 ctx.provide('connection', {
   rpc: {
@@ -166,95 +162,164 @@ ctx.provide('connection', {
     },
   },
 })
-ctx.provide('sessions', { list: () => [] })
+ctx.provide('sessions', { list: () => [{ id: archivedLive }] })
+// The archive set is the single authority for "archived" — never a guess.
+ctx.provide('workspaceRegistry', { archivedSessionIds: [archivedOwned, archivedLive] })
 
 const webServer = makeWebServer()
 ctx.provide('webServer', webServer.service)
 
-// Same call the DSH host loader makes: ctx.plugin(module) -> resolve ->
-// apply(ctx). `await` settles once loading finished; with the historical bug
-// this rejects with TypeError('Invalid effect').
-const fiber = ctx.plugin(host, {
-  enabled: true,
-  dryRun: true,
-  sessionsRoot,
-  maxAgeDays: 30,
-  maxTotalMB: 0,
-  keepSessions: 5,
-  intervalMinutes: 360,
-})
+const fiber = ctx.plugin(host, { enabled: true, sessionsRoot })
 await fiber
 
 assert.equal(connectionCalls.length, 0, 'the host half must not call ctx.connection.rpc.handle any more')
 assert.equal(webServer.routes.length, 1, `webServer.register must be called exactly once, got ${webServer.routes.length}`)
 assert.equal(webServer.routes[0].path, '/session-cleanup')
 assert.equal(webServer.routes[0].kind, 'prefix', 'a prefix route is what the page POSTs /<channel>/<endpoint> to')
+const route = webServer.routes[0]
 
-// The registered handler is the real one and still works end-to-end.
-const gotRes = await postRoute(webServer.routes[0], '/session-cleanup/getConfig', { args: {} })
-assert.equal(gotRes.status, 200, `route must answer 200, got ${gotRes.status} (${gotRes.body})`)
-assert.equal(gotRes.headers['content-type'], 'application/json')
-const got = JSON.parse(gotRes.body)
-assert.equal(got.ok, true)
-assert.equal(got.value.dryRun, true)
-assert.equal(got.value.intervalMinutes, 360)
-
-// An unknown endpoint keeps the unchanged failure envelope, still HTTP 200.
-// (Without a settings service the handler reports `settings-unavailable` first,
-// in the same order the old RPC handler did; the `bad-request` spelling is
-// asserted in verify-session-cleanup.mjs, which owns a settings double.)
-const unknownRes = await postRoute(webServer.routes[0], '/session-cleanup/nope', {})
-const unknown = JSON.parse(unknownRes.body)
-assert.equal(unknownRes.status, 200)
-assert.equal(unknown.ok, false)
-assert.equal(unknown.error.code, 'settings-unavailable')
-
-// The entry config is validated against plugin.Config: intervalMinutes 0 must
-// be rejected (the .min(1) bound) instead of spinning a 1ms interval.
-await assert.rejects(
-  async () => { await ctx.plugin(host, { enabled: true, intervalMinutes: 0, sessionsRoot }) },
-  /intervalMinutes/i,
-  'intervalMinutes 0 must be rejected by the Config schema',
+// No timer may be scheduled: automatic cleanup was removed on request.
+assert.equal(
+  fiber.ctx.get('timer') ?? undefined, undefined,
+  'the plugin must not require the timer service',
 )
+
+// getConfig still answers end-to-end from the entry config.
+{
+  const { status, envelope } = await callRoute(route, 'getConfig')
+  assert.equal(status, 200)
+  assert.equal(envelope.ok, true)
+  assert.equal(envelope.value.enabled, true)
+  assert.equal(envelope.value.sessionsRoot, sessionsRoot)
+  // The removed automatic-cleanup knobs must be gone from the resolved config.
+  for (const gone of ['maxAgeDays', 'maxTotalMB', 'keepSessions', 'intervalMinutes', 'dryRun']) {
+    assert.equal(gone in envelope.value, false, `config must no longer expose ${gone}`)
+  }
+}
+
+// listArchived lists ONLY the archive set, marking the live one undeletable.
+{
+  const { envelope } = await callRoute(route, 'listArchived')
+  assert.equal(envelope.ok, true)
+  const ids = envelope.value.items.map((item) => item.id).sort()
+  assert.deepEqual(ids, [archivedOwned, archivedLive].sort(), 'only archived sessions may be listed')
+  const live = envelope.value.items.find((item) => item.id === archivedLive)
+  const owned = envelope.value.items.find((item) => item.id === archivedOwned)
+  assert.equal(live.live, true)
+  assert.equal(live.deletable, false)
+  assert.equal(owned.live, false)
+  assert.equal(owned.deletable, true)
+  assert.ok(envelope.value.totalBytes > 0)
+}
+
+// A live session is refused even though it is archived.
+{
+  const { envelope } = await callRoute(route, 'deleteArchived', { ids: [archivedLive] })
+  assert.equal(envelope.ok, true)
+  assert.equal(envelope.value.removed.length, 0)
+  assert.equal(envelope.value.refused[0].reason, 'live')
+  assert.equal(existsSync(join(sessionsRoot, 'proj-a', archivedLive)), true)
+}
+
+// An unarchived session is refused.
+{
+  const { envelope } = await callRoute(route, 'deleteArchived', { ids: [notArchived] })
+  assert.equal(envelope.value.refused[0].reason, 'not-archived')
+  assert.equal(existsSync(join(sessionsRoot, 'proj-a', notArchived)), true)
+}
+
+// The archived, non-live session is really deleted.
+{
+  const { envelope } = await callRoute(route, 'deleteArchived', { ids: [archivedOwned] })
+  assert.equal(envelope.ok, true)
+  assert.equal(envelope.value.removed.length, 1)
+  assert.equal(envelope.value.removed[0].id, archivedOwned)
+  assert.ok(envelope.value.freedBytes > 0)
+  assert.equal(existsSync(archivedDir), false, 'the whole session directory must be gone')
+}
+
+// A malformed delete request is refused before touching the filesystem.
+{
+  const { envelope } = await callRoute(route, 'deleteArchived', { ids: [] })
+  assert.equal(envelope.ok, false)
+  assert.equal(envelope.error.code, 'bad-request')
+}
+
+// The entry config is validated against plugin.Config. The old `intervalMinutes`
+// bound is gone with the feature, so an unknown key is simply ignored rather
+// than rejecting the whole entry. This runs on its OWN context so it cannot
+// disturb the route/disposer accounting above.
+{
+  const ctxX = new Context()
+  const webX = makeWebServer()
+  ctxX.provide('webServer', webX.service)
+  ctxX.provide('sessions', { list: () => [] })
+  ctxX.provide('workspaceRegistry', { archivedSessionIds: [] })
+  const accepted = ctxX.plugin(host, { enabled: true, sessionsRoot, intervalMinutes: 0 })
+  await accepted
+  assert.equal(webX.routes.length, 1, 'an unknown legacy key must not prevent the plugin from loading')
+  await accepted.dispose()
+  assert.equal(webX.routes.length, 0)
+}
 
 await fiber.dispose()
 assert.equal(webServer.routes.length, 0, 'dispose must run the route disposer')
 assert.equal(webServer.disposeCount(), 1, 'the route disposer must run exactly once')
 rmSync(sessionsRoot, { recursive: true, force: true })
 
-// --- enabled: false — apply returns early without registering --------------------
-const ctx2 = new Context()
-const web2 = makeWebServer()
-ctx2.provide('webServer', web2.service)
-ctx2.provide('sessions', { list: () => [] })
-const fiber2 = ctx2.plugin(host, { enabled: false })
-await fiber2 // must settle without TypeError('Invalid effect') and without registering
-assert.equal(web2.routes.length, 0, 'enabled:false must not register any route')
-await fiber2.dispose()
+// --- enabled: false — the route exists but refuses to delete --------------------
+{
+  const root2 = mkdtempSync(join(tmpdir(), 'cleanup-smoke-off-'))
+  try {
+    const id = 'session-off-1'
+    const dir = makeSessionDir(root2, 'p', id)
+    const ctx2 = new Context()
+    const web2 = makeWebServer()
+    ctx2.provide('webServer', web2.service)
+    ctx2.provide('sessions', { list: () => [] })
+    ctx2.provide('workspaceRegistry', { archivedSessionIds: [id] })
+    const fiber2 = ctx2.plugin(host, { enabled: false, sessionsRoot: root2 })
+    await fiber2
+    const route2 = web2.routes[0]
+    assert.ok(route2, 'the transport stays registered even when disabled, so the page can report why')
+
+    const listed = await callRoute(route2, 'listArchived')
+    assert.equal(listed.envelope.ok, true)
+    assert.equal(listed.envelope.value.disabled, true)
+    assert.equal(listed.envelope.value.items.length, 0)
+
+    const deleted = await callRoute(route2, 'deleteArchived', { ids: [id] })
+    assert.equal(deleted.envelope.ok, false)
+    assert.equal(deleted.envelope.error.code, 'disabled')
+    assert.equal(existsSync(dir), true, 'a disabled plugin must never delete anything')
+
+    await fiber2.dispose()
+  } finally {
+    rmSync(root2, { recursive: true, force: true })
+  }
+}
 
 // --- no `webServer` service yet: the transport WAITS for it ----------------------
-// The regression this fix removes: with the carrier read as an optional
-// `ctx.get('webServer')`, a plugin activated before the carrier was bound saw
-// `undefined` and silently registered nothing. With `webServer` declared, the
-// child fiber instead waits, and the route appears the moment the service does.
-const ctx3 = new Context()
-ctx3.provide('sessions', { list: () => [] })
-const web3 = makeWebServer()
-const fiber3 = ctx3.plugin(host, { enabled: true, dryRun: true, sessionsRoot: tmpdir(), intervalMinutes: 360, maxAgeDays: 0, maxTotalMB: 0, keepSessions: 0 })
-await fiber3 // must settle without TypeError('Invalid effect')
-// No carrier yet, so the inject callback has not run at all: nothing registered.
-await new Promise((resolve) => setTimeout(resolve, 100))
-assert.equal(web3.routes.length, 0, 'with no webServer the gate must not have run: nothing may be registered')
+{
+  const ctx3 = new Context()
+  ctx3.provide('sessions', { list: () => [] })
+  ctx3.provide('workspaceRegistry', { archivedSessionIds: [] })
+  const web3 = makeWebServer()
+  const fiber3 = ctx3.plugin(host, { enabled: true, sessionsRoot: tmpdir() })
+  await fiber3
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  assert.equal(web3.routes.length, 0, 'with no webServer the gate must not have run: nothing may be registered')
 
-ctx3.provide('webServer', web3.service)
-const lateDeadline = Date.now() + 2000
-while (web3.routes.length === 0 && Date.now() < lateDeadline) {
-  await new Promise((resolve) => setTimeout(resolve, 5))
+  ctx3.provide('webServer', web3.service)
+  const deadline = Date.now() + 2000
+  while (web3.routes.length === 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  assert.equal(web3.routes.length, 1, `a LATE webServer must still activate the transport, got ${web3.routes.length} route(s)`)
+  assert.equal(web3.routes[0].path, '/session-cleanup')
+  assert.equal(web3.routes[0].kind, 'prefix')
+  await fiber3.dispose()
+  assert.equal(web3.routes.length, 0, 'dispose must unregister the late-registered route')
 }
-assert.equal(web3.routes.length, 1, `a LATE webServer must still activate the transport, got ${web3.routes.length} route(s)`)
-assert.equal(web3.routes[0].path, '/session-cleanup')
-assert.equal(web3.routes[0].kind, 'prefix')
-await fiber3.dispose()
-assert.equal(web3.routes.length, 0, 'dispose must unregister the late-registered route')
 
-console.log('load-smoke OK: real Cordis ctx.plugin() loaded session-cleanup.mjs; /session-cleanup registered as a prefix route on the DECLARED webServer dependency, answered a real POST, disposed with the fiber, Config validates, enabled:false registers nothing, and a LATE webServer still activates the transport')
+console.log('load-smoke OK: real Cordis ctx.plugin() loaded session-cleanup.mjs; no timer is registered; /session-cleanup is a prefix route on the DECLARED webServer dependency; listArchived reads the workspaceRegistry archive set; deleteArchived refuses live and unarchived sessions, deletes an archived one end to end, and enabled:false refuses everything; a LATE webServer still activates the transport')

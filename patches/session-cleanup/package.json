@@ -1,8 +1,8 @@
 {
   "name": "@local/dsh-plugin-session-cleanup",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
-  "description": "User-level plugin: periodically clean archived dsh session logs by age / total size, skipping live sessions; settings editable in Plugins settings",
+  "description": "User-level plugin: manually delete archived dsh sessions to reclaim disk space, from a settings page list and a session context-menu action. Confirmation first; no automatic cleanup.",
   "type": "module",
   "main": "session-cleanup.mjs",
   "exports": {

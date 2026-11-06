@@ -1,32 +1,35 @@
 /**
- * session-cleanup —— DeepSeek Harness 会话日志自动清理插件
+ * session-cleanup —— DeepSeek Harness 归档会话物理删除插件
  *
- * 按保留天数 / 总大小上限定期清理 $DSH_HOME/sessions 下的归档会话，
- * 跳过当前活跃会话。通过 cordis.patch.yml 的 insert 装载。
+ * 本插件**不再做任何自动清理**：没有定时器、没有保留天数、没有容量上限。
+ * 它只为「已归档会话」提供手动物理删除：
  *
- * 配置来源(优先级从低到高):schema 默认值 < 组合层 entry 配置
- * (cordis.patch.yml 的 config)< 设置文档的用户层。0.2.x 的 settings 服务
- * 没有 `register()`:字段标 `.volatile()` 后用户层由配置文档承载,
- * `settings.describe()` 读、`settings.update()/replace()` 写(命名空间就是
- * loader entry id `session-cleanup`),保存后即时生效(定时器按新间隔重建)。
- * settings 服务不存在时回退到组合层配置,行为与旧版一致。
+ *   - 设置页「会话清理」列出所有已归档会话（含占用大小与所在目录），
+ *     可逐条或批量删除，删除前有二次确认；
+ *   - 侧边栏会话行的右键菜单在会话已归档时出现「删除归档会话」。
  *
- * 配置项:
- *   enabled: boolean        插件开关 (默认 true)
- *   maxAgeDays: number      超过该天数的会话可删 (默认 30, 0 = 不按天数清理)
- *   maxTotalMB: number      会话目录总占用上限 MB (默认 1024, 0 = 不限制)
- *   keepSessions: number    最少保留的会话数 (默认 5)
- *   intervalMinutes: number 清理间隔分钟 (默认 360)
- *   dryRun: boolean         演练模式, 只报告不删除 (默认 false)
- *   sessionsRoot: string    会话根目录 (默认 $DSH_HOME/sessions)
+ * 「已归档」的权威来源是 `workspaceRegistry.archivedSessionIds`（官方
+ * 「归档会话」写的那份持久集合），**不是**目录名推测。只有同时满足
+ * 「在归档集合里」且「不是活跃会话」的会话才会被删除。
  *
- * 浏览器半(设置页的配置卡片)经 webServer 上的前缀路由
- * `POST /session-cleanup/<endpoint>` 读写配置(getConfig / setConfig /
- * resetConfig),见 createRpcRoute —— dsh 0.1.5-rc.1 的
- * `ctx.connection.rpc.handle` 对连接包之外的插件必然抛错,不能用。
+ * 删除粒度是**整个会话目录** `<sessionsRoot>/<projectKey>/<encodeSegment(id)>/`
+ * ——与官方 `session-persistence-jsonl` 的 `sessionDir()` 一致。因此删除的
+ * 不只是日志，还包括该会话目录下的其它产物（附件、检查点等）。这一点在
+ * UI 的确认弹窗里如实告知。
+ *
+ * 数据通道是本插件自己的 fenced 前缀路由 `POST /session-cleanup/<endpoint>`：
+ *   getConfig      读取当前配置
+ *   setConfig      写入配置
+ *   resetConfig    恢复默认
+ *   listArchived   列出已归档会话（带大小、目录、活跃标记）
+ *   deleteArchived 物理删除指定已归档会话（`{ ids: string[] }`）
+ *
+ * dsh 0.1.5-rc.1 起 `ctx.connection.rpc.handle` 对连接包之外的插件必然抛
+ * `cannot get property "webServer" without inject`，所以传输一律走
+ * webServer 上自注册的前缀路由（见 createRpcRoute）。
  */
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, resolve, sep, isAbsolute, dirname } from 'node:path'
 import { readdir, rm, stat } from 'node:fs/promises'
 import z from '@deepseek-ai/schemastery'
 import { isVolatile } from '@deepseek-ai/cosmokit'
@@ -36,38 +39,26 @@ export const name = 'session-cleanup'
 export const SETTINGS_NAMESPACE = 'session-cleanup'
 
 /**
- * Settings schema: defaults here are the floor; the entry config and the
- * user document layer resolve above them.
+ * Settings schema.
  *
- * The export name must be exactly `Config`: the Cordis loader reads
- * `plugin.Config` (vendor/cordis registry.ts) to validate the entry config;
- * any other export name silently skips validation.
+ * 自动清理的字段已全部移除（用户要求不再自动删会话），只剩两个：
+ *   enabled    插件总开关；关闭后设置页隐藏、右键菜单项不出现、删除端点拒绝
+ *   sessionsRoot 会话根目录（默认 $DSH_HOME/sessions）
  *
- * Every field is `.volatile()`. The Host derives the settings section from
- * `volatileForm(Config)` (`settings/src/index.ts`), skips an entry whose form
- * is empty, and refuses a write to an unmarked field with
- * `Config field "x" is not volatile`. The other half of that contract: once
- * marked, the validated value is a `{ get }` accessor box, so `plainConfig()`
- * must unwrap it before any arithmetic (same idiom as `llm-deepseek`'s
- * `plainOptions()`).
+ * 导出名必须是 `Config`：Cordis loader 读的是 `plugin.Config`，换成别的名字
+ * 会静默跳过校验。字段必须 `.volatile()`：设置分区由 `volatileForm(Config)`
+ * 派生，未标记的字段会让整张卡「有卡片无表单」（`has no volatile fields`），
+ * 且写入时报 `Config field "x" is not volatile`。
  */
 export const Config = z.object({
   enabled: z.boolean().default(true).volatile(),
-  maxAgeDays: z.number().default(30).volatile(),
-  maxTotalMB: z.number().default(1024).volatile(),
-  keepSessions: z.number().default(5).volatile(),
-  // 0 would make setInterval spin at ~1ms; 1 minute is the sane floor.
-  intervalMinutes: z.number().min(1).default(360).volatile(),
-  dryRun: z.boolean().default(false).volatile(),
   sessionsRoot: z.string().default('').volatile(),
 })
 
 /**
- * Unwrap schemastery `.volatile()` accessors into a plain object.
- * Passing the box downstream turns every field into an object: `enabled` would
- * always be truthy and `intervalMinutes` arithmetic would be `NaN`.
- * @param config - validated entry config whose volatile fields are `{ get }` boxes.
- * @returns the same fields as plain values.
+ * 把 schemastery `.volatile()` 的 `{ get }` 盒子解成普通值。
+ * 不解盒子会导致 `enabled` 恒为真、任何算术都是 NaN。
+ * @param config - 校验过的 entry 配置。
  */
 export function plainConfig(config) {
   return Object.fromEntries(
@@ -77,34 +68,24 @@ export function plainConfig(config) {
 
 export const DEFAULTS = {
   enabled: true,
-  maxAgeDays: 30,
-  maxTotalMB: 1024,
-  keepSessions: 5,
-  intervalMinutes: 360,
-  dryRun: false,
   sessionsRoot: undefined,
 }
 
 /**
- * 会话目录名不再是固定前缀。
- *
- * 官方布局是 `<sessionsRoot>/<projectKey(cwd)>/<encodeSegment(id)>/`
- * (`session-persistence-jsonl/src/format.ts` 的 `sessionDir`)，而 `id` 有两种
- * 铸造方式：会话控制器用 `session-${randomUUID()}`，子智能体/分叉/agent-team
- * 等路径直接用裸 `randomUUID()`。旧实现写死 `/^session-/`，实测本机 28 个会话
- * 目录里只认得 6 个 —— 剩下 22 个(含最旧的那个)永远清不掉。
- *
- * 所以改成**排除法**：跳过隐藏项与官方那个非会话的 `_no-cwd` 桶，其余目录一律
- * 视为候选。这比再猜一遍命名规则安全：猜错只是少扫，而少扫是静默的。
+ * 非会话的桶目录：官方 `_no-cwd` 不是某次会话的目录。
+ * 隐藏项（`.` 开头）同样跳过。
  */
 const NON_SESSION_DIRS = new Set(['_no-cwd'])
 
 /**
- * `SessionId` -> 目录名，与官方 `encodeSegment` 同构(`format.ts:199`)。
+ * `SessionId` -> 目录名，与官方 `encodeSegment` 同构。
  *
- * 必须自己实现一份：补丁宿主端只 import `@deepseek-ai/schemastery`，且这个
- * 转换要参与"绝不删活跃会话"的判断。安全字符(`A-Za-z0-9._-`)原样保留，其余
- * 按 UTF-16 码元写成 `~XXXX`；`.` 与 `..` 特判，防止目录穿越。
+ * 必须自己实现一份：宿主端只 import schemastery/cosmokit，而这个转换要参与
+ * 「绝不删活跃会话」的判断。安全字符 `A-Za-z0-9._-` 原样保留，其余按 UTF-16
+ * 码元写成 `~XXXX`；`.` 与 `..` 特判防目录穿越。
+ *
+ * 官方实现见 `packages/session/session-persistence-jsonl/src/format.ts`，
+ * 本函数与之逐字符一致，并已由测试守住。
  */
 export function encodeSegment(raw) {
   if (typeof raw !== 'string' || raw.length === 0) return ''
@@ -121,12 +102,13 @@ export function encodeSegment(raw) {
 }
 
 /**
- * 这个目录是不是活跃会话的日志目录？
+ * 这个目录名是不是某个活跃会话的日志目录？
  *
- * 关键安全判断：官方把 id 编码成目录名，所以目录名可能是 id 本身
- * (`session-<uuid>` 全为安全字符)、也可能是它的 `encodeSegment` 形态。只比
- * 其中一种，另一种形态下的**活跃会话会被当成陈旧日志删掉**。两种都接受，
- * 宁可少删不可误删。
+ * 目录名可能是 id 本身（`session-<uuid>` 全是安全字符），也可能是它的
+ * `encodeSegment` 形态。只比其中一种，另一种形态下的活跃会话会被误删，
+ * 所以两种都接受——宁可少删，不可误删。
+ * @param name - 磁盘上的目录名。
+ * @param liveSessionIds - 当前活跃会话 id 集合。
  */
 export function isLiveSessionDir(name, liveSessionIds) {
   if (typeof name !== 'string' || name.length === 0) return false
@@ -145,7 +127,10 @@ export function resolveSessionsRoot(configured) {
   return join(home, 'sessions')
 }
 
-/** 统计一个会话目录的总字节数与最后修改时间 */
+/**
+ * 统计一个会话目录的总字节数与最后修改时间。
+ * @param dir - 会话目录绝对路径。
+ */
 async function statSessionDir(dir) {
   let size = 0
   let mtimeMs = 0
@@ -167,144 +152,177 @@ async function statSessionDir(dir) {
 }
 
 /**
- * 执行一次清理。纯函数核心, 不依赖 Cordis, 便于独立测试。
- * @returns {{ scanned, removed, skippedLive, kept, freedBytes, totalBytes, errors }}
+ * 定位一个已归档会话的磁盘目录。
+ *
+ * 只做**按 id 的精确匹配**：候选名是 `id` 与其 `encodeSegment(id)` 两种形态，
+ * 逐个项目目录查找。命中多个时视为歧义并全都返回，由调用方拒绝删除——
+ * 删错一个会话的代价远高于删不掉。
+ *
+ * @param sessionsRoot - 会话根目录。
+ * @param id - 会话 id（来自归档集合）。
+ * @returns 命中的会话目录列表（通常 0 或 1 个）。
  */
-export async function runCleanup(sessionsRoot, options = {}, liveSessionIds = new Set(), now = Date.now()) {
-  const cfg = { ...DEFAULTS, ...options }
-  const result = { scanned: 0, removed: [], kept: [], skippedLive: 0, freedBytes: 0, totalBytes: 0, errors: [] }
-  const candidates = []
-
-  // 1. 扫描 <root>/<project>/<session-*>/ 结构
-  const projects = await readdir(sessionsRoot, { withFileTypes: true }).catch((e) => {
-    result.errors.push(`scan root: ${e.message}`)
-    return []
-  })
+export async function locateSessionDirs(sessionsRoot, id) {
+  if (typeof id !== 'string' || id.length === 0) return []
+  const wanted = new Set([id, encodeSegment(id)])
+  const found = []
+  const projects = await readdir(sessionsRoot, { withFileTypes: true }).catch(() => [])
   for (const project of projects) {
     if (!project.isDirectory()) continue
     const projectDir = join(sessionsRoot, project.name)
-    const entries = await readdir(projectDir, { withFileTypes: true }).catch((e) => {
-      result.errors.push(`scan ${project.name}: ${e.message}`)
-      return []
-    })
+    const entries = await readdir(projectDir, { withFileTypes: true }).catch(() => [])
     for (const entry of entries) {
-      if (!entry.isDirectory() || entry.name.startsWith('.') || NON_SESSION_DIRS.has(entry.name)) continue
-      const sessionDir = join(projectDir, entry.name)
-      const { size, mtimeMs } = await statSessionDir(sessionDir).catch((e) => {
-        result.errors.push(`stat ${project.name}/${entry.name}: ${e.message}`)
-        return { size: 0, mtimeMs: 0 }
-      })
-      result.scanned += 1
-      result.totalBytes += size
-      if (isLiveSessionDir(entry.name, liveSessionIds)) {
-        result.skippedLive += 1
-        continue
-      }
-      candidates.push({ key: `${project.name}/${entry.name}`, sessionDir, projectDir, id: entry.name, size, mtimeMs })
+      if (!entry.isDirectory() || !wanted.has(entry.name)) continue
+      found.push({ project: project.name, name: entry.name, dir: join(projectDir, entry.name) })
     }
   }
-
-  // 2. 新 -> 旧 排序
-  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
-
-  // 3. 规则 A: 超龄删除 (仅对超出 keepSessions 的最旧部分生效)
-  const remove = new Set()
-  if (cfg.maxAgeDays > 0 && candidates.length > cfg.keepSessions) {
-    const excess = candidates.slice(cfg.keepSessions)
-    const cutoff = now - cfg.maxAgeDays * 86_400_000
-    for (const c of excess) {
-      if (c.mtimeMs < cutoff) remove.add(c.key)
-    }
-  }
-
-  // 4. 规则 B: 总占用超上限时按最旧优先删
-  // 统计口径 = 本次清理后仍会留在磁盘上的候选体积: 规则 A 已选中的会话这一轮
-  // 必定被删, 先把它们的体积从总量里扣除, 否则容量判断偏高、会比实际需要多删。
-  // 活跃会话在上面就 `continue` 了, 从不进入 candidates, 本就不参与该总量
-  // (result.totalBytes 仍统计包含活跃会话的全部占用, 仅用于报告)。
-  if (cfg.maxTotalMB > 0) {
-    const cap = cfg.maxTotalMB * 1024 * 1024
-    const survivors = candidates.filter((c) => !remove.has(c.key))
-    let total = survivors.reduce((sum, c) => sum + c.size, 0)
-    for (const c of survivors.reverse()) {
-      if (total <= cap) break
-      remove.add(c.key)
-      total -= c.size
-    }
-  }
-
-  // 5. 执行删除 (最旧优先)
-  const emptyProjects = new Set()
-  for (const c of [...candidates].reverse()) {
-    if (!remove.has(c.key)) {
-      result.kept.push({ id: c.id, project: c.projectDir.split(/[\\/]/).pop(), size: c.size })
-      continue
-    }
-    if (cfg.dryRun) {
-      result.removed.push({ id: c.id, dryRun: true, size: c.size, ageDays: Math.round((now - c.mtimeMs) / 86_400_000) })
-      continue
-    }
-    try {
-      await rm(c.sessionDir, { recursive: true, force: true })
-      result.removed.push({ id: c.id, size: c.size })
-      result.freedBytes += c.size
-      emptyProjects.add(c.projectDir)
-    } catch (e) {
-      result.errors.push(`remove ${c.key}: ${e.message}`)
-    }
-  }
-
-  // 6. 清理已空的项目目录 (非演练模式)
-  if (!cfg.dryRun) {
-    for (const projectDir of emptyProjects) {
-      // readdir/rm failures here are best-effort: the next interval tick
-      // re-scans and retries, and a vanished dir is a success by definition.
-      const rest = await readdir(projectDir).catch(() => [])
-      if (rest.length === 0) await rm(projectDir, { recursive: true, force: true }).catch(() => {})
-    }
-  }
-
-  return result
-}
-
-/** 渲染清理报告 (供日志输出) */
-export function summarize(result) {
-  const lines = [
-    `scanned=${result.scanned} liveSkipped=${result.skippedLive} kept=${result.kept.length} totalBytes=${result.totalBytes}`,
-  ]
-  if (result.removed.length > 0) {
-    lines.push(`removed=${result.removed.length} freedBytes=${result.freedBytes} (${result.removed.map((r) => `${r.id}${r.dryRun ? '[dry]' : ''}`).join(', ')})`)
-  } else {
-    lines.push('removed=0')
-  }
-  if (result.errors.length > 0) lines.push(`errors=${result.errors.length}: ${result.errors.join(' | ')}`)
-  return lines.join(' | ')
+  return found
 }
 
 /**
- * Attach the optional settings-document layer.
+ * 列出全部已归档会话及其磁盘占用。
  *
- * 0.2.x's `settings` service is `SettingsForms`, and it has NO `register()`:
- * the section is derived from the loader entry's `Config` (its namespace IS the
- * entry id), the resolved values are read with `describe()`, and a write goes
- * through `update(ns, patch)` / `replace(ns, section)` into the profile
- * configuration document. Each accepted write re-emits
- * `settings/document-updated`, which rebuilds the timer here — that is what
- * makes the card's `applies: live` claim true.
+ * `archivedIds` 必须是 `workspaceRegistry.archivedSessionIds`；本函数不自行
+ * 推断归档状态。没有对应目录的归档记录也会列出（`missing: true`），
+ * 让用户看到「归档但日志已不在」的残留，但这类条目不可删。
  *
- * The FIRST `describe()` runs eagerly and uncaught: a settings provider that
- * cannot describe at all is exactly the failure the route-before-settings
- * ordering protects against (Cordis disposes the failing child fiber's own
- * effects, not the parent's route). Reads after activation fail soft to the
- * composition entry config, so a later provider hiccup cannot 500 the card.
+ * @param sessionsRoot - 会话根目录。
+ * @param archivedIds - 归档集合（权威来源）。
+ * @param liveSessionIds - 活跃会话 id 集合，命中即标记 live 且不可删。
+ * @returns `{ items, totalBytes, truncated }`。
+ */
+export async function listArchived(sessionsRoot, archivedIds, liveSessionIds = new Set()) {
+  const items = []
+  let totalBytes = 0
+  for (const id of archivedIds) {
+    const dirs = await locateSessionDirs(sessionsRoot, id)
+    for (const found of dirs) {
+      const { size, mtimeMs } = await statSessionDir(found.dir).catch(() => ({ size: 0, mtimeMs: 0 }))
+      const live = isLiveSessionDir(found.name, liveSessionIds)
+      items.push({
+        id,
+        project: found.project,
+        dir: found.dir,
+        size,
+        mtimeMs,
+        live,
+        deletable: !live,
+      })
+      totalBytes += size
+    }
+    if (dirs.length === 0) {
+      items.push({ id, project: null, dir: null, size: 0, mtimeMs: 0, live: false, deletable: false, missing: true })
+    }
+  }
+  return { items, totalBytes }
+}
+
+/**
+ * 删除一组已归档会话目录。
  *
- * `isUnloading` mirrors the official guard: during teardown the document event
- * must not rebuild the timer against resources being released.
+ * 安全闸依次是：
+ *   1. 会话必须在 `archivedIds` 里（否则视为未归档，拒绝）；
+ *   2. 会话不是活跃会话（`liveSessionIds` 命中即拒绝）；
+ *   3. 解析出的目录**唯一**且必须位于 `sessionsRoot` 之内（防穿越/防歧义）。
+ * 任一不满足都只拒绝该条，不中断其余条目。
  *
- * @param ctx - plugin context.
- * @param hooks - `{ entryConfig, setSource, setApi, onChange }`; `setApi`
- *   receives the `{ update, replace }` face the config route writes through.
- * @param isUnloading - teardown probe for the document listener.
+ * @param sessionsRoot - 会话根目录。
+ * @param ids - 要删除的会话 id。
+ * @param archivedIds - 归档集合（权威来源）。
+ * @param liveSessionIds - 活跃会话 id 集合。
+ * @returns `{ removed, freedBytes, refused, errors }`。
+ */
+export async function deleteArchived(sessionsRoot, ids, archivedIds, liveSessionIds = new Set()) {
+  const archivedSet = new Set(archivedIds)
+  const root = resolve(sessionsRoot)
+  const result = { removed: [], freedBytes: 0, refused: [], errors: [] }
+
+  for (const id of ids) {
+    if (typeof id !== 'string' || id.length === 0) {
+      result.refused.push({ id, reason: 'bad-id' })
+      continue
+    }
+    if (!archivedSet.has(id)) {
+      result.refused.push({ id, reason: 'not-archived' })
+      continue
+    }
+    const dirs = await locateSessionDirs(root, id)
+    if (dirs.length === 0) {
+      result.refused.push({ id, reason: 'no-directory' })
+      continue
+    }
+    if (dirs.length > 1) {
+      result.refused.push({ id, reason: 'ambiguous-directory' })
+      continue
+    }
+    const target = dirs[0]
+    if (isLiveSessionDir(target.name, liveSessionIds)) {
+      result.refused.push({ id, reason: 'live' })
+      continue
+    }
+    // 目录必须真的在根之内：任何穿越或异常都按拒绝处理。
+    const resolvedDir = resolve(target.dir)
+    if (resolvedDir !== root && !resolvedDir.startsWith(root + sep)) {
+      result.refused.push({ id, reason: 'outside-root' })
+      continue
+    }
+    if (dirname(resolvedDir) === root) {
+      // 会话目录必须位于某个项目目录之下，不能就是根的直接子项之外的层级错误
+      result.refused.push({ id, reason: 'outside-root' })
+      continue
+    }
+
+    const { size } = await statSessionDir(resolvedDir).catch(() => ({ size: 0 }))
+    try {
+      await rm(resolvedDir, { recursive: true, force: true })
+      result.removed.push({ id, dir: resolvedDir, size })
+      result.freedBytes += size
+    } catch (error) {
+      result.errors.push({ id, message: error instanceof Error ? error.message : String(error) })
+    }
+  }
+  return result
+}
+
+/** 把字节数格式化成便于阅读的字符串（宿主端报告用）。 */
+export function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let index = 0
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024
+    index += 1
+  }
+  return `${value >= 10 || index === 0 ? Math.round(value) : value.toFixed(1)} ${units[index]}`
+}
+
+/** 渲染一次删除结果（供日志输出）。 */
+export function summarizeDeletion(result) {
+  const parts = [`removed=${result.removed.length} freed=${formatBytes(result.freedBytes)}`]
+  if (result.refused.length > 0) {
+    parts.push(`refused=${result.refused.length}(${result.refused.map((r) => `${r.id}:${r.reason}`).join(',')})`)
+  }
+  if (result.errors.length > 0) {
+    parts.push(`errors=${result.errors.length}(${result.errors.map((e) => e.message).join(';')})`)
+  }
+  return parts.join(' ')
+}
+
+/**
+ * 挂载可选的 settings 文档层。
+ *
+ * 0.2.x 的 `settings` 服务是 `SettingsForms`，**没有 `register()`**：
+ * 分区由 loader entry 的 `Config` 派生（命名空间就是 entry id），读用
+ * `describe()`，写走 `update(ns, patch)` / `replace(ns, section)`。
+ * 每次接受的写入都会重新发 `settings/document-updated`。
+ *
+ * 首次 `describe()` 故意不捕异常：设置服务存在却无法 describe，正是
+ * 「路由先于设置桥注册」要保护的那种失败。之后读失败则软回退到组合层配置。
+ *
+ * @param ctx - 插件上下文。
+ * @param hooks - `{ entryConfig, setSource, setApi, onChange }`。
+ * @param isUnloading - 卸载探针，避免卸载期间响应文档事件。
  */
 function installSettingsBridge(ctx, hooks, isUnloading = () => false) {
   ctx.inject(['settings'], (sctx) => {
@@ -318,13 +336,9 @@ function installSettingsBridge(ctx, hooks, isUnloading = () => false) {
         return undefined
       }
     }
-    // Strict first read (see the doc comment): a provider that cannot describe
-    // must fail this child fiber instead of silently pretending to be wired.
     settings.describe()
     hooks.setSource(() => read() ?? hooks.entryConfig())
     sctx.on('settings/document-updated', (ns) => {
-      // A stored change landing while the consumer unloads reaches the
-      // listener before the registration is released; guard it the same way.
       if (ns !== SETTINGS_NAMESPACE || isUnloading()) return
       hooks.onChange()
     })
@@ -336,32 +350,21 @@ function installSettingsBridge(ctx, hooks, isUnloading = () => false) {
   })
 }
 
-/** RPC failure envelope for the config endpoints. */
-function configError(code, message) {
-  return { ok: false, error: { code, message, details: {} } }
+/** RPC 失败信封。 */
+function configError(code, message, details = {}) {
+  return { ok: false, error: { code, message, details } }
 }
 
 /**
- * Local RPC over a `webServer` route, replacing `ctx.connection.rpc`.
+ * 本地 RPC：webServer 上自注册的前缀路由，替代 `ctx.connection.rpc`。
  *
- * dsh 0.1.5-rc.1 broke the Connection RPC registry for every plugin outside
- * the connection package: `handle()` calls `register()`, which touches
- * `owner.webServer` on a context that never declared `webServer`, so it throws
- * `cannot get property "webServer" without inject`. The channel then never
- * exists and the browser's `POST /<channel>/<endpoint>` requests fall through
- * to the SPA fallback (405/404).
+ * 围栏与官方 Connection 同构：带 `Origin` 时必须与 `Host` 同源；只接受
+ * POST；强制 `content-type: application/json`（跨站 POST 必带自己的 Origin，
+ * 而 JSON 正文会触发我们从不回应的预检，所以用户随便访问的页面碰不到它）。
+ * 信封与旧 RPC handler 完全一致。
  *
- * This is the same contract on the surface a plugin does own: one prefix route,
- * a same-origin fence, JSON-only bodies, and the identical
- * `{ ok, value }` / `{ ok, error: { code, message, details } }` envelope the
- * endpoint handlers already return. The fence mirrors the Connection's own
- * reasoning: a cross-site POST always carries its own `Origin`, and requiring
- * `application/json` makes the browser preflight it (we never answer that
- * preflight), so a page the user merely visits cannot reach these endpoints.
- *
- * @param path - prefix route path, e.g. `/session-cleanup`.
- * @param handle - `async (endpoint, payload) => envelope`, unchanged from the
- *   RPC handler signature.
+ * @param path - 前缀路由路径，如 `/session-cleanup`。
+ * @param handle - `async (endpoint, payload) => envelope`。
  */
 export function createRpcRoute(path, handle) {
   const MAX_BODY_BYTES = 1 << 20
@@ -432,77 +435,48 @@ export function createRpcRoute(path, handle) {
 }
 
 /**
- * Cordis 插件入口: 启动时立即清理一次, 之后按 intervalMinutes 周期清理。
- * 定时器注册为 effect, 插件卸载时自动释放。
- * 配置经 dsh-settings 注册(namespace `session-cleanup`), 设置变更时
- * (onChange) 按新配置重建定时器 —— 即时生效。
- * 配置经 /session-cleanup 前缀路由读写(getConfig/setConfig/resetConfig),
- * 由插件管理页的配置卡片调用 —— 不受 dsh 设置白名单(apiproxy)限制。
+ * Cordis 插件入口。
  *
- * `sessions` / `webServer` 都是**静态** inject, 不是 apply 内的动态
- * `ctx.inject(...)`: 用户层热重载后动态那条不会重新激活(通道一直 404 直到
- * 重启), 静态 inject 不受影响; 而声明依赖才是让 `webServer` 在 apply 里一定
- * 就绪的办法 —— Cordis 并行挂载各行, HTTP 载体比 `sessions` 绑定得晚, 用
- * `ctx.get('webServer')` 去读会与那次绑定竞态, 读到 undefined 就静默丢掉页面
- * 的整个传输通道(第一次重启后四个补丁就是这样一起失联的)。
- * `settings` 仍是动态 inject —— 它是可选增强, 缺失时回退到组合层 entry 配置。
+ * 本插件**不注册任何定时器**：装载后除了读配置、挂路由，什么都不做。
+ * 删不删会话完全由用户点击决定。
+ *
+ * `sessions` / `workspaceRegistry` / `webServer` 都是**静态** inject：
+ * 用户层热重载后动态 `ctx.inject` 那条不会重新激活，而静态声明才是让
+ * `webServer` 在 `apply` 里一定就绪的唯一办法（Cordis 并行挂载各行，
+ * HTTP 载体绑定得比服务晚，用 `ctx.get('webServer')` 会竞态到 undefined，
+ * 静默丢掉整个传输通道）。
+ * `settings` 保持动态 inject —— 它是可选增强，缺失时回退到组合层配置。
  */
-export const inject = ['sessions', 'webServer']
+export const inject = ['sessions', 'workspaceRegistry', 'webServer']
 
 export function apply(ctx, config = {}) {
-  // `.volatile()` fields arrive as `{ get }` boxes; unwrap once so every later
-  // arithmetic/comparison sees plain values.
+  // `.volatile()` 字段以 `{ get }` 盒子到达；解一次，后续都看普通值。
   const entryConfig = { ...DEFAULTS, ...plainConfig(config) }
-  if (!entryConfig.enabled) return
 
   const logger = ctx.logger
-  /** 当前权威配置: 设置文档 > 组合层 entry; settings 缺失时回退 entry。 */
+  /** 当前权威配置：设置文档 > 组合层 entry。 */
   let source = () => entryConfig
   let settingsApi = null
-  let timer = null
   let disposed = false
 
-  const tick = async (reason, cfg) => {
-    // A tick landing after teardown began must not scan or log; the
-    // interval callback and start() both funnel through here.
-    if (disposed) return
-    const sessionsRoot = resolveSessionsRoot(cfg.sessionsRoot)
-    const liveIds = new Set(ctx.sessions.list().map((s) => s.id))
-    const result = await runCleanup(sessionsRoot, cfg, liveIds)
-    // A scan started before teardown may finish after it: a line logged then
-    // would still reach the released provider, so re-check before reporting.
-    if (disposed) return
-    logger.info(`[${reason}] ${summarize(result)}`)
-    if (result.errors.length > 0) logger.warn(`cleanup errors: ${result.errors.join(' | ')}`)
+  const currentConfig = () => ({ ...DEFAULTS, ...plainConfig(toPlain(source())) })
+
+  /** 归档集合：官方「归档会话」写的那份持久集合，唯一权威来源。 */
+  const archivedIds = () => {
+    const registry = ctx.workspaceRegistry
+    const ids = registry?.archivedSessionIds
+    return Array.isArray(ids) ? [...ids] : []
   }
 
-  const stop = () => {
-    if (timer !== null) {
-      clearInterval(timer)
-      timer = null
-    }
-  }
+  /** 活跃会话 id 集合。 */
+  const liveIds = () => new Set(ctx.sessions.list().map((s) => s.id))
 
-  const start = () => {
-    stop()
-    if (disposed) return
-    const current = source()
-    if (!current.enabled) return
-    // 启动/配置变更即清理一次; 失败不阻断
-    void tick('startup', current).catch((e) => logger.warn(`startup cleanup failed: ${e.message}`))
-    timer = setInterval(() => {
-      void tick('interval', source()).catch((e) => logger.warn(`interval cleanup failed: ${e.message}`))
-    }, current.intervalMinutes * 60_000)
-  }
-
-  // 端点处理函数: 契约与旧的 RPC handler 完全一致(getConfig / setConfig /
-  // resetConfig), 只是换了承载方式。`settingsApi` 在调用时才读取, 所以
-  // 无论设置分区此时是否已经挂上, 读到的都是当前那个写入面。
   const handleEndpoint = async (endpoint, payload) => {
+    const cfg = currentConfig()
     if (endpoint === 'getConfig') {
-      return { ok: true, value: source() }
+      return { ok: true, value: cfg }
     }
-    if (settingsApi === null) {
+    if (settingsApi === null && (endpoint === 'setConfig' || endpoint === 'resetConfig')) {
       return configError('settings-unavailable', 'settings service is not ready yet')
     }
     if (endpoint === 'setConfig') {
@@ -512,7 +486,7 @@ export function apply(ctx, config = {}) {
       }
       try {
         await settingsApi.update(fields)
-        return { ok: true, value: source() }
+        return { ok: true, value: currentConfig() }
       } catch (error) {
         return configError('settings-rejected', String(error?.message ?? error))
       }
@@ -520,36 +494,71 @@ export function apply(ctx, config = {}) {
     if (endpoint === 'resetConfig') {
       try {
         await settingsApi.replace({})
-        return { ok: true, value: source() }
+        return { ok: true, value: currentConfig() }
       } catch (error) {
         return configError('settings-rejected', String(error?.message ?? error))
       }
     }
+    if (endpoint === 'listArchived') {
+      if (!cfg.enabled) return { ok: true, value: { items: [], totalBytes: 0, disabled: true } }
+      const sessionsRoot = resolveSessionsRoot(cfg.sessionsRoot)
+      const listing = await listArchived(sessionsRoot, archivedIds(), liveIds())
+      return { ok: true, value: { ...listing, sessionsRoot } }
+    }
+    if (endpoint === 'deleteArchived') {
+      if (!cfg.enabled) return configError('disabled', 'session cleanup is turned off')
+      const ids = payload?.args?.ids
+      if (!Array.isArray(ids) || ids.length === 0 || !ids.every((id) => typeof id === 'string')) {
+        return configError('bad-request', 'ids must be a non-empty array of session ids')
+      }
+      const sessionsRoot = resolveSessionsRoot(cfg.sessionsRoot)
+      const result = await deleteArchived(sessionsRoot, ids, archivedIds(), liveIds())
+      // 目录没了，id 若仍留在归档集合里就会变成一个永远删不掉的幽灵条目
+      // （列表只能把它显示成「磁盘上已无此会话目录」）。删除成功后顺手取消
+      // 归档，让归档集合与磁盘保持一致。这一步是尽力而为：失败不影响删除
+      // 本身已完成的事实，只记一条 warn。
+      for (const removed of result.removed) {
+        try {
+          await ctx.workspaceRegistry?.unarchiveSession?.(removed.id)
+        } catch (error) {
+          logger?.warn?.(`session-cleanup: could not unarchive ${removed.id}: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      if (disposed) return { ok: true, value: result }
+      if (result.removed.length > 0) {
+        logger?.info?.(`session-cleanup: ${summarizeDeletion(result)}`)
+      }
+      if (result.errors.length > 0) {
+        logger?.warn?.(`session-cleanup: delete errors: ${result.errors.map((e) => `${e.id}: ${e.message}`).join(' | ')}`)
+      }
+      return { ok: true, value: result }
+    }
     return configError('bad-request', `unknown endpoint: ${endpoint}`)
   }
 
-  // 页面经由 webServer 上的一条前缀路由到达本插件。dsh 0.1.5 下
-  // `ctx.connection.rpc.handle` 对连接包之外的插件必然抛
-  // `cannot get property "webServer" without inject`(见 createRpcRoute 的
-  // 说明), 通道根本不会存在, 页面的 POST 会落到 SPA 兜底。
-  //
-  // 顺序很重要: 该注册排在设置桥之前。Cordis 在 apply 抛错时会回滚它此前
-  // 注册的每一个 effect, 而设置接线恰恰是最容易抛错的一步(见 ui-settings-other
-  // 的同类教训); 传输先落地, 设置挂掉也不会把页面的读写通道一起带走。
-  // 注册走 ctx.effect: 路由随插件卸载一起释放。
+  // 传输先落地：Cordis 在 apply 抛错时会回滚此前注册的每个 effect，而设置
+  // 接线是最容易抛错的一步。路由排在设置桥之前，设置挂掉也不会带走通道。
   ctx.effect(() => ctx.webServer.register(createRpcRoute('/session-cleanup', handleEndpoint)), 'session-cleanup: /session-cleanup rpc route')
 
   installSettingsBridge(ctx, {
     entryConfig: () => entryConfig,
-    setSource: (current) => { source = current },
+    setSource: (next) => { source = next },
     setApi: (api) => { settingsApi = api },
-    onChange: start,
+    // 配置变化不再需要重建定时器（没有定时器了）。
+    onChange: () => {},
   }, () => disposed)
-
-  start()
 
   ctx.effect(() => () => {
     disposed = true
-    stop()
   })
+}
+
+/**
+ * sources 可能返回已被解盒的普通对象，也可能返回盒子；这里统一兜底，
+ * 避免 `plainConfig` 收到已解的对象时重复处理。
+ * @param value - 配置来源的返回值。
+ */
+function toPlain(value) {
+  if (value === null || typeof value !== 'object') return {}
+  return value
 }

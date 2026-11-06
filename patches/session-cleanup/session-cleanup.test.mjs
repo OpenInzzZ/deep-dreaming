@@ -1,12 +1,25 @@
-// session-cleanup 插件功能测试
-// 构造模拟会话目录，验证清理规则：超龄、keepSessions、容量上限、live 跳过、dryRun、空目录清理
+// session-cleanup 插件功能测试（v2：手动物理删除）
+//
+// 自动清理（超龄 / 容量上限 / keepSessions / dryRun / 定时器）已按要求整体移除，
+// 所以这里改为验证「删除已归档会话」的每一条安全闸：
+//   - 只删归档集合里的会话（未归档一律拒绝）
+//   - 活跃会话一律拒绝
+//   - 目录必须唯一命中且位于 sessionsRoot 之内（防穿越 / 防歧义）
+//   - 删除的是整个会话目录，被删会话的其它产物一并消失
+//   - 拒绝是逐条的，不因一条失败而中断其余
 import { mkdtemp, mkdir, writeFile, readdir, stat, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { runCleanup, encodeSegment, isLiveSessionDir } from './session-cleanup.mjs'
+import {
+  deleteArchived,
+  listArchived,
+  locateSessionDirs,
+  encodeSegment,
+  isLiveSessionDir,
+  resolveSessionsRoot,
+  formatBytes,
+} from './session-cleanup.mjs'
 
-const DAY = 86_400_000
-const NOW = Date.now()
 let passed = 0
 let failed = 0
 
@@ -14,82 +27,157 @@ function check(label, cond) {
   if (cond) { passed++; console.log(`  ✓ ${label}`) } else { failed++; console.log(`  ✗ ${label}`) }
 }
 
-async function makeSession(root, project, id, ageDays, sizeMB) {
-  const dir = join(root, project, id)
+async function makeSession(root, project, dirName, bytes) {
+  const dir = join(root, project, dirName)
   await mkdir(dir, { recursive: true })
-  const buf = Buffer.alloc(sizeMB * 1024 * 1024, 0x61)
-  const f = join(dir, 'session.jsonl')
-  await writeFile(f, buf)
-  const past = new Date(NOW - ageDays * DAY)
-  // 设置 mtime 为过去时间
-  const { utimes } = await import('node:fs/promises')
-  await utimes(f, past, past)
+  await writeFile(join(dir, 'session.v4.jsonl.zstd'), Buffer.alloc(bytes, 0x61))
+  return dir
 }
 
 async function exists(path) { try { await stat(path); return true } catch { return false } }
 
 async function main() {
-  const root = await mkdtemp(join(tmpdir(), 'cleanup-test-'))
+  const root = await mkdtemp(join(tmpdir(), 'cleanup-delete-'))
   try {
-    console.log('== 场景1: 超龄删除 + keepSessions 保护 + live 跳过 + 空目录清理 ==')
-    // project-a: 40 天前(超龄)、20 天前、2 天前 —— keepSessions=1 时只保留 2 天前的
-    await makeSession(root, 'proj-a', 'session-aaaa', 40, 10)
-    await makeSession(root, 'proj-a', 'session-bbbb', 20, 20)
-    await makeSession(root, 'proj-a', 'session-cccc', 2, 5)
-    // project-b: live 会话(应跳过) + 超龄(应删除后清空项目目录)
-    await makeSession(root, 'proj-b', 'session-live', 1, 8)
-    await makeSession(root, 'proj-b', 'session-dddd', 60, 12)
-
-    let result = await runCleanup(root, { maxAgeDays: 30, keepSessions: 1, maxTotalMB: 0 }, new Set(['session-live']), NOW)
-    check('扫描到 5 个会话', result.scanned === 5)
-    check('跳过 1 个 live 会话', result.skippedLive === 1)
-    const removedIds = result.removed.map((r) => r.id).sort()
-    check('删除 40 天前与 60 天前的会话', JSON.stringify(removedIds) === JSON.stringify(['session-aaaa', 'session-dddd']))
-    check('20 天前会话保留(未超龄且在 keepSessions 之外不删)', await exists(join(root, 'proj-a', 'session-bbbb')))
-    check('proj-b 目录保留(仍有 live 会话)', await exists(join(root, 'proj-b')))
-    check('proj-a 保留 2 个目录', (await readdir(join(root, 'proj-a'))).length === 2)
-
-    console.log('== 场景2: 容量上限 maxTotalMB ==')
-    // 在 proj-a 再建两个旧会话，配合容量上限触发最旧优先删除
-    await makeSession(root, 'proj-a', 'session-eeee', 10, 50)
-    await makeSession(root, 'proj-a', 'session-ffff', 15, 50)
-    // 当前 proj-a: bbbb(20MB,20天) cccc(5MB,2天) eeee(50MB,10天) ffff(50MB,15天) = 125MB
-    // maxTotalMB=100 且 keepSessions=1: 超龄规则先看; 容量再删最旧
-    result = await runCleanup(root, { maxAgeDays: 30, keepSessions: 1, maxTotalMB: 100 }, new Set(), NOW)
-    const removed2 = result.removed.map((r) => r.id)
-    check('容量规则生效(至少删除一个)', removed2.length >= 1)
-    const totalAfter = result.totalBytes - result.freedBytes
-    check('清理后总占用 <= 100MB', totalAfter <= 100 * 1024 * 1024)
-
-    console.log('== 场景3: dryRun 不删除 ==')
-    const before = (await readdir(join(root, 'proj-a'))).length
-    result = await runCleanup(root, { maxAgeDays: 1, keepSessions: 0, maxTotalMB: 0, dryRun: true }, new Set(), NOW)
-    check('dryRun 报告了删除对象', result.removed.length > 0 && result.removed.every((r) => r.dryRun))
-    check('dryRun 后文件仍在', (await readdir(join(root, 'proj-a'))).length === before)
-    check('dryRun 不释放字节', result.freedBytes === 0)
-
-    console.log('== 场景4: 容量上限 = 0 表示不限制 ==')
-    result = await runCleanup(root, { maxAgeDays: 0, keepSessions: 0, maxTotalMB: 0 }, new Set(), NOW)
-    check('无任何删除(无天数无容量规则)', result.removed.length === 0)
-
-    console.log('== 场景5: 超龄删除释放的空间已足够时, 容量规则不得重复计数 ==')
-    // 回归用例: 规则 A 选中删除的会话体积必须先从容量总量中扣除。
-    // 旧实现只 `if (remove.has(c.key)) continue`, 不扣体积, 于是总量偏高,
-    // 会把本可留下的会话也删掉。
+    console.log('== 场景1: 目录定位按 id 的两种形态精确匹配 ==')
     {
-      const root2 = await mkdtemp(join(tmpdir(), 'cleanup-test-cap-'))
+      const plain = 'session-11111111-2222-3333-4444-555555555555'
+      await makeSession(root, 'proj-a', plain, 1024)
+      const encoded = encodeSegment('weird/id:with~chars')
+      await makeSession(root, 'proj-b', encoded, 512)
+      check('裸 id 形态可定位', (await locateSessionDirs(root, plain)).length === 1)
+      check('encodeSegment 形态可定位', (await locateSessionDirs(root, 'weird/id:with~chars')).length === 1)
+      check('无关 id 不误命中', (await locateSessionDirs(root, 'session-nope')).length === 0)
+      check('空 id 返回空', (await locateSessionDirs(root, '')).length === 0)
+      check('encodeSegment 与官方一致(安全字符原样)', encodeSegment('abc-1.2_3') === 'abc-1.2_3')
+      check('encodeSegment 转义特殊字符', encodeSegment('a/b') === 'a~002Fb')
+      check('encodeSegment 特判 ..', encodeSegment('..') === '~002E~002E')
+    }
+
+    console.log('== 场景2: 未归档的会话绝不被删除 ==')
+    {
+      const root2 = await mkdtemp(join(tmpdir(), 'cleanup-gate-'))
       try {
-        // 80MB/40天(超龄, 规则 A 删除) + 30MB/20天 + 10MB/2天 = 120MB; 上限 100MB
-        await makeSession(root2, 'proj-c', 'session-oldbig', 40, 80)
-        await makeSession(root2, 'proj-c', 'session-mid', 20, 30)
-        await makeSession(root2, 'proj-c', 'session-new', 2, 10)
-        const aged = await runCleanup(root2, { maxAgeDays: 30, keepSessions: 1, maxTotalMB: 100 }, new Set(), NOW)
-        check('只删除超龄会话, 不再额外删除', JSON.stringify(aged.removed.map((r) => r.id)) === JSON.stringify(['session-oldbig']))
-        check('超龄释放后总占用已 <= 上限', aged.totalBytes - aged.freedBytes <= 100 * 1024 * 1024)
-        check('20 天前的会话保留', await exists(join(root2, 'proj-c', 'session-mid')))
+        const archived = 'session-archived-0001'
+        const notArchived = 'session-live-ish-0002'
+        await makeSession(root2, 'p', archived, 100)
+        await makeSession(root2, 'p', notArchived, 100)
+
+        // 归档集合里只有 archived
+        const result = await deleteArchived(root2, [archived, notArchived], [archived], new Set())
+        check('归档会话被删除', result.removed.length === 1 && result.removed[0].id === archived)
+        check('未归档会话被拒绝', result.refused.length === 1 && result.refused[0].reason === 'not-archived')
+        check('归档会话目录已消失', !(await exists(join(root2, 'p', archived))))
+        check('未归档会话目录仍在', await exists(join(root2, 'p', notArchived)))
+        check('释放字节数已统计', result.freedBytes >= 100)
       } finally {
         await rm(root2, { recursive: true, force: true })
       }
+    }
+
+    console.log('== 场景3: 活跃会话即使已归档也不删除 ==')
+    {
+      const root3 = await mkdtemp(join(tmpdir(), 'cleanup-live-'))
+      try {
+        const id = 'session-active-0003'
+        const dir = await makeSession(root3, 'p', id, 64)
+        const result = await deleteArchived(root3, [id], [id], new Set([id]))
+        check('活跃会话被拒绝', result.refused.length === 1 && result.refused[0].reason === 'live')
+        check('活跃会话目录仍在', await exists(dir))
+        check('未释放任何字节', result.freedBytes === 0)
+      } finally {
+        await rm(root3, { recursive: true, force: true })
+      }
+    }
+
+    console.log('== 场景4: 整个会话目录被删除（不只删日志文件）==')
+    {
+      const root4 = await mkdtemp(join(tmpdir(), 'cleanup-dir-'))
+      try {
+        const id = 'session-full-0004'
+        const dir = await makeSession(root4, 'p', id, 128)
+        // 会话目录里的其它产物
+        await mkdir(join(dir, 'attachments'), { recursive: true })
+        await writeFile(join(dir, 'attachments', 'a.bin'), Buffer.alloc(64, 0x62))
+        await writeFile(join(dir, 'checkpoint.json'), '{"x":1}')
+        const result = await deleteArchived(root4, [id], [id], new Set())
+        check('删除成功', result.removed.length === 1)
+        check('整个目录消失(含附件与检查点)', !(await exists(dir)))
+        check('释放字节数包含所有产物', result.freedBytes >= 128 + 64)
+      } finally {
+        await rm(root4, { recursive: true, force: true })
+      }
+    }
+
+    console.log('== 场景5: 拒绝是逐条的，一条失败不影响其余 ==')
+    {
+      const root5 = await mkdtemp(join(tmpdir(), 'cleanup-mixed-'))
+      try {
+        const ok = 'session-ok-0005'
+        const live = 'session-live-0006'
+        await makeSession(root5, 'p', ok, 32)
+        await makeSession(root5, 'p', live, 32)
+        const result = await deleteArchived(
+          root5,
+          [ok, live, 'session-missing-0007', 'session-not-archived-0008', ''],
+          [ok, live, 'session-missing-0007'],
+          new Set([live]),
+        )
+        check('有效的归档会话仍被删除', result.removed.length === 1 && result.removed[0].id === ok)
+        check('活跃被拒', result.refused.some((r) => r.id === live && r.reason === 'live'))
+        check('无目录被拒', result.refused.some((r) => r.reason === 'no-directory'))
+        check('未归档被拒', result.refused.some((r) => r.reason === 'not-archived'))
+        check('空 id 被拒', result.refused.some((r) => r.reason === 'bad-id'))
+      } finally {
+        await rm(root5, { recursive: true, force: true })
+      }
+    }
+
+    console.log('== 场景6: listArchived 只列归档会话，并给出大小与目录 ==')
+    {
+      const root6 = await mkdtemp(join(tmpdir(), 'cleanup-list-'))
+      try {
+        const a = 'session-list-a'
+        const b = 'session-list-b'
+        const archivedOnly = 'session-archived-only'
+        await makeSession(root6, 'p1', a, 256)
+        await makeSession(root6, 'p2', b, 512)
+        await makeSession(root6, 'p2', archivedOnly, 128)
+        const listing = await listArchived(root6, [a, b], new Set([b]))
+        check('只列出归档集合里的会话', listing.items.length === 2)
+        check('大小已统计', listing.items.every((item) => item.size > 0))
+        const liveItem = listing.items.find((item) => item.id === b)
+        const deadItem = listing.items.find((item) => item.id === a)
+        check('活跃条目标记 live 且不可删', liveItem.live === true && liveItem.deletable === false)
+        check('非活跃条目可删', deadItem.live === false && deadItem.deletable === true)
+        check('总字节数正确', listing.totalBytes === 256 + 512)
+        // 归档但磁盘上已无目录的残留
+        const ghost = await listArchived(root6, ['session-ghost'], new Set())
+        check('归档但无目录时标记 missing', ghost.items.length === 1 && ghost.items[0].missing === true)
+      } finally {
+        await rm(root6, { recursive: true, force: true })
+      }
+    }
+
+    console.log('== 场景7: 目录名与活跃 id 的两种形态 ==')
+    {
+      const live = new Set(['session-x'])
+      check('裸 id 命中活跃', isLiveSessionDir('session-x', live) === true)
+      check('encodeSegment 形态命中活跃', isLiveSessionDir(encodeSegment('session-x'), live) === true)
+      check('无关目录名不算活跃', isLiveSessionDir('session-y', live) === false)
+      check('空目录名不算活跃', isLiveSessionDir('', live) === false)
+    }
+
+    console.log('== 场景8: 根目录解析与字节格式化 ==')
+    {
+      const configured = resolveSessionsRoot('D:/tmp/somewhere')
+      check('配置优先', configured.replace(/\\/g, '/').endsWith('/tmp/somewhere'))
+      const fallback = resolveSessionsRoot('')
+      check('空配置回退到 sessions 目录', /sessions$/.test(fallback.replace(/\\/g, '/')))
+      check('formatBytes 0', formatBytes(0) === '0 B')
+      check('formatBytes 1KB', formatBytes(1024) === '1.0 KB')
+      check('formatBytes 1MB', formatBytes(1024 * 1024) === '1.0 MB')
+      check('formatBytes 10MB', formatBytes(10 * 1024 * 1024) === '10 MB')
     }
 
     console.log(`\n结果: ${passed} 通过, ${failed} 失败`)

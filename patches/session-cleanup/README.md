@@ -1,166 +1,168 @@
-# session-cleanup —— 会话日志自动清理插件
+# session-cleanup —— 已归档会话的物理删除插件
 
-按**保留天数** / **总大小上限**定期清理 dsh 的归档会话目录
-(`$DSH_HOME/sessions`,默认 `~/.dsh/sessions`),**跳过当前活跃会话**。
-防止长时间使用后 `sessions` 目录无限膨胀占用磁盘。
+为 DSH 的**已归档会话**提供手动物理删除：在设置页看到全部归档会话及其磁盘占用，
+勾选后删除；也可以直接右键某条已归档会话删除。
 
-- 插件类型:**bundle**(包名 `@local/dsh-plugin-session-cleanup`),loader 行由
-  包内 `cordis.patch.yml` 自带,通过 pnpm link 进 profile + 登记
-  `dsh.profile.bundles` 装载,不修改 dsh 源码。
-- 清理对象:`<sessions根>/<项目>/session-<n>/` 形态的归档目录;活跃会话
-  由 `sessions` 服务实时列表识别并跳过。
-- 双重规则:超龄删除(带最少保留数保护)+ 总容量超限时按最旧优先删。
+> **本插件不做任何自动清理。** 没有定时器、没有保留天数、没有容量上限 —— 删不删、
+> 删哪些，完全由你点击决定。这是 2026-11-06 的一次有意收缩：此前它会按天数/容量
+> 在后台删除会话，对「不想让任何东西替我删日志」的场景风险过高。
+
+- 插件类型：**bundle**（包名 `@local/dsh-plugin-session-cleanup`），loader 行由
+  包内 `cordis.patch.yml` 自带，通过 pnpm link 进 profile + 登记
+  `dsh.profile.bundles` 装载，不修改 dsh 源码。
+- 「已归档」的权威来源是 `workspaceRegistry.archivedSessionIds`（官方「归档会话」
+  写的那份持久集合），**不是**按目录名推测。未归档的会话永远不在列表里，
+  也永远删不掉。
+- 删除粒度是**整个会话目录** `<sessions根>/<projectKey>/<encodeSegment(id)>/`，
+  与官方 `session-persistence-jsonl` 的 `sessionDir()` 一致。也就是说删除的
+  不只是日志，还包括该会话目录下的其它产物（附件、检查点等）——确认弹窗会
+  如实列出目录与占用大小。
 
 ## 安装与部署
 
-推荐仓库根一键:
+推荐仓库根一键：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
 
-手工方式(路径用变量,不写死):
+手工方式（路径用变量，不写死）：
 
 ```powershell
-# 在仓库根执行:$repo = (Resolve-Path .).Path
-# 先删掉 profile 层旧的 - insert: 行(若存在),避免两层同 id 启动中断
+# 在仓库根执行：$repo = (Resolve-Path .).Path
+# 先删掉 profile 层旧的 - insert: 行(若存在)，避免两层同 id 启动中断
 & "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" `
     plugin --profile desktop add "$repo\patches\session-cleanup"
 ```
 
 CLI 检测到包声明的 `dsh.bundle` 后会自动完成 pnpm link + 登记
-`dsh.profile.bundles`;loader 行来自包内 `cordis.patch.yml`(见该文件)。
+`dsh.profile.bundles`；loader 行来自包内 `cordis.patch.yml`（见该文件）。
 
 > ⚠️ **不要**再往 `~/.dsh/profiles/desktop/cordis.patch.yml` 手工
 > `- insert:` 本插件的行 —— 两层同 id 会让下次启动 fail-loud 中断
 > (`TypeError: duplicate loader entry id`)。`scripts/deploy.ps1` 会检测这一状态。
 
-3. **配置热生效**:插件页/设置里的配置修改写入设置文档,数秒内生效;
-   改包内 `cordis.patch.yml` 的行结构则需重启(bundle 层文件不在 HMR 监视范围)。
-   **修改本补丁源码后需重启 DSH 桌面端** 才生效(`scripts/restart-desktop.ps1`)。
-
-启动时立即执行一次清理,之后按 `intervalMinutes` 周期执行。
+配置写进设置文档后**即时生效**；改包内 `cordis.patch.yml` 的行结构需重启
+（bundle 层文件不在 HMR 监视范围）。**修改本补丁源码后需重启 DSH 桌面端**
+才生效（`scripts/restart-desktop.ps1`）。
 
 ## 如何使用
 
-插件加载后无需任何手动操作,清理自动进行;日志会输出每次清理摘要:
+### 设置页：已归档会话列表
 
-```
-[startup] scanned=12 liveSkipped=1 kept=5 totalBytes=184321024 | removed=6 freedBytes=155123712 (session-aaaa, session-bbbb, ...)
-```
+**设置 → 会话清理**，展开卡片：
 
-- `scanned` — 扫描到的归档会话数;`liveSkipped` — 跳过的活跃会话数
-- `removed` — 本次删除的会话(id 列表,`[dry]` 标记演练模式)
-- 有错误时追加 `errors=N: <详情>`
+1. 上半部分是插件开关与会话根目录；
+2. 下半部分「已归档会话」列出每条归档会话的目录名、完整路径与占用大小，
+   顶部显示合计占用；
+3. 勾选一条或多条（或点「全选」），点 **删除所选**；也可以点某条右侧的
+   **删除** 单独删它；
+4. 弹出**二次确认**，列出将删除的目录与总占用，并提示不可撤销；
+5. 确认后目录被真正删除，列表自动刷新，并提示释放了多少空间。
 
-**验证规则是否符合预期**(推荐先演练):
+正在运行的会话即使已归档也会被标记为「正在运行，不可删除”，无法勾选。
+归档集合里残留、但磁盘上已无目录的记录会显示「磁盘上已无此会话目录」，
+同样不可删（没有可删的东西）。
 
-1. 在**设置卡片**把 `dryRun` 保存为 `true`(即时生效),观察日志 —— 只报告
-   将要删除的会话,不实际删除;或改包内 `cordis.patch.yml` 的 `config.dryRun`
-   后重启(bundle 层文件不在 HMR 监视范围);
-2. 确认无误后改回 `false` 生效。
+### 会话右键菜单
 
-**临时手动清理**:想立即触发一次,重启 dsh 即可(启动时自动清理一次)。
+在侧边栏对**已归档**的会话右键（或点「⋯」），菜单里会出现 **删除归档会话**；
+非归档会话不显示该项。点击同样走二次确认。
+
+## 删除的安全闸
+
+宿主端每次删除都会逐条检查，任何一条不满足就只拒绝该条、不中断其余：
+
+| 检查 | 拒绝原因 | 说明 |
+| --- | --- | --- |
+| 在归档集合里 | `not-archived` | 未归档的会话一律拒绝，即使目录存在 |
+| 不是活跃会话 | `live` | 裸 id 与 `encodeSegment` 两种目录名形态都比对 |
+| 目录唯一命中 | `no-directory` / `ambiguous-directory` | 命中多个视为歧义，拒绝而不是猜 |
+| 目录在根之内 | `outside-root` | 防目录穿越；解析后必须位于 `sessionsRoot` 之下 |
+| id 合法 | `bad-id` | 空或非字符串 |
+
+删除成功后还会**取消归档**，否则目录没了而 id 仍留在归档集合里，会变成一个
+永远删不掉的幽灵条目。这一步是尽力而为：失败只记一条 warn，不影响删除本身
+已完成的事实。
 
 ## 配置方式
 
-配置来源(优先级从低到高):schema 默认值 < 组合层条目配置
-(包内 `cordis.patch.yml` 的 `config`)< 设置文档用户层。**推荐在界面配置**:
+配置来源（优先级从低到高）：schema 默认值 < 组合层条目配置
+（包内 `cordis.patch.yml` 的 `config`）< 设置文档用户层。**推荐在界面配置**：
+**设置** → **会话清理** → 展开 → 编辑 → **保存**；点 **恢复默认** 整体回退到
+组合层配置。
 
-1. 打开 DSH 桌面端 → **设置** → **会话清理**;
-2. 展开即可编辑全部字段;
-3. 修改后点 **保存** —— 配置写入 profile 的配置文档(entry `session-cleanup`
-   的 `config`),**即时生效**(定时器按新间隔重建,保存即触发一次清理);
-   点 **恢复默认** 可整体回退到组合层配置。
-
-> 配置卡片经插件自身的 `/session-cleanup` 前缀路由读写(getConfig /
-> setConfig / resetConfig;`POST /session-cleanup/<endpoint>`,注册在
-> `webServer` 服务上,自带同源栅栏 + 只收 POST + 只收 `application/json`)。
-> 宿主侧不再调用 `ctx.settings.register`(0.2.x 的 `SettingsForms` 没有这个
-> 方法):所有字段标 `.volatile()` 后由宿主的配置文档承载用户层,读走
-> `settings.describe()`,写走 `settings.update()` / `replace()`(命名空间就是
-> loader entry id `session-cleanup`),并监听 `settings/document-updated`
-> 重建定时器。
+> 配置卡片经插件自身的 `/session-cleanup` 前缀路由读写（`getConfig` /
+> `setConfig` / `resetConfig` / `listArchived` / `deleteArchived`；
+> `POST /session-cleanup/<endpoint>`，注册在 `webServer` 服务上，自带同源栅栏 +
+> 只收 POST + 只收 `application/json`）。
 >
-> 载体是**静态声明的依赖**(`export const inject = ['sessions', 'webServer']`),
-> 插件只在两者都绑定后激活;不在回调里 `ctx.get('webServer')` 与载体绑定竞态 ——
-> 后者会在载体尚未 listen 时读到 `undefined` 并静默跳过整个传输通道。
+> 宿主侧不调用 `ctx.settings.register`（0.2.x 的 `SettingsForms` 没有这个
+> 方法）：字段标 `.volatile()` 后由宿主的配置文档承载用户层，读走
+> `settings.describe()`，写走 `settings.update()` / `replace()`（命名空间就是
+> loader entry id `session-cleanup`）。
 >
-> 为什么不是 `ctx.connection.rpc.handle`:dsh 0.1.5-rc.1 的 Connection 注册表
-> 对连接包之外的插件必然抛 `cannot get property "webServer" without inject`
-> (`dsh-client-connection/lib/index.js` 的 `register()` 里
-> `owner.effect(() => owner.webServer.register(route))`,`owner` 从未声明
-> `webServer`),通道根本不会存在,浏览器请求会落到 SPA 兜底。迁移做法与
-> `ui-settings-other` 一致:`createRpcRoute(path, handle)` + `webServer.register`,
-> 且路由注册排在设置桥之前 —— inject 回调抛错会回滚它此前注册的全部
-> effect,传输先落地才不会被设置挂掉带走。
-
-> 手动编辑 profile 配置文档同样生效(文件被监听,改动即重载):
+> 载体是**静态声明的依赖**（`export const inject = ['sessions',
+> 'workspaceRegistry', 'webServer']`），插件只在三者都绑定后激活；不在回调里
+> `ctx.get('webServer')` 与载体绑定竞态 —— 后者会在载体尚未 listen 时读到
+> `undefined` 并静默跳过整个传输通道。
 >
-> ```yaml
-> - id: session-cleanup
->   config:
->     maxAgeDays: 30
->     maxTotalMB: 1024
->     keepSessions: 5
->     intervalMinutes: 360
->     dryRun: false
-> ```
+> 为什么不是 `ctx.connection.rpc.handle`：dsh 0.1.5-rc.1 的 Connection 注册表对
+> 连接包之外的插件必然抛 `cannot get property "webServer" without inject`
+> （`dsh-client-connection/lib/index.js` 的 `register()` 里
+> `owner.effect(() => owner.webServer.register(route))`，`owner` 从未声明
+> `webServer`），通道根本不会存在，浏览器请求会落到 SPA 兜底。做法：
+> `createRpcRoute(path, handle)` + `webServer.register`，且路由注册排在设置桥
+> 之前 —— inject 回调抛错会回滚它此前注册的全部 effect，传输先落地才不会被
+> 设置挂掉带走。
 
 ## 配置项
 
 | 配置 | 默认 | 说明 |
 | --- | --- | --- |
-| `enabled` | `true` | 插件总开关,`false` 时插件不装载 |
-| `maxAgeDays` | `30` | 超过该天数的会话可删;`0` = 不按天数清理 |
-| `maxTotalMB` | `1024` | sessions 总占用上限 MB;`0` = 不限制 |
-| `keepSessions` | `5` | 最少保留的会话数(超龄规则仅作用于最旧超出部分) |
-| `intervalMinutes` | `360` | 清理间隔分钟(启动时总会先清一次) |
-| `dryRun` | `false` | 演练模式:只报告不删除 |
-| `sessionsRoot` | `$DSH_HOME/sessions` | 会话根目录,可指向其他位置 |
+| `enabled` | `true` | 插件总开关；`false` 时不列出、也不允许删除 |
+| `sessionsRoot` | `$DSH_HOME/sessions` | 会话根目录，可指向其他位置 |
 
-> 会话目录名为 `session-<n>` 形态(store 生成),插件按该前缀识别归档
-> 会话并跳过活跃会话。若 JSONL 后端配置的会话根目录不是
-> `$DSH_HOME/sessions`,请把 `sessionsRoot` 配成与后端一致,否则会静默
-> `scanned=0` 清理不到任何会话。
-
-清理判定(两条规则取并集):
-
-- **规则 A(超龄)**:按最后修改时间从新到旧排序,仅对超出 `keepSessions`
-  的最旧部分,删除 `mtime` 早于 `now - maxAgeDays` 天的会话 —— 最近常用的
-  会话即使超龄也受 `keepSessions` 保护。
-- **规则 B(超容量)**:可删候选(不含活跃会话)的合计占用超过 `maxTotalMB`
-  时,从最旧开始删直到不超过上限;统计时先扣除规则 A 已选中删除的会话
-  —— 它们这一轮一定会被删掉,再计入"留下的占用"会让判断偏高、比实际需要
-  多删。
-- 删除后会顺带清理变空的 `<项目>` 目录(演练模式不做任何删除)。
+> 若 JSONL 后端配置的会话根目录不是 `$DSH_HOME/sessions`，请把 `sessionsRoot`
+> 配成与后端一致，否则列表会全部显示「磁盘上已无此会话目录」。
+>
+> 目录名有 `session-<uuid>` 与裸 `<uuid>` 两种铸造方式，插件按 id 的两种编码
+> 形态精确匹配，不靠前缀猜。
 
 ## 卸载
 
-1. 插件管理页「已安装」卡片卸载,或命令行:
+1. 插件管理页「已安装」卡片卸载，或命令行：
    `dsh plugin --profile desktop remove @local/dsh-plugin-session-cleanup`
-   (**热生效**:数秒后清理任务停止、`/session-cleanup` 路由注销);
-2. 可选:删除 `~/.dsh/profiles/node_modules/@local/dsh-plugin-session-cleanup`
-   解析兜底链接(源码留在仓库,重装即可恢复)。
+   （**热生效**：数秒后 `/session-cleanup` 路由注销、设置页消失）；
+2. 可选：删除 `~/.dsh/profiles/node_modules/@local/dsh-plugin-session-cleanup`
+   解析兜底链接（源码留在仓库，重装即可恢复）。
+
+已删除的会话不会因为卸载插件而回来 —— 那是操作系统的删除，与插件无关。
 
 ## 测试
 
 ```powershell
-# 在仓库根执行:\$repo = (Resolve-Path .).Path
-node patches/session-cleanup/session-cleanup.test.mjs      # 清理规则纯逻辑
-node patches/session-cleanup/verify-session-cleanup.mjs    # settings 集成 + 配置卡片
+# 在仓库根执行：$repo = (Resolve-Path .).Path
+node patches/session-cleanup/session-cleanup.test.mjs      # 删除安全闸纯逻辑
+node patches/session-cleanup/verify-session-cleanup.mjs    # 主机端点 + 设置页 + 右键菜单
 node patches/session-cleanup/tests/load-smoke.mjs          # 真实 Cordis 加载冒烟
 ```
 
-覆盖:超龄删除、`keepSessions` 保护、容量上限(含"超龄释放的空间已足够时不得
-再多删"的重复计数回归)、活跃会话跳过、演练模式、空项目目录清理;host 侧
-settings 文档读取(`describe`)/写入(`update`/`replace`)、配置变更重建定时器、
-无 settings 时回退条目配置、apply 不返回 thenable 的 P0 回归守卫、
-`/session-cleanup` 前缀路由随插件卸载注销、路由排在设置桥之前的顺序保证、
-isUnloading 卸载守卫,以及栅栏与端点(403 跨源 Origin / 405 非 POST / 415 非
-JSON / 404 端点段数 / 400 非 JSON body / 413 超 1MB / 500 handler 抛错;
-getConfig 回退条目配置、setConfig/resetConfig 经设置文档写入);client 侧配置
-卡片渲染、逐字段按宿主 schema 校验(`intervalMinutes`
-低于 1 时在字段下报错且不发出 setConfig)、保存/恢复默认经
-`POST /session-cleanup/setConfig|resetConfig`,fetch 桩直接接到真实 host 路由,
-网络/HTTP/信封失败均 reject。DOM 交互段需要 jsdom,未安装时自动跳过。
+覆盖：
+
+- **纯逻辑**：目录定位的两种 id 形态、未归档拒绝、活跃会话拒绝、整目录删除
+  （含附件与检查点）、逐条拒绝不中断、`listArchived` 的 `live`/`missing` 标记、
+  `encodeSegment` 与官方同构、字节格式化；
+- **主机端点**：静态 inject 形态、装载后不做任何后台工作、栅栏（403 跨源
+  Origin / 405 非 POST / 415 非 JSON / 404 端点段数 / 400 非 JSON body /
+  413 超 1MB / 500 handler 抛错）、设置文档读写、`enabled:false` 仍保留传输但
+  拒绝删除、路由排在设置桥之前、卸载守卫；
+- **真实 Cordis**：`ctx.plugin()` 能加载、不注册定时器、`listArchived` 读
+  `workspaceRegistry`、`deleteArchived` 端到端删除一个归档会话并拒绝活跃/
+  未归档会话、晚到的 `webServer` 仍会激活传输；
+- **客户端**：`settings.section` 与 `sidebar.workspaces.session.menu.item` 两个
+  槽位注册、字典中英一致、列表渲染、勾选后出现批量删除、弹窗先问再删、
+  取消不删任何东西、确认后目录消失且会话被取消归档并刷新列表、
+  fetch 桩直连真实 host 路由、网络/HTTP/信封失败均 reject。
+
+DOM 交互段需要 jsdom，未安装时自动跳过。

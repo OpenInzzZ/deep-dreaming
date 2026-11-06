@@ -39,7 +39,7 @@
  *
  * Run: node patches/session-cleanup/verify-session-cleanup.mjs
  */
-import { readFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { readFileSync, mkdtempSync, rmSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -367,26 +367,47 @@ const assertErrorEnvelope = (label, result) => {
   // 已经没有 undefined 分支：只能响亮地抛，不能悄悄不注册。
   const ctx = makeCtx({ withSettings: true, withoutCarrier: true })
   let carrierFailure = null
-  try { host.apply(ctx, { sessionsRoot, dryRun: true, intervalMinutes: 9 }) } catch (error) { carrierFailure = error }
+  try { host.apply(ctx, { sessionsRoot }) } catch (error) { carrierFailure = error }
   if (!(carrierFailure instanceof Error)) {
     throw new Error('a missing declared carrier must fail loudly, never skip the registration silently')
   }
   if (ctx.web.routes.length !== 0) throw new Error('no route may be registered against a missing carrier')
-  // enabled:false 在任何注册之前就返回。
-  const off = makeCtx({ withSettings: true })
-  if (host.apply(off, { enabled: false, sessionsRoot }) !== undefined) {
+  // enabled:false 仍注册传输，但拒绝一切删除。
+  //
+  // 这里与旧版相反：旧版在 apply 开头 `return`，页面于是整块消失；现在的要求
+  // 是「关掉后不列出也不允许删除」，页面必须能把这件事说出来，所以路由照样
+  // 落地，由端点自己按 `enabled` 拒绝。
+  // The settings double resolves its descriptor from `host.DEFAULTS` over the
+  // composition entry, exactly like the real `describe()`. The entry therefore
+  // has to be handed to BOTH `makeCtx` and `apply`, or the double would report
+  // the schema default `enabled: true` for a composition that says `false`.
+  const offEntry = { enabled: false, sessionsRoot }
+  const off = makeCtx({ withSettings: true, entry: offEntry })
+  if (host.apply(off, offEntry) !== undefined) {
     throw new Error('a disabled apply must return undefined')
   }
-  if (off.web.routes.length !== 0 || off.calls.effectLabels.length !== 0) {
-    throw new Error(`enabled:false must register nothing, got ${off.web.routes.length} route(s) / ${off.calls.effectLabels.length} effect(s)`)
+  if (off.web.routes.length !== 1) {
+    throw new Error(`enabled:false must still install the transport so the page can explain why, got ${off.web.routes.length} route(s)`)
   }
-  console.log(`host inject OK: static inject = ${JSON.stringify(host.inject)} (no ctx.get race, missing carrier throws, enabled:false registers nothing)`)
+  const offRoute = routeOf(off)
+  const offList = await callEndpoint(offRoute, 'listArchived')
+  if (!offList.ok || offList.value.disabled !== true || offList.value.items.length !== 0) {
+    throw new Error(`a disabled plugin must list nothing and say so: ${JSON.stringify(offList)}`)
+  }
+  const offDelete = await callEndpoint(offRoute, 'deleteArchived', { args: { ids: ['session-anything'] } })
+  assertErrorEnvelope('disabled delete', offDelete)
+  if (offDelete.error.code !== 'disabled') {
+    throw new Error(`a disabled plugin must refuse deletion: ${JSON.stringify(offDelete)}`)
+  }
+  dispose(off)
+  console.log(`host inject OK: static inject = ${JSON.stringify(host.inject)} (no ctx.get race, missing carrier throws, enabled:false keeps the transport but refuses deletion)`)
 }
 
-// 1) no settings service -> entry config drives the cleanup, the route still works
+// 1) no settings service -> entry config drives the endpoints, the route works
 {
-  const entry = { sessionsRoot, maxAgeDays: 7, intervalMinutes: 9, dryRun: true }
+  const entry = { enabled: true, sessionsRoot }
   const ctx = makeCtx({ withSettings: false })
+  ctx.calls.info = ctx.calls.info ?? []
   const applied = host.apply(ctx, entry)
   if (applied !== undefined) {
     throw new Error(`apply must return undefined (returning a thenable breaks cordis loading), got ${typeof applied}`)
@@ -397,8 +418,10 @@ const assertErrorEnvelope = (label, result) => {
   if (ctx.calls.injectLists.some((list) => list.includes('webServer'))) {
     throw new Error(`the transport must not be gated by a dynamic inject: ${JSON.stringify(ctx.calls.injectLists)}`)
   }
-  if (ctx.calls.info.length === 0) throw new Error('startup cleanup tick must run from the entry config')
-  if (!ctx.calls.info[0][0].includes('scanned=')) throw new Error(`tick summary missing: ${ctx.calls.info[0]}`)
+  // 装载后什么都不该自己跑一遍：自动清理已移除，插件只被动响应请求。
+  if (ctx.calls.info.length !== 0) {
+    throw new Error(`loading must not run any cleanup by itself, got ${JSON.stringify(ctx.calls.info)}`)
+  }
   if (ctx.calls.settingsDescribeCalls !== 0) throw new Error('no settings service must not read a settings document')
   if (ctx.web.routes.length !== 1) throw new Error(`exactly one route must be registered, got ${ctx.web.routes.length}`)
   // 路由由恰好一个 effect 持有 —— 卸载时就是它把路由放掉的（下面 dispose 验）。
@@ -408,8 +431,12 @@ const assertErrorEnvelope = (label, result) => {
   }
   const route = routeOf(ctx)
   const got = await callEndpoint(route, 'getConfig')
-  if (!got.ok || got.value.maxAgeDays !== 7) throw new Error(`getConfig without settings: ${JSON.stringify(got)}`)
-  const set = await callEndpoint(route, 'setConfig', { args: { fields: { maxAgeDays: 3 } } })
+  if (!got.ok || got.value.enabled !== true || got.value.sessionsRoot !== sessionsRoot) {
+    throw new Error(`getConfig without settings: ${JSON.stringify(got)}`)
+  }
+  const list = await callEndpoint(route, 'listArchived')
+  if (!list.ok || !Array.isArray(list.value.items)) throw new Error(`listArchived without settings: ${JSON.stringify(list)}`)
+  const set = await callEndpoint(route, 'setConfig', { args: { fields: { enabled: false } } })
   if (set.ok || set.error.code !== 'settings-unavailable') {
     throw new Error(`setConfig without settings must report settings-unavailable: ${JSON.stringify(set)}`)
   }
@@ -418,23 +445,26 @@ const assertErrorEnvelope = (label, result) => {
     throw new Error(`resetConfig without settings must report settings-unavailable: ${JSON.stringify(reset)}`)
   }
   const unknown = await callEndpoint(route, 'nope')
-  if (unknown.ok || unknown.error.code !== 'settings-unavailable') {
-    throw new Error(`an unknown endpoint degrades the same way here: ${JSON.stringify(unknown)}`)
+  // An unknown endpoint is a request error regardless of whether settings is
+  // wired — the endpoint table is checked before the settings-only endpoints.
+  assertErrorEnvelope('unknown endpoint without settings', unknown)
+  if (unknown.error.code !== 'bad-request') {
+    throw new Error(`an unknown endpoint must report bad-request here: ${JSON.stringify(unknown)}`)
   }
   const before = ctx.calls.info.length
   dispose(ctx)
   if (ctx.web.routes.length !== 0) throw new Error('dispose must remove the /session-cleanup route')
   if (ctx.web.disposeCount() !== 1) throw new Error(`dispose must run the route disposer, ran ${ctx.web.disposeCount()}`)
   if (ctx.calls.info.length !== before) {
-    throw new Error('dispose must not rebuild the timer (settings fallback onChange guarded)')
+    throw new Error('dispose must not start any work')
   }
-  console.log('host OK: entry-config fallback (no settings) + /session-cleanup prefix route + unload guards')
+  console.log('host OK: entry-config fallback (no settings), nothing runs on load, /session-cleanup prefix route + unload guards')
 }
 
 // 1b) the transport fence, driven through the real route
 {
   const ctx = makeCtx({ withSettings: true })
-  host.apply(ctx, { sessionsRoot, dryRun: true, intervalMinutes: 9 })
+  host.apply(ctx, { sessionsRoot })
   await settle()
   const route = routeOf(ctx)
 
@@ -499,10 +529,12 @@ const assertErrorEnvelope = (label, result) => {
   console.log('host fence OK: 403 foreign Origin (same origin passes) / 405 non-POST / 415 non-JSON (charset passes) / 404 empty+multi-segment / 400 bad body / 413 over 1 MB / 500 throwing handler')
 }
 
-// 2) settings service -> the document layer overrides the entry config, a
-//    document change rebuilds the timer, and the route writes through it
+// 2) settings service -> the document layer overrides the entry config and the
+//    route writes through it. There is no timer any more, so the old
+//    "document change rebuilds the timer" assertions are replaced by "a
+//    document change is picked up by the next read".
 {
-  const entry = { sessionsRoot, maxAgeDays: 7, intervalMinutes: 9, dryRun: true }
+  const entry = { enabled: true, sessionsRoot }
   const ctx = makeCtx({ withSettings: true, entry })
   host.apply(ctx, entry)
   await settle()
@@ -510,20 +542,22 @@ const assertErrorEnvelope = (label, result) => {
   if (ctx.calls.routesAtSettingsRegister !== 1) {
     throw new Error(`the route must already be live when settings is wired, saw ${ctx.calls.routesAtSettingsRegister} route(s)`)
   }
-  if (ctx.calls.info.length === 0) throw new Error('startup tick must run with settings present')
-  const before = ctx.calls.info.length
-  // The real SettingsForms emits `settings/document-updated` after an accepted
-  // write; the double fires the same event from `update()`/`replace()` and via
-  // this helper, so the live-rebuild contract is measured, not inferred.
-  ctx.calls.fireSettingsChange()
-  await settle()
-  if (ctx.calls.info.length <= before) throw new Error('a document change must rebuild the timer (startup tick again)')
+  // Loading itself must not run anything.
+  if (ctx.calls.info.length !== 0) {
+    throw new Error(`loading must not run any cleanup by itself: ${JSON.stringify(ctx.calls.info)}`)
+  }
 
   const route = routeOf(ctx)
-  const set = await callEndpoint(route, 'setConfig', { args: { fields: { maxAgeDays: 3 } } })
-  if (!set.ok || set.value.maxAgeDays !== 3) throw new Error(`setConfig through the document: ${JSON.stringify(set)}`)
-  if (ctx.calls.settingsUpdates.length !== 1 || ctx.calls.settingsUpdates[0].maxAgeDays !== 3) {
+  const set = await callEndpoint(route, 'setConfig', { args: { fields: { enabled: false } } })
+  if (!set.ok || set.value.enabled !== false) throw new Error(`setConfig through the document: ${JSON.stringify(set)}`)
+  if (ctx.calls.settingsUpdates.length !== 1 || ctx.calls.settingsUpdates[0].enabled !== false) {
     throw new Error(`settings update not written: ${JSON.stringify(ctx.calls.settingsUpdates)}`)
+  }
+  // The write landed in the document, so the next read reflects it: nothing had
+  // to restart, because there is nothing left to restart.
+  const afterSet = await callEndpoint(route, 'listArchived')
+  if (!afterSet.ok || afterSet.value.disabled !== true) {
+    throw new Error(`the disabled flag must take effect on the next read: ${JSON.stringify(afterSet)}`)
   }
   // The client's own body shape is what the client sends; the handler must also
   // reject a non-object `fields` with the unchanged bad-request code.
@@ -537,20 +571,15 @@ const assertErrorEnvelope = (label, result) => {
   if (!reset.ok) throw new Error(`resetConfig: ${JSON.stringify(reset)}`)
   if (ctx.calls.settingsReplaces.length !== 1) throw new Error('settings replace not called by resetConfig')
   // 恢复默认 resolves the composition entry again (the user layer is cleared).
-  if (reset.value.maxAgeDays !== 7) throw new Error(`resetConfig must fall back to the entry config: ${JSON.stringify(reset)}`)
+  if (reset.value.enabled !== true) throw new Error(`resetConfig must fall back to the entry config: ${JSON.stringify(reset)}`)
 
-  const afterWatch = ctx.calls.info.length
   dispose(ctx)
   if (ctx.web.routes.length !== 0) throw new Error('dispose must remove the route')
-  if (ctx.calls.info.length !== afterWatch) {
-    throw new Error('dispose must not rebuild the timer (isUnloading guard)')
-  }
+  if (ctx.calls.info.length !== 0) throw new Error('dispose must not run any cleanup')
+  // A document event arriving after teardown must be guarded, not crash.
   ctx.calls.fireSettingsChange()
   await new Promise((resolve) => setTimeout(resolve, 50))
-  if (ctx.calls.info.length !== afterWatch) {
-    throw new Error('a document event after dispose must be guarded too')
-  }
-  console.log('host OK: settings document read/write + document-change rebuild + isUnloading guards')
+  console.log('host OK: settings document read/write + next-read refresh + no background work + isUnloading guard')
 }
 
 // 2b) fail-soft: the transport must be installed BEFORE the settings section.
@@ -568,7 +597,7 @@ const assertErrorEnvelope = (label, result) => {
 {
   const ctx = makeCtx({ withSettings: true, settingsThrows: true })
   let applyFailure = null
-  try { host.apply(ctx, { sessionsRoot, dryRun: true, intervalMinutes: 9 }) } catch (error) { applyFailure = error }
+  try { host.apply(ctx, { sessionsRoot }) } catch (error) { applyFailure = error }
   if (applyFailure !== null) throw new Error(`apply must not throw: ${applyFailure?.stack}`)
   if (!(ctx.calls.settingsFailure instanceof Error)) {
     throw new Error('the harness must have delivered the settings failure into the child fiber')
@@ -579,10 +608,11 @@ const assertErrorEnvelope = (label, result) => {
   if (ctx.web.routes.length !== 1) throw new Error(`the route must still be live, got ${ctx.web.routes.length}`)
   const route = routeOf(ctx)
   const got = await callEndpoint(route, 'getConfig')
-  if (!got.ok || got.value.maxAgeDays !== 30) {
+  // A settings provider that cannot describe leaves the ENTRY config in charge.
+  if (!got.ok || got.value.enabled !== true) {
     throw new Error(`the entry-config fallback must still answer getConfig: ${JSON.stringify(got)}`)
   }
-  const set = await callEndpoint(route, 'setConfig', { args: { fields: { maxAgeDays: 3 } } })
+  const set = await callEndpoint(route, 'setConfig', { args: { fields: { enabled: false } } })
   if (set.ok || set.error.code !== 'settings-unavailable') {
     throw new Error(`setConfig must degrade with settings-unavailable: ${JSON.stringify(set)}`)
   }
@@ -595,7 +625,7 @@ const assertErrorEnvelope = (label, result) => {
 //     effect registered before a throw in the same inject callback).
 {
   const ctx = makeCtx({ withSettings: true })
-  host.apply(ctx, { sessionsRoot, dryRun: true, intervalMinutes: 9 })
+  host.apply(ctx, { sessionsRoot })
   await settle()
   if (ctx.calls.routesAtSettingsRegister !== 1) {
     throw new Error(`the route must be live before the settings document is read, saw ${ctx.calls.routesAtSettingsRegister} route(s)`)
@@ -606,9 +636,21 @@ const assertErrorEnvelope = (label, result) => {
 
 rmSync(sessionsRoot, { recursive: true, force: true })
 
+/**
+ * Archive-set double: the real registry exposes `archivedSessionIds` as a
+ * getter and `unarchiveSession(id)` as a durable write, and the host half now
+ * calls the latter after a successful delete.
+ */
+const makeRegistry = (initial) => {
+  let archived = [...initial]
+  return {
+    get archivedSessionIds() { return archived },
+    async unarchiveSession(id) { archived = archived.filter((entry) => entry !== id) },
+  }
+}
 // --- client half: bundle + contract checks --------------------------------------
-// `React` / `JSDOM` come from `scripts/test-deps.mjs` (resolved at the top of
-// this file); jsdom stays the only section-level gate.
+// `React` / `JSDOM` come from `scripts/test-deps.mjs`; jsdom stays the only
+// section-level gate.
 let dom = null
 let handoff = null
 const bundleSource = readFileSync(clientPath, 'utf8')
@@ -643,7 +685,15 @@ const requireTable = (spec) => {
   if (spec === 'react') return React
   if (spec === 'react/jsx-runtime') return uiRequire('react/jsx-runtime')
   if (spec === '@deepseek-ai/dsh-client-ui-primitives') {
-    return { IconChevronDownOutlineMedium: icon }
+    return {
+      IconChevronDownOutlineMedium: icon,
+      IconTrashOutlineMedium: icon,
+      // The confirm dialog is a Modal in the shipped shell; the double renders
+      // its children inline so the jsdom flow can drive it.
+      Modal: ({ open, title, children, footer }) => (open
+        ? React.createElement('div', { 'data-modal': title }, children, footer)
+        : null),
+    }
   }
   throw new Error(`unexpected module-table word: ${spec}`)
 }
@@ -652,47 +702,38 @@ if (typeof exports_.apply !== 'function' || !Array.isArray(exports_.inject)) thr
 if (exports_.NS !== 'session-cleanup.card') throw new Error(`NS mismatch: ${exports_.NS}`)
 console.log('exports contract OK:', JSON.stringify(exports_.inject), 'NS =', exports_.NS)
 
-// Regression: the shipped settings shell's page slot must be the one claimed.
-// The card used to register on `settings.plugin.item` ("设置 → 插件 → 插件配置"),
-// a slot 0.2.0-rc.2 no longer declares — it survives only inside a comment in
-// the shipped slot contract. A registration on an undeclared slot waits forever
-// and renders nowhere, so the assertion is made against the SOURCE: the failure
-// mode is a page that never appears, which no render test here could catch.
+// Regression guards on the SOURCE, because the failure modes below are silent:
+// a registration on an undeclared slot waits forever and renders nowhere.
 {
   const source = readFileSync(clientPath, 'utf8')
   if (!/settings\.section/.test(source)) {
-    throw new Error("the card must register on the shipped `settings.section` page slot")
+    throw new Error('the card must register on the shipped `settings.section` page slot')
   }
   if (/['"]settings\.plugin\.item['"]/.test(source)) {
-    throw new Error("the card must not register on the retired `settings.plugin.item` slot")
+    throw new Error('the card must not register on the retired `settings.plugin.item` slot')
   }
-  console.log('settings slot source OK: registers on settings.section, never the retired settings.plugin.item')
+  if (!/sidebar\.workspaces\.session\.menu\.item/.test(source)) {
+    throw new Error('the session-row menu entry must register on `sidebar.workspaces.session.menu.item`')
+  }
+  console.log('slot source OK: settings.section + sidebar.workspaces.session.menu.item, never the retired settings.plugin.item')
 }
 
 // Card CSS must only reference theme aliases the shipped theme actually defines:
-// an undefined var() silently drops its declaration (the shipped settings card
-// still asks for `--dsw-alias-label-error` / `--dsw-alias-label-on-brand`, which
-// 0.1.5-rc.1's @deepseek-ai/dsh-client-ui-theme never defines; it defines
-// `--dsw-alias-state-error-primary` and `--dsw-alias-label-primary-foreground`).
+// an undefined var() silently drops its declaration.
 for (const dead of ['--dsw-alias-label-on-brand', '--dsw-alias-label-error']) {
   if (bundleSource.includes(dead)) throw new Error(`card CSS references an undefined theme alias: ${dead}`)
 }
 
 let registered = null
+const menuRegistered = []
 let dictionaries = null
 
 /**
- * `fetch` double, wired to the REAL host route.
- *
- * The browser half now posts to `/session-cleanup/<endpoint>` and unwraps the
- * `{ ok, value }` envelope, so this records every request (url, method,
- * content-type, exact body) and answers with a Response-shaped object built
- * from what the installed host half really replies through its route. A
- * hand-written envelope would not prove the two halves agree on the contract.
+ * `fetch` double, wired to the REAL host route, so every client call exercises
+ * the two halves' shared contract rather than a hand-written envelope.
  */
 const fetchCalls = []
 let fetchMode = { networkError: null }
-/** The host context the fetch double answers from (swapped per section). */
 let activeCtx = null
 const realFetch = globalThis.fetch
 globalThis.fetch = async (url, init = {}) => {
@@ -712,8 +753,6 @@ globalThis.fetch = async (url, init = {}) => {
       json: async () => fetchMode.forceEnvelope ?? { ok: true, value: {} },
     }
   }
-  // Default: answered by the REAL host route installed above, so a client call
-  // exercises the two halves' shared contract rather than a hand-written stub.
   const res = await callRoute(routeOf(activeCtx), { pathname: call.url, body: JSON.parse(call.body) })
   return { ok: res.status >= 200 && res.status < 300, status: res.status, json: async () => JSON.parse(res.body) }
 }
@@ -725,119 +764,131 @@ const clientCtx = {
     bind: () => (key) => 't:' + key,
   },
   slots: {
-    inject: (key, callback) => { registered = callback(); registered.slot = key },
+    inject: (key, callback) => {
+      const entry = callback()
+      entry.slot = key
+      if (key === 'settings.section') registered = entry
+      else menuRegistered.push(entry)
+    },
     register: (options, component) => ({ ...options, component }),
   },
 }
 
-// One settings-capable host half, live for the whole client section: the card's
-// reads and writes are answered by the real route and the real settings document.
-// The entry config carries the 45-day override the card must render (the mock
-// settings provider starts from exactly this base).
-let fetchCtx = null
-const cardEntry = {
-  sessionsRoot: 'C:/__verify__/sessions',
-  enabled: true, maxAgeDays: 45, maxTotalMB: 1024, keepSessions: 5,
-  intervalMinutes: 360, dryRun: false,
+// Archive fixture: the host half installed for the client section lists these
+// from a temp sessions root, so the client literally renders what the Host says.
+const clientRoot = mkdtempSync(join(tmpdir(), 'cleanup-client-'))
+const archA = 'session-ver-a'
+const archB = 'session-ver-b'
+for (const [project, id] of [['p1', archA], ['p2', archB]]) {
+  mkdirSync(join(clientRoot, project, id), { recursive: true })
+  writeFileSync(join(clientRoot, project, id, 'session.v4.jsonl.zstd'), Buffer.alloc(2048, 0x61))
 }
-fetchCtx = makeCtx({ withSettings: true, entry: cardEntry })
+
+const cardEntry = { enabled: true, sessionsRoot: clientRoot }
+const fetchCtx = makeCtx({ withSettings: true, entry: cardEntry })
+fetchCtx.sessions.list = () => []
+fetchCtx.workspaceRegistry = makeRegistry([archA, archB])
 host.apply(fetchCtx, cardEntry)
 await settle()
 activeCtx = fetchCtx
 
 exports_.apply(clientCtx)
-if (registered === null) throw new Error('slots.inject never registered')
-// Regression: the page must claim the slot the shipped settings shell actually
-// declares. `settings.plugin.item` was the 0.1.x "设置 → 插件 → 插件配置" slot;
-// it survives only inside a comment in the shipped slot contract, so a card
-// registered there waits forever and renders nowhere.
-if (registered.slot !== 'settings.section') {
-  throw new Error(`the card must register on settings.section, got ${JSON.stringify(registered.slot)}`)
+if (registered === null) throw new Error('settings.section was never registered')
+if (menuRegistered.length !== 1) throw new Error(`the session menu entry must register exactly once, got ${menuRegistered.length}`)
+
+// The settings page claims the slot the shipped shell declares.
+if (registered.slot !== 'settings.section' || registered.name !== 'settings.section') {
+  throw new Error(`card registration mismatch: ${JSON.stringify({ slot: registered.slot, name: registered.name })}`)
 }
-if (registered.name !== 'settings.section') {
-  throw new Error(`registration name must match the slot: ${JSON.stringify(registered.name)}`)
+if (registered.id !== 'session-cleanup') throw new Error(`card id mismatch: ${JSON.stringify(registered.id)}`)
+if (typeof registered.label !== 'function' || registered.label() !== 't:title') {
+  throw new Error(`the label must be a thunk resolving through this plugin's dictionary: ${JSON.stringify(registered.label?.())}`)
 }
-if (registered.id !== 'session-cleanup') {
-  throw new Error(`card registration mismatch: ${JSON.stringify(registered)}`)
+for (const fn of ['getConfig', 'setConfig', 'resetConfig', 'listArchived', 'deleteArchived']) {
+  if (typeof registered.inject()[fn] !== 'function') throw new Error(`the card must receive ${fn} through its inject thunk`)
 }
-// The nav entry is a thunk the shell resolves per render (the shape every
-// shipped section uses), not a fixed string.
-if (typeof registered.label !== 'function') {
-  throw new Error(`the section label must be a thunk: ${JSON.stringify(registered.label)}`)
+
+// The session-row menu entry claims its slot with a stable id and order.
+const menu = menuRegistered[0]
+if (menu.name !== 'sidebar.workspaces.session.menu.item') {
+  throw new Error(`menu registration name must match the slot: ${JSON.stringify(menu.name)}`)
 }
-if (registered.label() !== 't:title') {
-  throw new Error(`the label must resolve through this plugin's dictionary: ${JSON.stringify(registered.label())}`)
+if (menu.id === undefined || typeof menu.order !== 'number') {
+  throw new Error(`menu registration must carry an id and order: ${JSON.stringify({ id: menu.id, order: menu.order })}`)
 }
-if (typeof registered.inject !== 'function' || registered.inject().getConfig === undefined) {
-  throw new Error('the card must receive its api through an inject thunk')
-}
+
 if (dictionaries === null || dictionaries.ns !== exports_.NS) throw new Error('dictionaries not registered')
 const zhKeys = Object.keys(dictionaries.dicts.zh)
 const enKeys = Object.keys(dictionaries.dicts.en)
 if (JSON.stringify(zhKeys) !== JSON.stringify(enKeys)) {
   throw new Error(`zh/en key mismatch:\nzh: ${zhKeys}\nen: ${enKeys}`)
 }
-console.log(`apply contract OK: settings.section id=session-cleanup label=thunk | dict keys = ${zhKeys.length}`)
+console.log(`apply contract OK: settings.section id=session-cleanup label=thunk | menu id=${menu.id} order=${menu.order} | dict keys = ${zhKeys.length}`)
 
-// The client must not depend on the Connection RPC surface any more, and its
-// inject list must not name a service it no longer reads. (The explanatory
-// comment that names the old call is fine; an actual property access is not.)
+// The client must not depend on the Connection RPC surface any more.
 if (exports_.inject.includes('connection')) throw new Error(`exports.inject still requires connection: ${JSON.stringify(exports_.inject)}`)
 if (/\bctx\.connection\b/.test(bundleSource)) throw new Error('the bundle still accesses ctx.connection')
 if (/\bconnection\.rpc\b/.test(bundleSource)) throw new Error('the bundle still calls ctx.connection.rpc')
 
-// cardApi flow: the card reads/writes config over POST /session-cleanup/<endpoint>,
-// answered by the real host route.
+// cardApi flow: the card reads the list and deletes over the real host route.
 {
   const api = registered.inject()
-  const got = await api.getConfig()
-  if (got.maxAgeDays !== 45) throw new Error(`cardApi getConfig: ${JSON.stringify(got)}`)
-  const set = await api.setConfig({ maxAgeDays: 60 })
-  if (set.maxAgeDays !== 60) throw new Error(`cardApi setConfig: ${JSON.stringify(set)}`)
-  const reset = await api.resetConfig()
-  // The scope's `get()` resolves the ENTRY config back over the (now empty)
-  // user document, so 恢复默认 lands on 45 — the composition base — not on the
-  // schema default. That is the value the card re-renders afterwards.
-  if (reset.maxAgeDays !== 45) throw new Error(`cardApi resetConfig: ${JSON.stringify(reset)}`)
-  const [g, s, r] = fetchCalls
-  if (g.url !== '/session-cleanup/getConfig' || g.method !== 'POST' || g.contentType !== 'application/json' || g.body !== '{"args":{}}') {
-    throw new Error(`getConfig fetch: ${JSON.stringify(g)}`)
+  const cfg = await api.getConfig()
+  if (cfg.enabled !== true) throw new Error(`cardApi getConfig: ${JSON.stringify(cfg)}`)
+  // The removed automatic-cleanup knobs must not come back.
+  for (const gone of ['maxAgeDays', 'maxTotalMB', 'keepSessions', 'intervalMinutes', 'dryRun']) {
+    if (gone in cfg) throw new Error(`config must no longer expose ${gone}: ${JSON.stringify(cfg)}`)
   }
-  if (s.url !== '/session-cleanup/setConfig' || s.method !== 'POST' || s.contentType !== 'application/json' || s.body !== '{"args":{"fields":{"maxAgeDays":60}}}') {
-    throw new Error(`setConfig fetch: ${JSON.stringify(s)}`)
+  const listing = await api.listArchived()
+  if (listing.items.length !== 2) throw new Error(`cardApi listArchived: ${JSON.stringify(listing)}`)
+  if (!(listing.totalBytes >= 4096)) throw new Error(`listing must report sizes: ${JSON.stringify(listing)}`)
+
+  const before = fetchCalls.length
+  const result = await api.deleteArchived([archA])
+  if (result.removed.length !== 1 || result.removed[0].id !== archA) {
+    throw new Error(`cardApi deleteArchived: ${JSON.stringify(result)}`)
   }
-  if (r.url !== '/session-cleanup/resetConfig' || r.method !== 'POST' || r.contentType !== 'application/json' || r.body !== '{"args":{}}') {
-    throw new Error(`resetConfig fetch: ${JSON.stringify(r)}`)
+  const call = fetchCalls[fetchCalls.length - 1]
+  if (call.url !== '/session-cleanup/deleteArchived' || call.method !== 'POST' || call.contentType !== 'application/json') {
+    throw new Error(`deleteArchived fetch: ${JSON.stringify(call)}`)
   }
-  console.log('cardApi OK: getConfig/setConfig/resetConfig POST to /session-cleanup/<endpoint> and are answered by the host route')
+  if (call.body !== JSON.stringify({ args: { ids: [archA] } })) {
+    throw new Error(`deleteArchived body: ${JSON.stringify(call.body)}`)
+  }
+  // The fixture directory is really gone, proving the two halves agree.
+  let stillThere = true
+  try { readdirSync(join(clientRoot, 'p1', archA)) } catch { stillThere = false }
+  if (stillThere) throw new Error('the archived session directory must be gone after deleteArchived')
+  if (fetchCalls.length - before !== 1) {
+    throw new Error(`deleteArchived must issue exactly one request, issued ${fetchCalls.length - before}`)
+  }
+  console.log('cardApi OK: listArchived/deleteArchived POST to /session-cleanup/<endpoint> and are answered by the host route')
 }
 
-// Failure branches: a non-2xx response, a server-side 500 and a dead network
-// must all reject with an Error, so the card's catch renders 保存失败 instead of
-// a false success.
+// Failure branches must all reject with an Error so the card can report it.
 {
   const api = registered.inject()
   fetchMode = { networkError: 'connection refused' }
   let netFailure = null
-  try { await api.getConfig() } catch (error) { netFailure = error }
+  try { await api.listArchived() } catch (error) { netFailure = error }
   if (netFailure === null || !netFailure.message.includes('connection refused')) {
     throw new Error(`a dead network must reject: ${JSON.stringify(netFailure)}`)
   }
   fetchMode = { networkError: null, forceStatus: 500 }
   let httpFailure = null
-  try { await api.getConfig() } catch (error) { httpFailure = error }
+  try { await api.listArchived() } catch (error) { httpFailure = error }
   if (httpFailure === null || !httpFailure.message.includes('HTTP 500')) {
     throw new Error(`a 500 must reject with the status: ${JSON.stringify(httpFailure)}`)
   }
-  fetchMode = { networkError: null, forceStatus: 200, forceEnvelope: { ok: false, error: { code: 'settings-rejected', message: 'rejected by schema', details: { namespace: 'session-cleanup' } } } }
+  fetchMode = { networkError: null, forceStatus: 200, forceEnvelope: { ok: false, error: { code: 'disabled', message: 'turned off', details: {} } } }
   let envelopeFailure = null
-  try { await api.getConfig() } catch (error) { envelopeFailure = error }
-  if (envelopeFailure === null || envelopeFailure.code !== 'settings-rejected' || envelopeFailure.details?.namespace !== 'session-cleanup') {
-    throw new Error(`a failed envelope must carry .code/.details: ${JSON.stringify(envelopeFailure)}`)
+  try { await api.deleteArchived([archB]) } catch (error) { envelopeFailure = error }
+  if (envelopeFailure === null || envelopeFailure.code !== 'disabled') {
+    throw new Error(`a failed envelope must carry .code: ${JSON.stringify(envelopeFailure)}`)
   }
   fetchMode = { networkError: null }
   fetchCalls.length = 0
-  console.log('cardApi OK: transport failures reject (network / HTTP 500 / failed envelope with .code+.details)')
+  console.log('cardApi OK: transport failures reject (network / HTTP 500 / failed envelope with .code)')
 }
 
 // --- render + interact (jsdom; skipped when jsdom is missing) --------------------
@@ -849,26 +900,33 @@ if (JSDOM === null) {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
   const en = dictionaries.dicts.en
-  const t = (key) => en[key]
+  const t = (key, params) => {
+    const text = en[key]
+    if (text === undefined) return key
+    if (params === undefined) return text
+    return text.replace(/\{(\w+)\}/g, (whole, name) => (name in params ? String(params[name]) : whole))
+  }
   const doc = dom.window.document
 
-  // A pristine host half for the render flow: the earlier cardApi section wrote
-  // through the installed document, so this one starts from the documented
-  // 45-day override. `activeCtx` is what the fetch double answers from.
+  // A pristine host half for the render flow.
   fetchCalls.length = 0
-  const domCtx = makeCtx({ withSettings: true, entry: cardEntry })
-  host.apply(domCtx, cardEntry)
+  const renderRoot = mkdtempSync(join(tmpdir(), 'cleanup-render-'))
+  const rA = 'session-render-a'
+  const rB = 'session-render-b'
+  for (const [project, id] of [['p1', rA], ['p2', rB]]) {
+    mkdirSync(join(renderRoot, project, id), { recursive: true })
+    writeFileSync(join(renderRoot, project, id, 'session.v4.jsonl.zstd'), Buffer.alloc(4096, 0x61))
+  }
+  const renderEntry = { enabled: true, sessionsRoot: renderRoot }
+  const domCtx = makeCtx({ withSettings: true, entry: renderEntry })
+  domCtx.sessions.list = () => []
+  domCtx.workspaceRegistry = makeRegistry([rA, rB])
+  host.apply(domCtx, renderEntry)
   await settle()
   activeCtx = domCtx
 
   const fireClick = (el) => {
     el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true }))
-  }
-  const fireChange = (input, value) => {
-    const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set
-    setter.call(input, value)
-    input.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
-    input.dispatchEvent(new dom.window.Event('change', { bubbles: true }))
   }
   const waitFor = async (predicate, what) => {
     const deadline = Date.now() + 3000
@@ -884,75 +942,75 @@ if (JSDOM === null) {
   })
   await waitFor(() => doc.querySelector('.sc-header') !== null, 'card header (initial getConfig)')
 
-  // the user override is visible and the body opens on click
   await act(async () => { fireClick(doc.querySelector('.sc-header')) })
-  const inputs = [...doc.querySelectorAll('.sc-input')]
-  if (inputs.length !== 5) throw new Error(`expected 5 number/text inputs, got ${inputs.length}`)
-  const toggles = [...doc.querySelectorAll('.sc-toggle')]
-  if (toggles.length !== 2) throw new Error(`expected 2 toggles, got ${toggles.length}`)
-  const maxAgeInput = doc.querySelector('#sc-maxAgeDays')
-  if (maxAgeInput === null || maxAgeInput.value !== '45') throw new Error(`override value: ${maxAgeInput?.value}`)
+  await waitFor(() => doc.querySelectorAll('.sc-row').length > 0, 'the archived session list')
 
-  // No dead per-field reset entry point: the card must not render a reset
-  // button / override badge that can never enable (only 恢复默认 exists).
-  if (doc.querySelector('.sc-reset') !== null || doc.querySelector('.sc-overridden') !== null) {
-    throw new Error('per-field reset UI must not exist (it was a permanently disabled no-op)')
+  const rows = [...doc.querySelectorAll('.sc-row')]
+  if (rows.length !== 2) throw new Error(`expected 2 archived rows, got ${rows.length}`)
+  const checkboxes = [...doc.querySelectorAll('.sc-check[type="checkbox"]')]
+  if (checkboxes.length !== 2) throw new Error(`expected 2 selectable rows, got ${checkboxes.length}`)
+
+  // The card must not offer any automatic-cleanup knob any more.
+  for (const dead of ['#sc-maxAgeDays', '#sc-maxTotalMB', '#sc-keepSessions', '#sc-intervalMinutes', '#sc-dryRun']) {
+    if (doc.querySelector(dead) !== null) throw new Error(`the automatic-cleanup field ${dead} must be gone`)
   }
 
-  // staged edit -> save writes the field over POST /session-cleanup/setConfig
-  await act(async () => { fireChange(maxAgeInput, '60') })
-  if (!doc.querySelector('.sc-pending')) throw new Error('unsaved badge missing')
-  const saveButton = doc.querySelector('.sc-save')
-  if (saveButton === null || saveButton.disabled) throw new Error('save must be enabled with staged edits')
-  await act(async () => { fireClick(saveButton) })
-  await waitFor(() => fetchCalls.some((c) => c.url.endsWith('/setConfig')), 'setConfig request')
-  const setCall = fetchCalls[fetchCalls.length - 1]
-  if (setCall.url !== '/session-cleanup/setConfig' || setCall.method !== 'POST' || setCall.contentType !== 'application/json') {
-    throw new Error(`save request: ${JSON.stringify(setCall)}`)
-  }
-  if (setCall.body !== '{"args":{"fields":{"maxAgeDays":60}}}') throw new Error(`save body: ${JSON.stringify(setCall)}`)
-  if (doc.querySelector('.sc-pending')) throw new Error('pending badge must clear after save')
-  console.log('card OK: fields render, staged edit saves over POST /session-cleanup/setConfig')
+  // Selecting a row reveals the bulk delete action.
+  await act(async () => { fireClick(checkboxes[0]) })
+  await waitFor(() => [...doc.querySelectorAll('.sc-danger')].some((b) => b.textContent.startsWith(en.deleteSelected)), 'bulk delete')
 
-  // 恢复默认 (reset-all) posts to /session-cleanup/resetConfig
-  const resetAllButton = [...doc.querySelectorAll('.sc-discard')].find((b) => b.textContent === en.resetAll)
-  if (resetAllButton === undefined || resetAllButton.disabled) throw new Error('reset-all must be enabled after save')
-  await act(async () => { fireClick(resetAllButton) })
-  await waitFor(() => fetchCalls.some((c) => c.url.endsWith('/resetConfig')), 'resetConfig request')
-  const resetCall = fetchCalls[fetchCalls.length - 1]
-  if (resetCall.url !== '/session-cleanup/resetConfig' || resetCall.method !== 'POST' || resetCall.body !== '{"args":{}}') {
-    throw new Error(`reset request: ${JSON.stringify(resetCall)}`)
-  }
-  console.log('card OK: reset-all posts to /session-cleanup/resetConfig')
+  // Deleting asks first: the confirmation names the directory and the warning.
+  const bulk = [...doc.querySelectorAll('.sc-danger')].find((b) => b.textContent.startsWith(en.deleteSelected))
+  await act(async () => { fireClick(bulk) })
+  await waitFor(() => doc.querySelector('[data-modal]') !== null, 'the confirmation dialog')
+  const modal = doc.querySelector('[data-modal]')
+  if (!modal.textContent.includes(en.confirmWarn)) throw new Error('the dialog must warn that deletion is irreversible')
+  if (!modal.textContent.includes(en.confirmIntro)) throw new Error('the dialog must state what is deleted')
+  const deletesBeforeConfirm = fetchCalls.filter((c) => c.url.endsWith('/deleteArchived')).length
+  if (deletesBeforeConfirm !== 0) throw new Error('opening the dialog must not delete anything')
 
-  // Per-field validation mirrors the Host schema bounds: intervalMinutes is
-  // `z.number().min(1)` there, so a staged 0 must be reported under that field
-  // (and keep 保存 blocked) instead of failing only after the Host rejects it.
-  const intervalInput = doc.querySelector('#sc-intervalMinutes')
-  await act(async () => { fireChange(intervalInput, '0') })
-  const invalidText = doc.querySelector('.sc-invalid-text')
-  if (invalidText === null || invalidText.textContent !== en.invalidInterval) {
-    throw new Error(`intervalMinutes 0 must show its own message, got: ${JSON.stringify(invalidText?.textContent)}`)
+  // Cancelling leaves everything alone.
+  const cancelButton = [...modal.querySelectorAll('button')].find((b) => b.textContent === en.confirmCancel)
+  if (cancelButton === undefined) throw new Error('the dialog must offer a cancel action')
+  await act(async () => { fireClick(cancelButton) })
+  await waitFor(() => doc.querySelector('[data-modal]') === null, 'the dialog to close')
+  if (fetchCalls.filter((c) => c.url.endsWith('/deleteArchived')).length !== 0) {
+    throw new Error('cancelling must not delete anything')
   }
-  if (!doc.querySelector('#sc-intervalMinutes').classList.contains('sc-invalid')) {
-    throw new Error('the offending input must carry the sc-invalid marker')
+  console.log('card OK: archived sessions render, selecting shows bulk delete, and the dialog asks before deleting')
+
+  // Confirming really deletes, and the list refreshes. Only THIS section's new
+  // requests count: `fetchCalls` still holds the earlier cardApi section's, and
+  // matching those would assert against a different sessions root.
+  const deletesBefore = fetchCalls.filter((c) => c.url.endsWith('/deleteArchived')).length
+  await act(async () => { fireClick([...doc.querySelectorAll('.sc-danger')].find((b) => b.textContent.startsWith(en.deleteSelected))) })
+  await waitFor(() => doc.querySelector('[data-modal]') !== null, 'the dialog again')
+  const confirmButton = [...doc.querySelectorAll('[data-modal] button')].find((b) => b.textContent === en.confirmDelete)
+  if (confirmButton === undefined) throw new Error('the dialog must offer a permanent-delete action')
+  await act(async () => { fireClick(confirmButton) })
+  await waitFor(() => fetchCalls.filter((c) => c.url.endsWith('/deleteArchived')).length > deletesBefore, 'the deleteArchived request')
+  const delCall = fetchCalls.filter((c) => c.url.endsWith('/deleteArchived'))[deletesBefore]
+  if (delCall.method !== 'POST' || delCall.contentType !== 'application/json') {
+    throw new Error(`delete request: ${JSON.stringify(delCall)}`)
   }
-  const blockedSave = doc.querySelector('.sc-save')
-  if (blockedSave === null || !blockedSave.disabled) throw new Error('save must be blocked while a staged field is invalid')
-  const setCallsBefore = fetchCalls.filter((c) => c.url.endsWith('/setConfig')).length
-  await act(async () => { fireClick(blockedSave) })
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)) })
-  if (fetchCalls.filter((c) => c.url.endsWith('/setConfig')).length !== setCallsBefore) {
-    throw new Error('an invalid staged field must never reach the setConfig endpoint')
+  if (!delCall.body.includes(rA)) {
+    throw new Error(`the delete must target this section's fixture (${rA}), got: ${delCall.body}`)
   }
-  const discardButton = [...doc.querySelectorAll('.sc-discard')].find((b) => b.textContent === en.discard)
-  await act(async () => { fireClick(discardButton) })
-  if (doc.querySelector('.sc-invalid-text') !== null) throw new Error('discard must clear the staged invalid value')
-  console.log('card OK: per-field validation names the field and blocks the save')
+  // The whole session directory must be gone from THIS section's root.
+  await waitFor(() => {
+    try { readdirSync(join(renderRoot, 'p1', rA)); return false } catch { return true }
+  }, 'the archived session directory to disappear')
+  // The deleted session must also leave the archive set: a directory that is
+  // gone while its id stays archived shows up forever as an undeletable ghost.
+  await waitFor(() => !domCtx.workspaceRegistry.archivedSessionIds.includes(rA), 'the session to be unarchived')
+  await waitFor(() => doc.querySelectorAll('.sc-row').length === 1, 'the list to shrink to one row')
+  console.log('card OK: confirming deletes the directory over POST /session-cleanup/deleteArchived, unarchives it, and refreshes the list')
 
   await act(async () => { root.unmount() })
+  rmSync(renderRoot, { recursive: true, force: true })
 }
 
+rmSync(clientRoot, { recursive: true, force: true })
 globalThis.fetch = realFetch
 
 console.log('\nALL HARNESS CHECKS PASSED')

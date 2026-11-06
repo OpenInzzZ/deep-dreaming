@@ -1,32 +1,33 @@
 /**
- * Browser half of the session-cleanup patch: a configuration card inside
- * 设置 → 插件 → 插件配置 (the `settings.plugin.item` slot).
+ * Browser half of the session-cleanup patch.
  *
- * The card reads and writes the Host-registered settings namespace
- * `session-cleanup` through the Host's fenced prefix route
- * (`POST /session-cleanup/getConfig|setConfig|resetConfig`, see the `call`
- * helper below). It renders the same fields the plugin consumes — enabled,
- * maxAgeDays, maxTotalMB, keepSessions, intervalMinutes, dryRun, sessionsRoot
- * — with staged edits validated per field against the Host schema before save,
- * and a save that writes each field through the scope (the Host applies
- * changes live and rebuilds its cleanup timer).
+ * 自动清理已整体移除：这个插件现在只做一件事——**手动物理删除已归档会话**。
+ * 两个入口共用同一套 Host 端点（`POST /session-cleanup/<endpoint>`）：
  *
- * There is deliberately NO per-field reset-to-base: the Host RPC exposes the
- * resolved config only, never which layer (schema default / composition entry
- * / user document) supplied each value, so a per-field "重置" cannot know the
- * base to return to. 恢复默认 (reset-all, backed by the resetConfig endpoint)
- * is the honest equivalent; a permanently disabled button is not.
+ *   1. 设置页 `settings.section`（id `session-cleanup`）：一张「已归档会话」
+ *      列表，带大小与目录，可逐条或批量勾选删除；删除前弹出二次确认，
+ *      列出将删除的会话、目录与总占用。
+ *   2. 会话行的右键菜单（`sidebar.workspaces.session.menu.item`）：仅当该会话
+ *      已归档时出现「删除归档会话」，点击同样走二次确认弹窗。
  *
- * The card renders nothing while the namespace is unavailable (a deployment
- * without the Host plugin shows no trace), mirroring the shipped cards.
+ * 已归档的权威来源是 Host 的 `workspaceRegistry.archivedSessionIds`，客户端
+ * 从不自行推断。菜单项判断「是否已归档」用的是官方提供的 `hooks.archived`
+ * 观察值（`PinSessionInjected` 同款），因此不额外复制归档状态。
+ *
+ * 为什么用自建 fenced 路由而不是 settings 文档：删除是动作而不是配置，
+ * 而且卡片的数据路径不该依赖 Host 如何接线 settings（见补丁 README）。
  */
 window.__ModuleLoader__.load({ id: '@local/dsh-plugin-session-cleanup', factory: (require) => {
 var module = { exports: {} }; var exports = module.exports;
 
 const React = require('react');
-const { useEffect, useState } = React;
-const { jsx, jsxs } = require('react/jsx-runtime');
-const { IconChevronDownOutlineMedium } = require('@deepseek-ai/dsh-client-ui-primitives');
+const { useEffect, useState, useMemo, useCallback } = React;
+const { jsx, jsxs, Fragment } = require('react/jsx-runtime');
+const {
+  IconChevronDownOutlineMedium,
+  IconTrashOutlineMedium,
+  Modal,
+} = require('@deepseek-ai/dsh-client-ui-primitives');
 
 const PLUGIN_ID = '@local/dsh-plugin-session-cleanup';
 
@@ -42,24 +43,27 @@ const CSS = [
   '.sc-chevron{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .16s}',
   '.sc-chevron-open{transform:rotate(180deg)}',
   '.sc-body{border-top:1px solid var(--dsw-alias-border-l2);margin:0 16px;padding-bottom:8px}',
-  '.sc-pending{white-space:nowrap;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;flex:none;padding:1px 8px;font-size:11px;font-weight:500;line-height:17px}',
-  '.sc-field{flex-direction:column;gap:6px;padding:12px 0;display:flex}',
-  '.sc-field+.sc-field{border-top:1px solid var(--dsw-alias-border-l2)}',
-  '.sc-field-head{align-items:center;gap:8px;display:flex}',
-  '.sc-label{min-width:0;color:var(--dsw-alias-label-primary);flex:1;font-size:13px;font-weight:500;line-height:1.5}',
-  '.sc-input{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}',
-  '.sc-input:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:none}',
-  '.sc-input:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}',
-  '.sc-invalid{border-color:var(--dsw-alias-state-error-primary)}',
-  '.sc-invalid-text{color:var(--dsw-alias-state-error-primary);margin:0;font-size:12px;line-height:1.5}',
-  '.sc-hint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:1.5}',
-  '.sc-toggle{accent-color:var(--dsw-alias-brand-primary);width:16px;height:16px}',
-  '.sc-footer{border-top:1px solid var(--dsw-alias-border-l2);justify-content:flex-end;align-items:center;gap:8px;padding:12px 0 4px;display:flex}',
+  '.sc-toolbar{align-items:center;gap:8px;padding:12px 0;display:flex;flex-wrap:wrap}',
+  '.sc-summary{min-width:0;color:var(--dsw-alias-label-secondary);flex:1;font-size:13px;line-height:1.5}',
+  '.sc-list{max-height:320px;overflow-y:auto;margin:0;padding:0;list-style:none}',
+  '.sc-row{align-items:flex-start;gap:10px;padding:10px 0;border-top:1px solid var(--dsw-alias-border-l2);display:flex}',
+  '.sc-row:first-child{border-top:0}',
+  '.sc-check{accent-color:var(--dsw-alias-brand-primary);width:16px;height:16px;flex:none;margin-top:2px}',
+  '.sc-row-text{min-width:0;flex:1;flex-direction:column;gap:2px;display:flex}',
+  '.sc-row-title{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500;line-height:1.5;word-break:break-all}',
+  '.sc-row-meta{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:1.5;word-break:break-all}',
+  '.sc-row-live{color:var(--dsw-alias-state-business-primary);font-size:12px;line-height:1.5}',
+  '.sc-row-missing{color:var(--dsw-alias-label-caption);font-size:12px;line-height:1.5}',
+  '.sc-danger,.sc-plain{appearance:none;font:inherit;cursor:pointer;border:1px solid transparent;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5}',
+  '.sc-danger{border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary);background:0 0}',
+  '.sc-danger:hover{background:var(--dsw-alias-interactive-bg-hover)}',
+  '.sc-plain{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);background:0 0}',
+  '.sc-danger:disabled,.sc-plain:disabled{opacity:.5;cursor:default}',
+  '.sc-empty{color:var(--dsw-alias-label-tertiary);margin:0;padding:12px 0;font-size:13px;line-height:1.5}',
   '.sc-failed{min-width:0;color:var(--dsw-alias-state-error-primary);flex:1;margin:0;font-size:12px;line-height:1.5}',
-  '.sc-discard,.sc-save{appearance:none;font:inherit;cursor:pointer;border:1px solid transparent;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5}',
-  '.sc-discard{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);background:0 0}',
-  '.sc-save{background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-foreground)}',
-  '.sc-save:disabled,.sc-discard:disabled{opacity:.5;cursor:default}',
+  '.sc-confirm-line{color:var(--dsw-alias-label-secondary);margin:0 0 6px;font-size:13px;line-height:1.6}',
+  '.sc-confirm-path{color:var(--dsw-alias-label-tertiary);margin:0 0 4px;font-size:12px;line-height:1.5;word-break:break-all}',
+  '.sc-confirm-warn{color:var(--dsw-alias-state-error-primary);margin:10px 0 0;font-size:13px;line-height:1.6}',
 ].join('\n');
 (function () {
   if (typeof document === 'undefined') return
@@ -75,7 +79,7 @@ const CSS = [
 /** Simplified Chinese dictionary and key source of truth. */
 const zh = {
   title: '会话清理',
-  description: '按保留天数/总容量定期清理归档会话,跳过活跃会话。',
+  description: '手动删除已归档会话，释放磁盘占用。不再自动清理。',
   unsaved: '未保存',
   collapse: '收起',
   expand: '展开',
@@ -83,30 +87,42 @@ const zh = {
   saving: '保存中…',
   discard: '放弃',
   saveFailed: '保存失败,请重试。',
-  invalidNumber: '请输入有效数字',
-  invalidNonNegative: '请输入不小于 0 的数字',
-  invalidInterval: '清理间隔至少为 1 分钟',
   resetAll: '恢复默认',
   enabled: '启用',
-  enabledHint: '关闭后停止定期清理。',
-  maxAgeDays: '保留天数',
-  maxAgeDaysHint: '超过该天数的归档会话可删;0 = 不按天数清理。',
-  maxTotalMB: '总容量上限 (MB)',
-  maxTotalMBHint: '会话目录总占用超过该值时按最旧优先删除;0 = 不限制。',
-  keepSessions: '最少保留会话数',
-  keepSessionsHint: '超龄规则仅作用于最旧超出部分,最近的会话受此保护。',
-  intervalMinutes: '清理间隔 (分钟)',
-  intervalMinutesHint: '启动时总会先清理一次,之后按此间隔执行。',
-  dryRun: '演练模式',
-  dryRunHint: '只报告将要删除的会话,不实际删除。',
+  enabledHint: '关闭后不列出也不允许删除归档会话。',
   sessionsRoot: '会话根目录',
   sessionsRootHint: '留空使用 $DSH_HOME/sessions。',
+  archivedList: '已归档会话',
+  refresh: '刷新',
+  loading: '加载中…',
+  empty: '没有已归档会话。',
+  selectAll: '全选',
+  clearAll: '取消全选',
+  selectedCount: '已选 {n} 项',
+  deleteSelected: '删除所选',
+  deleteOne: '删除',
+  live: '正在运行，不可删除',
+  missing: '磁盘上已无此会话目录',
+  totalBytes: '共 {size}',
+  loadFailed: '读取已归档会话失败。',
+  deleteFailed: '删除失败,请重试。',
+  confirmTitle: '确认删除已归档会话',
+  confirmIntro: '以下会话目录将被永久删除，其中包括日志与附件等全部产物：',
+  confirmWarn: '此操作不可撤销，删除后无法恢复。',
+  confirmMore: '…以及另外 {n} 项',
+  confirmDelete: '永久删除',
+  confirmCancel: '取消',
+  deleting: '删除中…',
+  deletedOne: '已删除 1 个会话，释放 {size}',
+  deletedMany: '已删除 {n} 个会话，释放 {size}',
+  refused: '有 {n} 项被拒绝（可能正在运行或已不在归档中）。',
+  menuDelete: '删除归档会话',
 };
 
 /** English dictionary checked against the Chinese key set. */
 const en = {
   title: 'Session cleanup',
-  description: 'Periodically clean archived sessions by age / total size, skipping live ones.',
+  description: 'Manually delete archived sessions to reclaim disk space. Nothing runs automatically.',
   unsaved: 'Unsaved',
   collapse: 'Collapse',
   expand: 'Expand',
@@ -114,24 +130,36 @@ const en = {
   saving: 'Saving…',
   discard: 'Discard',
   saveFailed: 'Save failed. Try again.',
-  invalidNumber: 'Enter a valid number',
-  invalidNonNegative: 'Enter a number of 0 or more',
-  invalidInterval: 'Interval must be at least 1 minute',
   resetAll: 'Restore defaults',
   enabled: 'Enabled',
-  enabledHint: 'Turn off to stop periodic cleanup.',
-  maxAgeDays: 'Max age (days)',
-  maxAgeDaysHint: 'Archived sessions older than this can be removed; 0 = no age rule.',
-  maxTotalMB: 'Size cap (MB)',
-  maxTotalMBHint: 'Oldest sessions are removed first when the total exceeds this; 0 = no cap.',
-  keepSessions: 'Minimum kept sessions',
-  keepSessionsHint: 'The age rule only applies to the oldest excess; recent sessions stay.',
-  intervalMinutes: 'Interval (minutes)',
-  intervalMinutesHint: 'A cleanup always runs at startup, then on this interval.',
-  dryRun: 'Dry run',
-  dryRunHint: 'Only report what would be removed, never delete.',
+  enabledHint: 'When off, archived sessions are neither listed nor deletable.',
   sessionsRoot: 'Sessions root',
   sessionsRootHint: 'Leave empty for $DSH_HOME/sessions.',
+  archivedList: 'Archived sessions',
+  refresh: 'Refresh',
+  loading: 'Loading…',
+  empty: 'No archived sessions.',
+  selectAll: 'Select all',
+  clearAll: 'Clear selection',
+  selectedCount: '{n} selected',
+  deleteSelected: 'Delete selected',
+  deleteOne: 'Delete',
+  live: 'Running — cannot be deleted',
+  missing: 'This session directory is no longer on disk',
+  totalBytes: '{size} total',
+  loadFailed: 'Could not read archived sessions.',
+  deleteFailed: 'Delete failed. Try again.',
+  confirmTitle: 'Delete archived sessions',
+  confirmIntro: 'These session directories will be permanently deleted, including logs and attachments:',
+  confirmWarn: 'This cannot be undone.',
+  confirmMore: '…and {n} more',
+  confirmDelete: 'Delete permanently',
+  confirmCancel: 'Cancel',
+  deleting: 'Deleting…',
+  deletedOne: 'Deleted 1 session, freed {size}',
+  deletedMany: 'Deleted {n} sessions, freed {size}',
+  refused: '{n} item(s) refused (running, or no longer archived).',
+  menuDelete: 'Delete archived session',
 };
 
 /** Dictionary namespace owned by this plugin. */
@@ -140,78 +168,142 @@ const NS = 'session-cleanup.card';
 /** Services required by the card registration. */
 const inject = ['slots', 'locale'];
 
-/**
- * Field descriptors: which knob the card renders and how to validate it.
- *
- * `min` mirrors the Host `Config` schema (session-cleanup.mjs) field by field:
- * `intervalMinutes` is the only number there with a lower bound
- * (`z.number().min(1)` — 0 would spin setInterval at ~1ms); the other three are
- * plain `z.number()`. The card is therefore never looser than the Host, so a
- * value it accepts can no longer come back as a generic "保存失败" after the
- * fact: 0 is the documented "off" sentinel for maxAgeDays/maxTotalMB and a
- * negative count is meaningless, so those three keep the `min: 0` floor the
- * Host itself does not enforce.
- *
- * `invalid` names the dictionary key shown under that field when its bound is
- * violated; a missing/unparsable number always reports `invalidNumber`.
- */
-const FIELDS = [
-  { key: 'enabled', type: 'boolean' },
-  { key: 'maxAgeDays', type: 'number', min: 0, invalid: 'invalidNonNegative' },
-  { key: 'maxTotalMB', type: 'number', min: 0, invalid: 'invalidNonNegative' },
-  { key: 'keepSessions', type: 'number', min: 0, invalid: 'invalidNonNegative' },
-  { key: 'intervalMinutes', type: 'number', min: 1, invalid: 'invalidInterval' },
-  { key: 'dryRun', type: 'boolean' },
-  { key: 'sessionsRoot', type: 'text' },
-];
-
-/**
- * Validate one staged field against its Host-schema constraint.
- * @returns the dictionary key of the message to show, or null when valid.
- */
-function fieldErrorKey(field, text) {
-  if (field === undefined || field.type !== 'number') return null
-  const parsed = Number(text)
-  if (text.trim() === '' || !Number.isFinite(parsed)) return 'invalidNumber'
-  if (field.min !== undefined && parsed < field.min) return field.invalid
-  return null
+/** Human-readable byte size (mirrors the Host helper, which is host-side only). */
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let index = 0
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024
+    index += 1
+  }
+  return (value >= 10 || index === 0 ? Math.round(value) : value.toFixed(1)) + ' ' + units[index]
 }
 
-/** One labelled field row with staged text and its own validation message. */
-function Field({ field, label, hint, text, error, disabled, onChange }) {
+/** Fill `{name}` placeholders in a dictionary string. */
+function fill(text, params) {
+  if (params === undefined) return text
+  return String(text).replace(/\{(\w+)\}/g, (whole, key) => (key in params ? String(params[key]) : whole))
+}
+
+/** One labelled configuration field. */
+function Field({ fieldKey, label, hint, children, disabled }) {
   return jsxs('div', { className: 'sc-field', children: [
-    jsxs('div', { className: 'sc-field-head', children: [
-      jsx('label', { className: 'sc-label', htmlFor: 'sc-' + field.key, children: label }, 'label'),
+    jsx('div', { className: 'sc-field-head', children: [
+      jsx('label', { className: 'sc-label', htmlFor: 'sc-' + fieldKey, children: label }, 'label'),
     ] }, 'head'),
-    field.type === 'boolean'
-      ? jsx('input', {
-          id: 'sc-' + field.key,
-          type: 'checkbox',
-          className: 'sc-toggle',
-          checked: text === 'true',
-          disabled,
-          onChange: (event) => { onChange(event.currentTarget.checked ? 'true' : 'false') },
-        }, 'control')
-      : jsx('input', {
-          id: 'sc-' + field.key,
-          type: field.type === 'number' ? 'number' : 'text',
-          className: 'sc-input' + (error ? ' sc-invalid' : ''),
-          value: text,
-          disabled,
-          onChange: (event) => { onChange(event.currentTarget.value) },
-        }, 'control'),
-    error ? jsx('p', { className: 'sc-invalid-text', children: error }, 'invalid') : null,
+    children(disabled),
     jsx('p', { className: 'sc-hint', children: hint }, 'hint'),
   ] });
 }
 
-/** The configuration card shown in 设置 → 插件 → 插件配置 (settings.plugin.item). */
-function SessionCleanupCard({ t, getConfig, setConfig, resetConfig }) {
-  const [config, setConfigState] = useState({ status: 'loading' });
-  const [open, setOpen] = useState(false);
-  const [staged, setStaged] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [failed, setFailed] = useState(false);
+/**
+ * The destructive confirmation dialog, shared by the settings list and the
+ * session-row menu item. It names exactly what will disappear and how much
+ * space that reclaims before the user can commit.
+ */
+function ConfirmDelete({ t, open, items, busy, onCancel, onConfirm }) {
+  if (!open) return null
+  const shown = items.slice(0, 8)
+  const rest = items.length - shown.length
+  const total = items.reduce((sum, item) => sum + (item.size ?? 0), 0)
+  return jsx(Modal, {
+    open,
+    onClose: busy ? () => {} : onCancel,
+    title: t('confirmTitle'),
+    closeLabel: t('confirmCancel'),
+    footer: jsxs(Fragment, { children: [
+      jsx('button', { type: 'button', className: 'sc-plain', disabled: busy, onClick: onCancel, children: t('confirmCancel') }, 'cancel'),
+      jsx('button', { type: 'button', className: 'sc-danger', disabled: busy, onClick: () => { void onConfirm() }, children: busy ? t('deleting') : t('confirmDelete') }, 'confirm'),
+    ] }),
+    children: jsxs(Fragment, { children: [
+      jsx('p', { className: 'sc-confirm-line', children: t('confirmIntro') }, 'intro'),
+      jsxs('p', { className: 'sc-confirm-line', children: [t('totalBytes', { size: formatBytes(total) }), ' · ', t('selectedCount', { n: items.length })] }, 'meta'),
+      ...shown.map((item) => jsx('p', { className: 'sc-confirm-path', children: item.dir ?? item.id }, item.id)),
+      rest > 0 ? jsx('p', { className: 'sc-confirm-path', children: t('confirmMore', { n: rest }) }, 'rest') : null,
+      jsx('p', { className: 'sc-confirm-warn', children: t('confirmWarn') }, 'warn'),
+    ] }),
+  })
+}
+
+/** The archived-session list and its controls. */
+function ArchivedList({ t, value, selection, busy, onToggle, onToggleAll, onDelete, onRefresh }) {
+  const items = value.items ?? []
+  const deletable = items.filter((item) => item.deletable)
+  const allSelected = deletable.length > 0 && deletable.every((item) => selection.includes(item.id))
+  const selectedItems = items.filter((item) => selection.includes(item.id) && item.deletable)
+  const selectedBytes = selectedItems.reduce((sum, item) => sum + (item.size ?? 0), 0)
+
+  return jsxs(Fragment, { children: [
+    jsxs('div', { className: 'sc-toolbar', children: [
+      jsx('span', { className: 'sc-summary', children: t('totalBytes', { size: formatBytes(value.totalBytes ?? 0) }) }, 'summary'),
+      jsx('button', { type: 'button', className: 'sc-plain', disabled: busy, onClick: onRefresh, children: t('refresh') }, 'refresh'),
+      deletable.length > 0
+        ? jsx('button', { type: 'button', className: 'sc-plain', disabled: busy, onClick: () => { onToggleAll(!allSelected) }, children: allSelected ? t('clearAll') : t('selectAll') }, 'all')
+        : null,
+      selectedItems.length > 0
+        ? jsx('button', { type: 'button', className: 'sc-danger', disabled: busy, onClick: () => { onDelete(selectedItems) }, children: t('deleteSelected') + ' (' + selectedItems.length + ')' }, 'bulk')
+        : null,
+    ] }, 'toolbar'),
+    selection.length > 0
+      ? jsx('p', { className: 'sc-hint', children: t('selectedCount', { n: selectedItems.length }) + ' · ' + formatBytes(selectedBytes) }, 'selected')
+      : null,
+    items.length === 0
+      ? jsx('p', { className: 'sc-empty', children: t('empty') }, 'empty')
+      : jsx('ul', { className: 'sc-list', children: items.map((item) => jsxs('li', { className: 'sc-row', children: [
+          item.deletable
+            ? jsx('input', {
+                type: 'checkbox',
+                className: 'sc-check',
+                'aria-label': item.id,
+                checked: selection.includes(item.id),
+                disabled: busy,
+                onChange: (event) => { onToggle(item.id, event.currentTarget.checked) },
+              }, 'check')
+            : jsx('span', { className: 'sc-check', 'aria-hidden': true }, 'check-space'),
+          jsxs('span', { className: 'sc-row-text', children: [
+            jsx('span', { className: 'sc-row-title', children: item.dir === null ? item.id : (item.dir.split(/[\\/]/).pop() ?? item.id) }, 'title'),
+            jsx('span', { className: 'sc-row-meta', children: (item.dir ?? '') + ' · ' + formatBytes(item.size ?? 0) }, 'meta'),
+            item.live ? jsx('span', { className: 'sc-row-live', children: t('live') }, 'live') : null,
+            item.missing ? jsx('span', { className: 'sc-row-missing', children: t('missing') }, 'missing') : null,
+          ] }, 'text'),
+          item.deletable
+            ? jsx('button', {
+                type: 'button',
+                className: 'sc-danger',
+                disabled: busy,
+                onClick: () => { onDelete([item]) },
+                children: t('deleteOne'),
+              }, 'one')
+            : null,
+        ] }, item.id + ':' + (item.dir ?? ''))) }),
+  ] })
+}
+
+/** The settings page: enable switch, sessions root, and the archived list. */
+function SessionCleanupCard({ t, getConfig, setConfig, resetConfig, listArchived, deleteArchived }) {
+  const [config, setConfigState] = useState({ status: 'loading' })
+  const [open, setOpen] = useState(false)
+  const [staged, setStaged] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [failed, setFailed] = useState(false)
+  const [listing, setListing] = useState({ status: 'idle' })
+  const [selection, setSelection] = useState([])
+  const [confirming, setConfirming] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [notice, setNotice] = useState(null)
+
+  const loadList = useCallback(async () => {
+    setListing({ status: 'loading' })
+    try {
+      const value = await listArchived()
+      setListing({ status: 'ready', value })
+      setSelection((current) => current.filter((id) => (value.items ?? []).some((item) => item.id === id && item.deletable)))
+    } catch {
+      setListing({ status: 'error' })
+    }
+  }, [listArchived])
 
   useEffect(() => {
     let current = true
@@ -221,67 +313,88 @@ function SessionCleanupCard({ t, getConfig, setConfig, resetConfig }) {
     )
     return () => { current = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [])
 
-  if (config.status !== 'ready') return null;
-  const value = config.value ?? {};
-  const dirty = staged !== null && Object.keys(staged).length > 0;
-  // Each staged field is checked against its Host-schema bound before save, so
-  // an out-of-range value (e.g. intervalMinutes 0) is reported under that very
-  // field instead of surfacing afterwards as a generic "保存失败".
-  const errorKeyOf = (field) => {
-    if (staged === null || !(field.key in staged)) return null
-    return fieldErrorKey(field, staged[field.key])
-  };
-  const invalid = FIELDS.some((field) => errorKeyOf(field) !== null);
-  const blocked = !dirty || invalid || saving;
+  // The list is fetched once the card is expanded, and again whenever the
+  // plugin is re-enabled (a disabled Host answers with `disabled: true`).
+  useEffect(() => {
+    if (!open) return
+    void loadList()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
+  if (config.status !== 'ready') return null
+  const value = config.value ?? {}
+  const enabled = value.enabled !== false
+  const dirty = staged !== null && Object.keys(staged).length > 0
 
   const textOf = (key) => {
-    const field = FIELDS.find((candidate) => candidate.key === key)
     if (staged !== null && key in staged) return staged[key]
     const current = value[key]
-    if (field?.type === 'boolean') return current === true ? 'true' : 'false'
+    if (typeof current === 'boolean') return current ? 'true' : 'false'
     if (current === undefined || current === null) return ''
     return String(current)
-  };
+  }
   const edit = (key, text) => {
     setFailed(false)
     setStaged((current) => ({ ...(current ?? {}), [key]: text }))
-  };
-  const discard = () => { setStaged(null); setFailed(false) };
+  }
   const save = async () => {
     if (staged === null) return
-    // Belt and braces: the messages are already on screen, so never send a
-    // value the Host schema would reject.
-    if (invalid) return
     setSaving(true); setFailed(false)
     try {
       const parsed = {}
       for (const [key, text] of Object.entries(staged)) {
-        const field = FIELDS.find((candidate) => candidate.key === key)
-        parsed[key] = field?.type === 'number' ? Number(text) : field?.type === 'boolean' ? text === 'true' : text
+        if (key === 'enabled') parsed[key] = text === 'true'
+        else parsed[key] = text
       }
       const next = await setConfig(parsed)
       setConfigState({ status: 'ready', value: next })
       setStaged(null)
+      if (open) await loadList()
     } catch {
       setFailed(true)
     } finally {
       setSaving(false)
     }
-  };
+  }
   const resetAll = async () => {
     setSaving(true); setFailed(false)
     try {
       const next = await resetConfig()
       setConfigState({ status: 'ready', value: next })
       setStaged(null)
+      if (open) await loadList()
     } catch {
       setFailed(true)
     } finally {
       setSaving(false)
     }
-  };
+  }
+
+  const runDelete = async (items) => {
+    setBusy(true); setNotice(null)
+    try {
+      const result = await deleteArchived(items.map((item) => item.id))
+      setConfirming(null)
+      setSelection([])
+      const removed = result.removed ?? []
+      const freed = formatBytes(result.freedBytes ?? 0)
+      if (removed.length > 0) {
+        setNotice(removed.length === 1
+          ? t('deletedOne', { size: freed })
+          : t('deletedMany', { n: removed.length, size: freed }))
+      }
+      if ((result.refused ?? []).length > 0) {
+        setNotice((current) => (current === null ? t('refused', { n: result.refused.length }) : current + ' ' + t('refused', { n: result.refused.length })))
+      }
+      await loadList()
+    } catch {
+      setNotice(t('deleteFailed'))
+    } finally {
+      setBusy(false)
+    }
+  }
 
   return jsxs('li', { className: 'sc-card' + (open ? ' sc-card-open' : ''), children: [
     jsxs('button', {
@@ -300,38 +413,73 @@ function SessionCleanupCard({ t, getConfig, setConfig, resetConfig }) {
       ],
     }, 'header'),
     open ? jsxs('div', { className: 'sc-body', children: [
-      FIELDS.map((field) => {
-        const errorKey = errorKeyOf(field)
-        return jsx(Field, {
-          field,
-          label: t(field.key),
-          hint: t(field.key + 'Hint'),
-          text: textOf(field.key),
-          error: errorKey === null ? null : t(errorKey),
-          disabled: saving,
-          onChange: (text) => { edit(field.key, text) },
-        }, field.key)
-      }),
+      jsx(Field, {
+        fieldKey: 'enabled',
+        label: t('enabled'),
+        hint: t('enabledHint'),
+        children: (disabled) => jsx('input', {
+          id: 'sc-enabled',
+          type: 'checkbox',
+          className: 'sc-toggle',
+          checked: textOf('enabled') === 'true',
+          disabled: disabled || saving,
+          onChange: (event) => { edit('enabled', event.currentTarget.checked ? 'true' : 'false') },
+        }),
+      }, 'enabled'),
+      jsx(Field, {
+        fieldKey: 'sessionsRoot',
+        label: t('sessionsRoot'),
+        hint: t('sessionsRootHint'),
+        children: (disabled) => jsx('input', {
+          id: 'sc-sessionsRoot',
+          type: 'text',
+          className: 'sc-input',
+          value: textOf('sessionsRoot'),
+          disabled: disabled || saving,
+          onChange: (event) => { edit('sessionsRoot', event.currentTarget.value) },
+        }),
+      }, 'sessionsRoot'),
       jsxs('div', { className: 'sc-footer', children: [
         failed ? jsx('p', { className: 'sc-failed', role: 'status', children: t('saveFailed') }, 'failed') : null,
-        jsx('button', { type: 'button', className: 'sc-discard', disabled: !dirty || saving, onClick: discard, children: t('discard') }, 'discard'),
-        jsx('button', { type: 'button', className: 'sc-discard', disabled: saving, onClick: () => { void resetAll() }, children: t('resetAll') }, 'reset-all'),
-        jsx('button', { type: 'button', className: 'sc-save', disabled: blocked, onClick: () => { void save() }, children: saving ? t('saving') : t('save') }, 'save'),
+        jsx('button', { type: 'button', className: 'sc-plain', disabled: !dirty || saving, onClick: () => { setStaged(null); setFailed(false) }, children: t('discard') }, 'discard'),
+        jsx('button', { type: 'button', className: 'sc-plain', disabled: saving, onClick: () => { void resetAll() }, children: t('resetAll') }, 'reset-all'),
+        jsx('button', { type: 'button', className: 'sc-danger', disabled: !dirty || saving, onClick: () => { void save() }, children: saving ? t('saving') : t('save') }, 'save'),
       ] }, 'footer'),
+      jsx('div', { className: 'sc-field', children: jsx('p', { className: 'sc-label', children: t('archivedList') }, 'label') }, 'list-label'),
+      listing.status === 'loading' ? jsx('p', { className: 'sc-empty', children: t('loading') }, 'loading') : null,
+      listing.status === 'error' ? jsx('p', { className: 'sc-failed', role: 'status', children: t('loadFailed') }, 'load-failed') : null,
+      listing.status === 'ready'
+        ? jsx(ArchivedList, {
+            t,
+            value: listing.value,
+            selection,
+            busy,
+            onToggle: (id, on) => {
+              setSelection((current) => (on ? [...new Set([...current, id])] : current.filter((item) => item !== id)))
+            },
+            onToggleAll: (on) => {
+              const items = listing.value.items ?? []
+              setSelection(on ? items.filter((item) => item.deletable).map((item) => item.id) : [])
+            },
+            onDelete: (items) => { setConfirming(items) },
+            onRefresh: () => { void loadList() },
+          })
+        : null,
+      notice !== null ? jsx('p', { className: 'sc-hint', role: 'status', children: notice }, 'notice') : null,
+      jsx(ConfirmDelete, {
+        t,
+        open: confirming !== null,
+        items: confirming ?? [],
+        busy,
+        onCancel: () => { if (!busy) setConfirming(null) },
+        onConfirm: () => { void runDelete(confirming ?? []) },
+      }),
     ] }, 'body') : null,
-  ] });
+  ] })
 }
 
 /**
  * One call to the host half over its `/session-cleanup` prefix route.
- *
- * This used to go through the Connection RPC registry (`rpc.call` on the
- * `connection` service), which cannot work in dsh 0.1.5-rc.1: that registry
- * throws `cannot get property "webServer" without inject` for every plugin
- * outside the connection package, so the channel never exists and the request
- * would land on the SPA fallback. The host half registers the prefix route
- * itself (see `createRpcRoute` there) and answers the same `{ ok, value }` /
- * `{ ok, error }` envelope.
  *
  * Same-origin by construction, JSON in and out — the host's fence requires it.
  */
@@ -360,37 +508,91 @@ const call = async (endpoint, args) => {
   return envelope.value
 }
 
-/** Contribute the cleanup configuration page into 设置 → 会话清理. */
+/**
+ * The session-row menu entry.
+ *
+ * Renders nothing unless the row's session is archived, so the menu looks
+ * unchanged everywhere else. `hooks.archived` is the official observable the
+ * shipped Pin/Archive actions read; using it keeps this patch from duplicating
+ * archive state.
+ */
+function SessionDeleteMenuItem({ t, sessionId, displayTitle, useMenuOpenState, hooks }) {
+  const [, setMenuOpen] = useMenuOpenState()
+  const archived = hooks !== undefined && hooks.archived !== undefined
+    ? React.useSyncExternalStore(hooks.archived.subscribe, hooks.archived.getSnapshot, hooks.archived.getSnapshot)
+    : undefined
+  const [confirming, setConfirming] = useState(null)
+  const [busy, setBusy] = useState(false)
+
+  if (archived === undefined || !archived.has(sessionId)) return null
+
+  const openConfirm = () => {
+    setMenuOpen(false)
+    setConfirming({ item: { id: sessionId, dir: null, size: 0, title: displayTitle } })
+  }
+  const runDelete = async () => {
+    setBusy(true)
+    try {
+      await call('deleteArchived', { ids: [sessionId] })
+      setConfirming(null)
+    } catch {
+      setConfirming(null)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return jsxs(Fragment, { children: [
+    jsx('button', {
+      type: 'button',
+      role: 'menuitem',
+      onClick: openConfirm,
+      children: t('menuDelete'),
+    }, 'item'),
+    jsx(ConfirmDelete, {
+      t,
+      open: confirming !== null,
+      items: [confirming?.item ?? { id: sessionId, dir: displayTitle }],
+      busy,
+      onCancel: () => { setConfirming(null) },
+      onConfirm: () => { void runDelete() },
+    }, 'confirm'),
+  ] })
+}
+
+/** Contribute the cleanup page and the session-row menu entry. */
 function apply(ctx) {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'session-cleanup: card dictionaries')
 
   const getConfig = () => call('getConfig', {})
   const setConfig = (fields) => call('setConfig', { fields })
   const resetConfig = () => call('resetConfig', {})
-  const cardApi = () => ({ getConfig, setConfig, resetConfig })
+  const listArchived = () => call('listArchived', {})
+  const deleteArchived = (ids) => call('deleteArchived', { ids })
   const t = ctx.locale.bind(NS)
 
-  // The shipped settings shell's page slot, `settings.section`.
-  //
-  // This used to register on `settings.plugin.item` ("设置 → 插件 → 插件配置"),
-  // which no longer exists in 0.2.0-rc.2: that slot appears only inside a
-  // comment in the shipped `slot-contract.d.ts`, so `slots.inject` waited for a
-  // declaration that never came and the page was never rendered at all. The
-  // shipped sections (general `id: 'developer-tools'` order 15, models
-  // `order: 10`, plugins `order: 15`) all use this shape, including the thunk
-  // `label` that becomes the nav entry.
-  //
-  // The card's data path is this plugin's own fenced `/session-cleanup` route
-  // rather than the settings document, so the page keeps working regardless of
-  // how the Host wires its settings service.
+  // The shipped settings shell's page slot. The card's data path is this
+  // plugin's own fenced route, so the page keeps working regardless of how the
+  // Host wires its settings service.
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'session-cleanup',
     order: 40,
     label: () => t('title'),
     locale: NS,
-    inject: cardApi,
+    inject: () => ({ getConfig, setConfig, resetConfig, listArchived, deleteArchived }),
   }, SessionCleanupCard))
+
+  // The session-row right-click menu. This slot is a legacy React extension
+  // position rendered inside the shared menu overlay; the entry owns its own
+  // visibility, which is how it only appears for archived rows.
+  ctx.slots.inject('sidebar.workspaces.session.menu.item', () => ctx.slots.register({
+    name: 'sidebar.workspaces.session.menu.item',
+    id: 'session-cleanup-delete',
+    order: 900,
+    locale: NS,
+    inject: () => ({ listArchived, deleteArchived }),
+  }, ({ t: bound, ...rest }) => jsx(SessionDeleteMenuItem, { t: bound ?? t, ...rest })))
 }
 
 module.exports = { apply, inject, NS };
