@@ -45,7 +45,6 @@ deep-dreaming/
 ├── patches/                       # One directory per patch
 │   ├── dsh-project-memory/        # MCP Reference Memory bridge: guidance section + first-admitted-step auto-recall
 │   ├── session-cleanup/           # Manual physical deletion of archived sessions
-│   ├── ui-queue-tools/            # Queue dock synced with official 0.2.1 + full-text preview + drag reorder
 │   ├── temp-session/              # Sidebar button for ad-hoc temp sessions
 │   ├── whale-background/          # Whale-girl background image in chat area
 │   └── mcp-servers/               # One settings page over a list of external MCP servers; mounts the official MCP client once per entry
@@ -54,7 +53,7 @@ deep-dreaming/
 │   ├── README.md                  # What is archived and why
 │   ├── web-scripts/               # start/restart/stop/update-dsh.ps1, install-desktop-shortcut.ps1, patch-cli.ps1
 │   ├── assets/                    # Shortcut icon + an unreferenced source image
-│   └── patches/ui-settings-{other,balance,plugin-manager,model-reasoning,model-capabilities}/  # retired settings sections + the superseded reasoning patch + the retired capabilities card
+│   └── patches/                   # retired patches: ui-settings-{other,balance,plugin-manager,model-reasoning,model-capabilities}, ui-queue-tools
 └── .dsh-memory/                   # LEGACY memory notes (Markdown + YAML front matter), gitignored
     ├── development_code_specification/
     ├── general/
@@ -70,7 +69,7 @@ Every patch is a Cordis plugin with a host half and optionally a client (browser
 ### Host Half (`lib/index.js` or `<patch>.mjs`)
 
 - Exports `apply(ctx, config?)` — the Cordis entry point.
-- Exports `Config` — a `z.object({...})` schemastery schema for entry config validation. Required *when the entry takes config*; a config-less plugin may omit it (`ui-queue-tools` and `whale-background` have none; `session-cleanup`, `temp-session`, `mcp-servers` and `dsh-project-memory` ship one).
+- Exports `Config` — a `z.object({...})` schemastery schema for entry config validation. Required *when the entry takes config*; a config-less plugin may omit it (`whale-background` has none; `session-cleanup`, `temp-session`, `mcp-servers` and `dsh-project-memory` ship one).
 - Optionally exports `inject` — an array of service names required before `apply` runs.
 - Registers its client↔host transport as a fenced prefix route on `webServer` (see "Client ↔ Host transport"); `ctx.connection.rpc.handle` is broken in this dsh version and must not be used.
 - Registers settings by exporting a `Config` schema — **there is no registration call in 0.2.x** (see "Settings" below and pitfall 16).
@@ -149,7 +148,7 @@ Every patch ships `locale/en.json` + `locale/zh.json` so the plugin management p
 
 ### Client ↔ Host transport
 - **Do not use `ctx.connection.rpc.handle` in this dsh version.** Its registry touches `owner.webServer` (`@deepseek-ai/dsh-client-connection/lib/index.js`: `owner.effect(() => owner.webServer.register(route))`), and `owner` is the **reading** plugin's context — Cordis rebinds a `Service`'s `ctx` to whoever reads it (`createTraceable`, `tracker.property === 'ctx'`) — so for any plugin outside the connection package that context never declared `webServer` and the access throws `cannot get property "webServer" without inject`. The channel is never created, the browser's `POST /<channel>/<endpoint>` falls through to the SPA fallback (405/404), and — because the throw happens while the plugin's own effects are being set up — **every effect registered earlier in that `apply` is rolled back with it** (timers, routes, settings wiring). That rollback is what made the patches look like "the client half still renders but the host half vanished".
-- The transport used by every patch is a self-registered **prefix route on `webServer`**, with the unchanged `{ ok, value }` / `{ ok, error: { code, message, details } }` envelope: `createRpcRoute(path, handle)` in `patches/ui-queue-tools/lib/index.js` is the reference — copy it verbatim into a patch and adapt the name (patches stay standalone; the duplication is intentional).
+- The transport used by every patch is a self-registered **prefix route on `webServer`**, with the unchanged `{ ok, value }` / `{ ok, error: { code, message, details } }` envelope: `createRpcRoute(path, handle)` in `patches/session-cleanup/session-cleanup.mjs` is the reference (the original lived in the archived `ui-queue-tools`) — copy it verbatim into a patch and adapt the name (patches stay standalone; the duplication is intentional).
   - Own your fence: when a request carries `Origin`, it must equal its `Host`; accept `POST` only; require `content-type: application/json`. A cross-site POST always carries its own `Origin`, and a JSON body forces a preflight we never answer — that is what replaces the Connection's Host/Origin fence, so never ship an unfenced route that mutates anything.
   - **Declare the carrier as a *static* dependency**: `export const inject = [<other deps>, 'webServer']`, then read `ctx.webServer` inside `apply`. Do not put the registration behind a dynamic `ctx.inject([...], cb)` gate, and do not probe for the carrier with `ctx.get('webServer')`: Cordis mounts rows **in parallel** and the HTTP carrier binds *later* than services like `agents`/`sessions`, so an optional read during activation races that binding, gets `undefined`, and silently skips the page's transport (no warning reaches `~/.dsh/logs`). That race took down four of five patches on their first restart. A declared dependency is also the only shape that survives a user-layer reload — the gates registered inside `apply` were the ones whose channels went missing. Every host half uses the static form; `patches/*/tests/load-smoke.mjs` assert `inject.includes('webServer')` and reject a `ctx.get('webServer')` read in the source (the retired `ui-settings-balance` kept a warn-and-skip fallback because it reported it on its own diagnostics route).
   - The browser half calls `fetch('/<channel>/<endpoint>', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ args }) })` and unwraps the envelope (see the `call` helper in the same patch's `client.js`).
@@ -236,7 +235,6 @@ node patches/session-cleanup/session-cleanup.test.mjs
 # Cordis load smoke tests (need host dependency links)
 node patches/session-cleanup/tests/load-smoke.mjs
 node patches/dsh-project-memory/tests/plugin.smoke.mjs
-node patches/ui-queue-tools/tests/load-smoke.mjs
 node patches/whale-background/tests/load-smoke.mjs
 node patches/mcp-servers/tests/load-smoke.mjs
 node patches/mcp-servers/tests/client-contract.mjs
@@ -246,7 +244,6 @@ node patches/dsh-project-memory/tests/client-contract.mjs
 
 # Integration verification
 node patches/session-cleanup/verify-session-cleanup.mjs
-node patches/ui-queue-tools/verify-queue-tools.mjs
 node patches/temp-session/verify-temp-session.mjs
 ```
 
@@ -328,7 +325,7 @@ Existing **Memorix** data is copied by `scripts/migrate-memorix-to-reference.mjs
 2. Add to `scripts/install.ps1` (`$bundlePatchDirs`) and `scripts/deploy.ps1` (`$bundlePatchDirs`) so both scripts install and verify it, and add its host-dependency dir to `deploy.ps1`'s `$depPlugins`.
 3. Run `scripts/install.ps1` (pnpm-links the package, registers `dsh.profile.bundles`, strips any stale profile row) and then `scripts/deploy.ps1` to validate (junctions, bundle registration, row ownership, host dependency links, script/asset sync).
 4. **Never** also insert the patch's row in the profile layer — the bundle owns it; a second owner aborts the boot with `duplicate loader entry id`.
-5. If the patch has a browser half that needs host data or actions, copy `createRpcRoute` from `patches/ui-queue-tools/lib/index.js` and add `webServer` to the host half's **static** `inject` entry (`export const inject = [<deps>, 'webServer']`) — never read the carrier with `ctx.get` during activation, never gate the registration behind a dynamic `ctx.inject(...)`, and do **not** register a `connection.rpc` channel (see "Client ↔ Host transport").
+5. If the patch has a browser half that needs host data or actions, copy `createRpcRoute` from `patches/session-cleanup/session-cleanup.mjs` and add `webServer` to the host half's **static** `inject` entry (`export const inject = [<deps>, 'webServer']`) — never read the carrier with `ctx.get` during activation, never gate the registration behind a dynamic `ctx.inject(...)`, and do **not** register a `connection.rpc` channel (see "Client ↔ Host transport").
 6. **Check what DSH already ships before building UI.** The desktop app's own bundles already cover a lot (account page with balances, theme, shortcuts, plugin inventory…). A user patch that re-renders an existing view adds a second sidebar entry and drifts out of sync with the official copy — that is exactly how the retired `ui-settings-balance` failed. Grep the DSH source checkout (`packages/client/ui-*`) for the feature first.
 
 ---
@@ -339,7 +336,6 @@ Existing **Memorix** data is copied by `scripts/migrate-memorix-to-reference.mjs
 |-------|-----------|-------------|-------------|-------------------|
 | dsh-project-memory | `lib/index.js` | `client.js` | (none) | (none) |
 | session-cleanup | `session-cleanup.mjs` | `client.js` | `/session-cleanup` | `session-cleanup` (the entry id; no registration call in 0.2.x) |
-| ui-queue-tools | `lib/index.js` | `lib/client.js` | `/queue` | (none) |
 | temp-session | `lib/index.js` | `lib/client.js` | `/temp-session` | (none) |
 | whale-background | `lib/index.js` | `lib/client.js` | (none) | (none) |
 | mcp-servers | `lib/index.js` (mounts `@deepseek-ai/dsh-mcp-client` as one child fiber per `servers` entry) | `lib/client.js` | (none — outbound MCP clients; and its settings page rides the shared `configForms`) | `mcp-servers` (the entry id; `servers` is a `.volatile()` array so the page can edit it) |

@@ -280,7 +280,6 @@ function Add-InsertRow([string]$Content, [string]$Id, [string]$Name) {
 # --- 1. profile-side junctions for the directory-package patches --------------
 $links = @(
     @{ n = 'dsh-plugin-session-cleanup';            d = 'session-cleanup' },
-    @{ n = 'dsh-client-ui-queue-tools';             d = 'ui-queue-tools' },
     @{ n = 'dsh-client-ui-temp-session';             d = 'temp-session' },
     @{ n = 'dsh-client-whale-background';            d = 'whale-background' }
 )
@@ -336,7 +335,7 @@ foreach ($dir in $mcpLinkDirs) {
 # The strip happens per patch inside step 3 (immediately before that patch's
 # bundle install) so a crash between the two steps can only ever leave ONE
 # patch without a row, and the removed block is stashed for restore on failure.
-$bundlePatchDirs = @('session-cleanup', 'ui-queue-tools', 'temp-session', 'whale-background', 'dsh-project-memory', 'mcp-servers')
+$bundlePatchDirs = @('session-cleanup', 'temp-session', 'whale-background', 'dsh-project-memory', 'mcp-servers')
 $removedRows = @{}
 $failed = 0
 
@@ -359,6 +358,15 @@ $renamedBundles = @(
     @{
         Old   = '@local/dsh-client-ui-settings-model-capabilities'
         RowId = 'ui-settings-model-capabilities'
+        New   = $null
+    }
+    # Retired 2026-11-06: the enhanced queue dock shadowed the shipped one
+    # wholesale, and the only increments it still had (hover full-text preview,
+    # drag reorder) stopped justifying a full replacement of the official dock
+    # once that dock gained multi-line editing, tooltips and attachment chips.
+    @{
+        Old   = '@local/dsh-client-ui-queue-tools'
+        RowId = 'ui-queue-tools'
         New   = $null
     }
 )

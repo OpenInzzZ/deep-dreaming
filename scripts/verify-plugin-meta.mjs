@@ -24,7 +24,7 @@ import { dirname, join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const PATCHES = ['session-cleanup', 'ui-queue-tools', 'temp-session', 'whale-background', 'mcp-servers']
+const PATCHES = ['session-cleanup', 'temp-session', 'whale-background', 'mcp-servers']
 const LANGUAGE_ID = /^[A-Za-z][A-Za-z0-9-]*$/
 
 /* ---------------------------------------------------------------------------

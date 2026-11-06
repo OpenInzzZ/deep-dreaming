@@ -36,8 +36,7 @@ const patchesDir = join(repoRoot, 'patches')
 /** dir -> 该 bundle 的 yml 应声明的 loader 行 id（一行或多行）。 */
 const BUNDLES = {
     'session-cleanup': ['session-cleanup'],
-    'ui-queue-tools': ['ui-queue-tools'],
-    'temp-session': ['temp-session'],
+      'temp-session': ['temp-session'],
     'whale-background': ['whale-background'],
     'dsh-project-memory': ['project-memory'],
     'mcp-servers': ['mcp-servers'],

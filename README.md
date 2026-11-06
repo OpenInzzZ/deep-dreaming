@@ -17,7 +17,6 @@ deep-dreaming/
 ├── patches/                      # 全部补丁,一补丁一目录(代码 + 测试 + README)
 │   ├── dsh-project-memory/       # 跨会话项目记忆(MCP Reference Memory 桥接,组合包插件)
 │   ├── session-cleanup/          # 已归档会话的手动物理删除(目录包插件)
-│   ├── ui-queue-tools/           # 排队消息增强:hover 全文预览 + 拖拽排序,并与官方 0.2.1 坞同步(附件/本地回显)
 │   ├── temp-session/             # 侧边栏一键发起不绑定项目的临时会话 + verify
 │   ├── whale-background/         # 会话区域鲸鱼娘背景图(bundle 补丁)
 │   └── mcp-servers/              # 一张设置页管理多个外部 MCP 服务(含 IDEA 代码诊断),加服务不重启
@@ -46,7 +45,6 @@ deep-dreaming/
 | --- | --- | --- | --- |
 | [dsh-project-memory](patches/dsh-project-memory/) | 跨会话项目记忆:**MCP Reference Memory 桥接**(图谱存储/检索/关系都在官方 `@modelcontextprotocol/server-memory`)——注入提示词引导,并在会话**首个被准入步骤**(`agent/pre-step`)召回既有记忆(带上本会话工作区与 `<project>/<topic>` 项目前缀),记忆存取由 `mcp__reference_memory__*` 完成;九个记忆工具调用以**可折叠「记忆阶段」卡片**展示,**不产生额外对话轮次** | 作为 **bundle** 安装:`dsh plugin --profile desktop add`(或 `pnpm add`)进 profile 并登记到 `dsh.profile.bundles` + 全局安装 `@modelcontextprotocol/server-memory` 与 home 层 `reference_memory` MCP 行 | [README](patches/dsh-project-memory/README.md) |
 | [session-cleanup](patches/session-cleanup/) | 手动删除已归档会话(设置页列表 + 会话右键菜单,二次确认,不自动清理) | **bundle**:包内 `cordis.patch.yml` 行 + `install.ps1` pnpm link 进 profile 并登记 `dsh.profile.bundles` | [README](patches/session-cleanup/README.md) |
-| [ui-queue-tools](patches/ui-queue-tools/) | 排队消息增强:hover 预览全文 + **拖拽排序**(host 半经 Inbox.splice 重排);其余行为与官方 0.2.1 队列坞同步(附件缩略图/文件块、本地排队回显、可继续子代理) | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/ui-queue-tools/README.md) |
 | [temp-session](patches/temp-session/) | 侧边栏底部「临时会话」按钮:一键发起绑定**用户级临时目录**的会话,不关联任何项目 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/temp-session/README.md) |
 | [whale-background](patches/whale-background/) | 会话区域背景:在对话滚动区居中偏右显示鲸鱼娘透明图(13% 透明度),资源缺失时自动跳过而不影响启动 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/whale-background/README.md) |
 | [mcp-servers](patches/mcp-servers/) | **MCP 服务接入**:一张设置页管理多个外部 MCP 服务,清单存在配置里,加/删服务不用改 yml、不用重启。出厂默认那条是 **IDEA 代码诊断**——模型改完代码直接调 `mcp__idea__lint_files` / `get_file_problems` 拿 IDE 实时检查结果(实测冷分析 3.6s、8 文件批量 4.9s、59 个工具),不必为「符号解析不了」跑一遍编译。宿主端对每项挂一个官方 `@deepseek-ai/dsh-mcp-client` 子 fiber(官方一个 entry 只连一个 server,且它的 `z.union` 展不开成表单);客户端半端注册 `settings.section` 页——**运行时没有任何插件贡献 `plugins.row.config`,官方根本没有通用配置编辑器** | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/mcp-servers/README.md) |
@@ -77,7 +75,6 @@ $repo = (Resolve-Path .).Path          # 在仓库根执行;其它位置请指�
 # 1. 全部补丁都是 bundle:包内自带 cordis.patch.yml 行,install.ps1 负责
 #    pnpm link 进 profile + 登记 dsh.profile.bundles(下面的 junction 只是解析兜底)
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-plugin-session-cleanup" -Target "$repo\patches\session-cleanup"
-New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-queue-tools" -Target "$repo\patches\ui-queue-tools"
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-temp-session" -Target "$repo\patches\temp-session"
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-whale-background" -Target "$repo\patches\whale-background"
 
@@ -85,7 +82,6 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@
 #    装之前先删掉 profile 层同 id 的 - insert: 行,否则两层同 id 会让启动 fail-loud
 $cli = "D:\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
 & $cli plugin --profile desktop add "$repo\patches\session-cleanup"
-& $cli plugin --profile desktop add "$repo\patches\ui-queue-tools"
 & $cli plugin --profile desktop add "$repo\patches\temp-session"
 & $cli plugin --profile desktop add "$repo\patches\whale-background"
 & $cli plugin --profile desktop add "$repo\patches\dsh-project-memory"
@@ -222,8 +218,6 @@ node patches/session-cleanup/verify-session-cleanup.mjs          # 端点 + 设�
 node patches/session-cleanup/tests/load-smoke.mjs                # 真实 Cordis 加载冒烟(Invalid effect 回归)
 node patches/dsh-project-memory/tests/plugin.smoke.mjs           # Reference Memory 桥接:Config 校验 + 提示词/事件流(无回顾轮次)
 node patches/dsh-project-memory/tests/client-contract.mjs        # 浏览器半契约(记忆折叠卡注册与渲染)
-node patches/ui-queue-tools/verify-queue-tools.mjs               # 排队工具 host 契约 + jsdom 拖拽/预览交互
-node patches/ui-queue-tools/tests/load-smoke.mjs                 # 真实 Cordis 加载冒烟(静态 inject 声明 + 前缀路由)
 node patches/temp-session/verify-temp-session.mjs                # temp-session host + client 契约 + 点击流程
 node patches/whale-background/tests/load-smoke.mjs               # 鲸鱼娘图片路由 + 资源存在性
 ```
@@ -263,11 +257,12 @@ Web 端时期修掉的问题,以及下次升级时要先看的地方:
    `agent.inject(...)`(next-step、不唤醒)投递,使召回落在用户本轮之内而不
    新开一轮。
 9. **patch 文件热重载会丢"已有行"的 host 半**(实测,详见「热插拔」一节):
-   `install.ps1` 的一次写入让 `/queue` 等五个通道消失,排队消息拖拽排序因此
-   报"排序失败"(`POST /queue/reorder` → 404),而客户端半仍在正常渲染。
-   `install.ps1` 已改为内容无变化就不写文件;`ui-queue-tools` 的失败提示也
-   改成区分"服务未加载"与"消息可能已开始发送",不再把前者说成后者。
-   **结论:改过 patch 文件后,先重启再用 host 侧功能。**
+   `install.ps1` 的一次写入让 `/queue` 等五个通道消失(当时队列坞的拖拽排序
+   因此报"排序失败",`POST /queue/reorder` → 404,而客户端半仍在正常渲染)。
+   `install.ps1` 已改为内容无变化就不写文件;`ui-queue-tools` 当时还把失败
+   提示改成区分"服务未加载"与"消息可能已开始发送"。
+   **结论:改过 patch 文件后,先重启再用 host 侧功能。**(`/queue` 这个实例
+   对应的补丁已于 2026-11-06 退役,但这条教训适用于任何 host 半。)
 
 ### 桌面端适配(0.2.0-rc.2 → 0.2.1-rc.2)
 
@@ -342,6 +337,7 @@ Web 端时期修掉的问题,以及下次升级时要先看的地方:
    continuable 子代理、工厂渲染),只保留全文 Tooltip + 拖拽排序;
    `ui-settings-model-capabilities` 在声明型路由上隐藏思考区(官方
    `ModelReasoningEfforts` 负责),保存时 `reasoningEfforts` 原样透传。
+   > 两者后来都已退役(2026-11-03 / 2026-11-06),见 `archive/README.md`。
 
 ### 0.2.1-rc.5 适配补记(2026-10-30)
 
@@ -361,7 +357,10 @@ ACP stdout)与 LLM(`llm-deepseek-api-key` 跟随官方 `/models` 列表)、
    `sidebar.footer.action`、`tool.call.toolview`,以及 15 个
    `@deepseek-ai/dsh-client-ui-primitives` 图标导出。
 2. **官方仍无** MCP 服务设置页、会话自动清理、临时会话、队列坞拖拽排序/全文预览,
-   因此 `mcp-servers`、`session-cleanup`、`temp-session`、`ui-queue-tools` 继续互补。
+   因此 `mcp-servers`、`session-cleanup`、`temp-session` 继续互补。
+   `ui-queue-tools` 当时也靠这条互补存活,但它遮蔽官方整个队列坞、只多出
+   「全文预览 + 拖拽排序」两项,官方坞后续每加一项能力都会被它挡掉,
+   已于 2026-11-06 退役并让位给官方坞(见 `archive/README.md`)。
 3. **rc.3 新增的 `ui-entry-customization`**(侧边栏面板/会话视图的 More 菜单:
    pin/unpin、浏览插件、创建插件)只作用于 panellist 与 view tab;
    `temp-session` 挂在 `sidebar.footer.action` 上,不是可 pin 的面板,二者不冲突。
