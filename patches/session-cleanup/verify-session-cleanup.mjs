@@ -913,6 +913,9 @@ if (JSDOM === null) {
   const renderRoot = mkdtempSync(join(tmpdir(), 'cleanup-render-'))
   const rA = 'session-render-a'
   const rB = 'session-render-b'
+  // Archived, but its directory is gone: the Host reports it as `missing`, and
+  // the card must not render a row for it (nothing to delete, size 0).
+  const rGhost = 'session-render-ghost'
   for (const [project, id] of [['p1', rA], ['p2', rB]]) {
     mkdirSync(join(renderRoot, project, id), { recursive: true })
     writeFileSync(join(renderRoot, project, id, 'session.v4.jsonl.zstd'), Buffer.alloc(4096, 0x61))
@@ -920,7 +923,7 @@ if (JSDOM === null) {
   const renderEntry = { enabled: true, sessionsRoot: renderRoot }
   const domCtx = makeCtx({ withSettings: true, entry: renderEntry })
   domCtx.sessions.list = () => []
-  domCtx.workspaceRegistry = makeRegistry([rA, rB])
+  domCtx.workspaceRegistry = makeRegistry([rA, rB, rGhost])
   host.apply(domCtx, renderEntry)
   await settle()
   activeCtx = domCtx
@@ -946,7 +949,13 @@ if (JSDOM === null) {
   await waitFor(() => doc.querySelectorAll('.sc-row').length > 0, 'the archived session list')
 
   const rows = [...doc.querySelectorAll('.sc-row')]
-  if (rows.length !== 2) throw new Error(`expected 2 archived rows, got ${rows.length}`)
+  // Three ids are archived, but `rGhost` has no directory on disk: the Host
+  // reports it as `missing`, and the card must hide it rather than render an
+  // undeletable 0 B row.
+  if (rows.length !== 2) throw new Error(`expected 2 archived rows (the missing one hidden), got ${rows.length}`)
+  if (doc.body.textContent.includes(rGhost)) {
+    throw new Error('an archived session with no directory on disk must not be listed')
+  }
   const checkboxes = [...doc.querySelectorAll('.sc-check[type="checkbox"]')]
   if (checkboxes.length !== 2) throw new Error(`expected 2 selectable rows, got ${checkboxes.length}`)
 
@@ -954,6 +963,7 @@ if (JSDOM === null) {
   for (const dead of ['#sc-maxAgeDays', '#sc-maxTotalMB', '#sc-keepSessions', '#sc-intervalMinutes', '#sc-dryRun']) {
     if (doc.querySelector(dead) !== null) throw new Error(`the automatic-cleanup field ${dead} must be gone`)
   }
+  console.log('card OK: archived rows render, an archived-but-missing session is hidden, no automatic-cleanup knobs')
 
   // Selecting a row reveals the bulk delete action.
   await act(async () => { fireClick(checkboxes[0]) })

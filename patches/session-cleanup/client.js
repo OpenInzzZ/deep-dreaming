@@ -53,7 +53,6 @@ const CSS = [
   '.sc-row-title{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500;line-height:1.5;word-break:break-all}',
   '.sc-row-meta{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:1.5;word-break:break-all}',
   '.sc-row-live{color:var(--dsw-alias-state-business-primary);font-size:12px;line-height:1.5}',
-  '.sc-row-missing{color:var(--dsw-alias-label-caption);font-size:12px;line-height:1.5}',
   '.sc-danger,.sc-plain{appearance:none;font:inherit;cursor:pointer;border:1px solid transparent;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5}',
   '.sc-danger{border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary);background:0 0}',
   '.sc-danger:hover{background:var(--dsw-alias-interactive-bg-hover)}',
@@ -95,14 +94,13 @@ const zh = {
   archivedList: '已归档会话',
   refresh: '刷新',
   loading: '加载中…',
-  empty: '没有已归档会话。',
+  empty: '没有可删除的已归档会话。',
   selectAll: '全选',
   clearAll: '取消全选',
   selectedCount: '已选 {n} 项',
   deleteSelected: '删除所选',
   deleteOne: '删除',
   live: '正在运行，不可删除',
-  missing: '磁盘上已无此会话目录',
   totalBytes: '共 {size}',
   loadFailed: '读取已归档会话失败。',
   deleteFailed: '删除失败,请重试。',
@@ -138,14 +136,13 @@ const en = {
   archivedList: 'Archived sessions',
   refresh: 'Refresh',
   loading: 'Loading…',
-  empty: 'No archived sessions.',
+  empty: 'No archived sessions to delete.',
   selectAll: 'Select all',
   clearAll: 'Clear selection',
   selectedCount: '{n} selected',
   deleteSelected: 'Delete selected',
   deleteOne: 'Delete',
   live: 'Running — cannot be deleted',
-  missing: 'This session directory is no longer on disk',
   totalBytes: '{size} total',
   loadFailed: 'Could not read archived sessions.',
   deleteFailed: 'Delete failed. Try again.',
@@ -229,7 +226,12 @@ function ConfirmDelete({ t, open, items, busy, onCancel, onConfirm }) {
 
 /** The archived-session list and its controls. */
 function ArchivedList({ t, value, selection, busy, onToggle, onToggleAll, onDelete, onRefresh }) {
-  const items = value.items ?? []
+  // Only rows with something on disk are actionable. A `missing` entry is an id
+  // still sitting in the archive set whose directory is already gone — nothing
+  // to delete and nothing to size, so listing it is pure noise. The Host still
+  // reports them (its listing is the honest full picture); hiding them here is
+  // a presentation decision.
+  const items = (value.items ?? []).filter((item) => !item.missing)
   const deletable = items.filter((item) => item.deletable)
   const allSelected = deletable.length > 0 && deletable.every((item) => selection.includes(item.id))
   const selectedItems = items.filter((item) => selection.includes(item.id) && item.deletable)
@@ -266,7 +268,6 @@ function ArchivedList({ t, value, selection, busy, onToggle, onToggleAll, onDele
             jsx('span', { className: 'sc-row-title', children: item.dir === null ? item.id : (item.dir.split(/[\\/]/).pop() ?? item.id) }, 'title'),
             jsx('span', { className: 'sc-row-meta', children: (item.dir ?? '') + ' · ' + formatBytes(item.size ?? 0) }, 'meta'),
             item.live ? jsx('span', { className: 'sc-row-live', children: t('live') }, 'live') : null,
-            item.missing ? jsx('span', { className: 'sc-row-missing', children: t('missing') }, 'missing') : null,
           ] }, 'text'),
           item.deletable
             ? jsx('button', {
