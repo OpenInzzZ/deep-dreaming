@@ -184,6 +184,44 @@ function fill(text, params) {
   return String(text).replace(/\{(\w+)\}/g, (whole, key) => (key in params ? String(params[key]) : whole))
 }
 
+/**
+ * Identity shown as a row's title.
+ *
+ * A session's real title lives in its event log (`session/title`), not in the
+ * header, so it is unavailable without decompressing the log — which this
+ * plugin deliberately never does (the list only stats and removes directories).
+ * The project directory plus the age is the strongest identifier already on
+ * hand, and it is what disambiguates two sessions of the same project.
+ * @param item - one `listArchived` row.
+ */
+function rowTitle(item) {
+  if (typeof item.project === 'string' && item.project.length > 0) {
+    // `--D-GitHub-deep-dreaming--` is the storage's project key; strip its
+    // decorators and leading separator dashes to get the readable name back.
+    const readable = item.project.replace(/^--/, '').replace(/--$/, '').replace(/^-+/, '')
+    return readable.length > 0 ? readable : item.project
+  }
+  return item.id
+}
+
+/** When the session was last touched, or '' when unknown. */
+function rowWhen(item) {
+  if (!Number.isFinite(item.mtimeMs) || item.mtimeMs <= 0) return ''
+  const at = new Date(item.mtimeMs)
+  const pad = (n) => String(n).padStart(2, '0')
+  return (at.getMonth() + 1) + '-' + pad(at.getDate()) + ' ' + pad(at.getHours()) + ':' + pad(at.getMinutes())
+}
+
+/** Secondary line: last-seen time, size, and the raw session id for reference. */
+function rowMeta(item) {
+  const parts = []
+  const when = rowWhen(item)
+  if (when !== '') parts.push(when)
+  parts.push(formatBytes(item.size ?? 0))
+  parts.push(item.id)
+  return parts.join(' · ')
+}
+
 /** One labelled configuration field. */
 function Field({ fieldKey, label, hint, children, disabled }) {
   return jsxs('div', { className: 'sc-field', children: [
@@ -265,8 +303,8 @@ function ArchivedList({ t, value, selection, busy, onToggle, onToggleAll, onDele
               }, 'check')
             : jsx('span', { className: 'sc-check', 'aria-hidden': true }, 'check-space'),
           jsxs('span', { className: 'sc-row-text', children: [
-            jsx('span', { className: 'sc-row-title', children: item.dir === null ? item.id : (item.dir.split(/[\\/]/).pop() ?? item.id) }, 'title'),
-            jsx('span', { className: 'sc-row-meta', children: (item.dir ?? '') + ' · ' + formatBytes(item.size ?? 0) }, 'meta'),
+            jsx('span', { className: 'sc-row-title', children: rowTitle(item) }, 'title'),
+            jsx('span', { className: 'sc-row-meta', children: rowMeta(item) }, 'meta'),
             item.live ? jsx('span', { className: 'sc-row-live', children: t('live') }, 'live') : null,
           ] }, 'text'),
           item.deletable

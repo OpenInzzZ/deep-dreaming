@@ -959,6 +959,26 @@ if (JSDOM === null) {
   const checkboxes = [...doc.querySelectorAll('.sc-check[type="checkbox"]')]
   if (checkboxes.length !== 2) throw new Error(`expected 2 selectable rows, got ${checkboxes.length}`)
 
+  // A row is identified by its PROJECT name, not the storage key or the uuid:
+  // the real session title lives in the event log, which this plugin never
+  // reads. The fixture's project keys are `p1` / `p2`.
+  const titles = rows.map(row => row.querySelector('.sc-row-title').textContent).sort()
+  if (JSON.stringify(titles) !== JSON.stringify(['p1', 'p2'])) {
+    throw new Error(`rows must be titled by project name, got ${JSON.stringify(titles)}`)
+  }
+  // The raw id stays visible on the secondary line for reference.
+  const metas = rows.map(row => row.querySelector('.sc-row-meta').textContent)
+  if (!metas.some(meta => meta.includes(rA)) || !metas.some(meta => meta.includes(rB))) {
+    throw new Error(`the secondary line must still carry the session id, got ${JSON.stringify(metas)}`)
+  }
+  // A storage key in the decorated `--path--` form must not leak as the title.
+  for (const title of titles) {
+    if (title.startsWith('--') || title.endsWith('--') || title.includes('session-render')) {
+      throw new Error(`an undecorated, readable project name is expected, got ${JSON.stringify(title)}`)
+    }
+  }
+  console.log('card OK: rows are titled by project name with time/size/id on the secondary line')
+
   // The card must not offer any automatic-cleanup knob any more.
   for (const dead of ['#sc-maxAgeDays', '#sc-maxTotalMB', '#sc-keepSessions', '#sc-intervalMinutes', '#sc-dryRun']) {
     if (doc.querySelector(dead) !== null) throw new Error(`the automatic-cleanup field ${dead} must be gone`)
