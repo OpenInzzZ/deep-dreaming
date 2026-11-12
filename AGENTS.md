@@ -45,6 +45,7 @@ deep-dreaming/
 ├── patches/                       # One directory per patch
 │   ├── dsh-project-memory/        # MCP Reference Memory bridge: guidance section + first-admitted-step auto-recall
 │   ├── session-cleanup/           # Manual physical deletion of archived sessions
+│   ├── queue-reorder/             # Drag-to-reorder queued messages (decorates the shipped queue dock, never shadows it)
 │   ├── temp-session/              # Sidebar button for ad-hoc temp sessions
 │   ├── whale-background/          # Whale-girl background image in chat area
 │   └── mcp-servers/               # One settings page over a list of external MCP servers; mounts the official MCP client once per entry
@@ -238,9 +239,14 @@ node patches/dsh-project-memory/tests/plugin.smoke.mjs
 node patches/whale-background/tests/load-smoke.mjs
 node patches/mcp-servers/tests/load-smoke.mjs
 node patches/mcp-servers/tests/client-contract.mjs
+node patches/queue-reorder/tests/load-smoke.mjs
 
 # Client contract tests (jsdom-optional)
 node patches/dsh-project-memory/tests/client-contract.mjs
+node patches/queue-reorder/tests/client-contract.mjs
+
+# Upstream-source guards (skip when no DSH checkout is present)
+node patches/queue-reorder/tests/official-dock-contract.mjs
 
 # Integration verification
 node patches/session-cleanup/verify-session-cleanup.mjs
@@ -336,6 +342,7 @@ Existing **Memorix** data is copied by `scripts/migrate-memorix-to-reference.mjs
 |-------|-----------|-------------|-------------|-------------------|
 | dsh-project-memory | `lib/index.js` | `client.js` | (none) | (none) |
 | session-cleanup | `session-cleanup.mjs` | `client.js` | `/session-cleanup` | `session-cleanup` (the entry id; no registration call in 0.2.x) |
+| queue-reorder | `lib/index.js` | `lib/client.js` | `/queue-reorder` | (none) |
 | temp-session | `lib/index.js` | `lib/client.js` | `/temp-session` | (none) |
 | whale-background | `lib/index.js` | `lib/client.js` | (none) | (none) |
 | mcp-servers | `lib/index.js` (mounts `@deepseek-ai/dsh-mcp-client` as one child fiber per `servers` entry) | `lib/client.js` | (none — outbound MCP clients; and its settings page rides the shared `configForms`) | `mcp-servers` (the entry id; `servers` is a `.volatile()` array so the page can edit it) |

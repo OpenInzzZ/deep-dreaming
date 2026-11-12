@@ -281,7 +281,8 @@ function Add-InsertRow([string]$Content, [string]$Id, [string]$Name) {
 $links = @(
     @{ n = 'dsh-plugin-session-cleanup';            d = 'session-cleanup' },
     @{ n = 'dsh-client-ui-temp-session';             d = 'temp-session' },
-    @{ n = 'dsh-client-whale-background';            d = 'whale-background' }
+    @{ n = 'dsh-client-whale-background';            d = 'whale-background' },
+    @{ n = 'dsh-client-queue-reorder';               d = 'queue-reorder' }
 )
 foreach ($l in $links) {
     $target = Join-Path $dev "patches\$($l.d)"
@@ -335,7 +336,7 @@ foreach ($dir in $mcpLinkDirs) {
 # The strip happens per patch inside step 3 (immediately before that patch's
 # bundle install) so a crash between the two steps can only ever leave ONE
 # patch without a row, and the removed block is stashed for restore on failure.
-$bundlePatchDirs = @('session-cleanup', 'temp-session', 'whale-background', 'dsh-project-memory', 'mcp-servers')
+$bundlePatchDirs = @('session-cleanup', 'queue-reorder', 'temp-session', 'whale-background', 'dsh-project-memory', 'mcp-servers')
 $removedRows = @{}
 $failed = 0
 

@@ -1,0 +1,11 @@
+# queue-reorder: 排队消息拖拽排序（bundle 层行）。
+#
+# 本包声明了 dsh.bundle（package.json -> dsh.bundle.patch），此文件由 dsh 在
+# 加载 profile 时自动作为 bundle 层合成；**不要**再往 profile 的
+# cordis.patch.yml 里 insert 同名行 —— 两层同 id 会让启动 fail-loud 抛
+# `TypeError: duplicate loader entry id`。
+#
+# 没有 config：本插件只有一条宿主端点与一个客户端装饰，没有可调参数。
+- insert:
+    - id: queue-reorder
+      name: '@local/dsh-client-queue-reorder'

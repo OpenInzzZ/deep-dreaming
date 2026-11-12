@@ -17,6 +17,7 @@ deep-dreaming/
 ├── patches/                      # 全部补丁,一补丁一目录(代码 + 测试 + README)
 │   ├── dsh-project-memory/       # 跨会话项目记忆(MCP Reference Memory 桥接,组合包插件)
 │   ├── session-cleanup/          # 已归档会话的手动物理删除(目录包插件)
+│   ├── queue-reorder/            # 排队消息拖拽排序(装饰官方队列坞,不遮蔽它)
 │   ├── temp-session/             # 侧边栏一键发起不绑定项目的临时会话 + verify
 │   ├── whale-background/         # 会话区域鲸鱼娘背景图(bundle 补丁)
 │   └── mcp-servers/              # 一张设置页管理多个外部 MCP 服务(含 IDEA 代码诊断),加服务不重启
@@ -45,6 +46,7 @@ deep-dreaming/
 | --- | --- | --- | --- |
 | [dsh-project-memory](patches/dsh-project-memory/) | 跨会话项目记忆:**MCP Reference Memory 桥接**(图谱存储/检索/关系都在官方 `@modelcontextprotocol/server-memory`)——注入提示词引导,并在会话**首个被准入步骤**(`agent/pre-step`)召回既有记忆(带上本会话工作区与 `<project>/<topic>` 项目前缀),记忆存取由 `mcp__reference_memory__*` 完成;九个记忆工具调用以**可折叠「记忆阶段」卡片**展示,**不产生额外对话轮次** | 作为 **bundle** 安装:`dsh plugin --profile desktop add`(或 `pnpm add`)进 profile 并登记到 `dsh.profile.bundles` + 全局安装 `@modelcontextprotocol/server-memory` 与 home 层 `reference_memory` MCP 行 | [README](patches/dsh-project-memory/README.md) |
 | [session-cleanup](patches/session-cleanup/) | 手动删除已归档会话(设置页列表 + 会话右键菜单,二次确认,不自动清理) | **bundle**:包内 `cordis.patch.yml` 行 + `install.ps1` pnpm link 进 profile 并登记 `dsh.profile.bundles` | [README](patches/session-cleanup/README.md) |
+| [queue-reorder](patches/queue-reorder/) | **排队消息拖拽排序**。官方队列坞（QueueDock）没有任何更改顺序的方式——`QueueAction` 只有 `edit`/`remove`/`steer`。本补丁在官方坞的行上加拖拽，落点经宿主 `/queue-reorder/reorder` 走标准 inbox splice，顺序由 `agent/inbox/spliced` 事件广播。**装饰而非接管**：官方坞照常渲染（编辑/steer/附件/折叠都是官方的），插件注册独立 slot id，官方升级不用跟 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/queue-reorder/README.md) |
 | [temp-session](patches/temp-session/) | 侧边栏底部「临时会话」按钮:一键发起绑定**用户级临时目录**的会话,不关联任何项目 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/temp-session/README.md) |
 | [whale-background](patches/whale-background/) | 会话区域背景:在对话滚动区居中偏右显示鲸鱼娘透明图(13% 透明度),资源缺失时自动跳过而不影响启动 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/whale-background/README.md) |
 | [mcp-servers](patches/mcp-servers/) | **MCP 服务接入**:一张设置页管理多个外部 MCP 服务,清单存在配置里,加/删服务不用改 yml、不用重启。出厂默认那条是 **IDEA 代码诊断**——模型改完代码直接调 `mcp__idea__lint_files` / `get_file_problems` 拿 IDE 实时检查结果(实测冷分析 3.6s、8 文件批量 4.9s、59 个工具),不必为「符号解析不了」跑一遍编译。宿主端对每项挂一个官方 `@deepseek-ai/dsh-mcp-client` 子 fiber(官方一个 entry 只连一个 server,且它的 `z.union` 展不开成表单);客户端半端注册 `settings.section` 页——**运行时没有任何插件贡献 `plugins.row.config`,官方根本没有通用配置编辑器** | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/mcp-servers/README.md) |
@@ -54,7 +56,7 @@ deep-dreaming/
 **推荐一条命令**(任何机器克隆后即可,路径自动推导,无需改动):
 
 ```powershell
-# 在仓库根目录执行:建 junction 兜底(含 @local 自引用)+ 把 7 个 bundle 补丁全部装成 bundle
+# 在仓库根目录执行:建 junction 兜底(含 @local 自引用)+ 把 6 个 bundle 补丁全部装成 bundle
 # (pnpm link + 登记 dsh.profile.bundles,先剥离 profile 层遗留行)
 # + 安装并接线 MCP Reference Memory + 部署校验(幂等,可重复运行)
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
@@ -218,6 +220,9 @@ node patches/session-cleanup/verify-session-cleanup.mjs          # 端点 + 设�
 node patches/session-cleanup/tests/load-smoke.mjs                # 真实 Cordis 加载冒烟(Invalid effect 回归)
 node patches/dsh-project-memory/tests/plugin.smoke.mjs           # Reference Memory 桥接:Config 校验 + 提示词/事件流(无回顾轮次)
 node patches/dsh-project-memory/tests/client-contract.mjs        # 浏览器半契约(记忆折叠卡注册与渲染)
+node patches/queue-reorder/tests/load-smoke.mjs                  # 真实 Cordis + inbox splice 重排语义(含回滚)
+node patches/queue-reorder/tests/client-contract.mjs             # 浏览器半契约(装饰官方行 + 拖放换算,jsdom)
+node patches/queue-reorder/tests/official-dock-contract.mjs      # 官方 QueueDock 源码契约守卫(无检出时 SKIP)
 node patches/temp-session/verify-temp-session.mjs                # temp-session host + client 契约 + 点击流程
 node patches/whale-background/tests/load-smoke.mjs               # 鲸鱼娘图片路由 + 资源存在性
 ```
@@ -360,7 +365,9 @@ ACP stdout)与 LLM(`llm-deepseek-api-key` 跟随官方 `/models` 列表)、
    因此 `mcp-servers`、`session-cleanup`、`temp-session` 继续互补。
    `ui-queue-tools` 当时也靠这条互补存活,但它遮蔽官方整个队列坞、只多出
    「全文预览 + 拖拽排序」两项,官方坞后续每加一项能力都会被它挡掉,
-   已于 2026-11-06 退役并让位给官方坞(见 `archive/README.md`)。
+   已于 2026-11-06 退役(见 `archive/README.md`);同日以
+   **`queue-reorder`** 的形态把「拖拽排序」这一项加回来——不再遮蔽官方坞,
+   只往官方行上加拖拽(见下节)。
 3. **rc.3 新增的 `ui-entry-customization`**(侧边栏面板/会话视图的 More 菜单:
    pin/unpin、浏览插件、创建插件)只作用于 panellist 与 view tab;
    `temp-session` 挂在 `sidebar.footer.action` 上,不是可 pin 的面板,二者不冲突。
@@ -379,6 +386,36 @@ ACP stdout)与 LLM(`llm-deepseek-api-key` 跟随官方 `/models` 列表)、
    entry 在 `resolveAccountOptions` 抛 `models is no longer configurable` 而不激活;
    schemastery 会保留未知键)。已再次从
    `~/.dsh/profiles/desktop/cordis.patch.yml` 删除 —— 注意设置页面保存模型时可能把它写回。
+
+### queue-reorder:拖拽排序以「装饰」形态回归(2026-11-06)
+
+`ui-queue-tools` 退役当天就发现:官方队列坞**确实没有**任何更改顺序的方式
+(`QueueAction` 只有 `edit` / `remove` / `steer`,见
+`packages/api/session-controller/src/types.ts:142`)。于是把「拖拽排序」这一项
+单独做成新补丁 `queue-reorder`,换个形态:
+
+1. **不遮蔽**。`ui-queue-tools` 用同 id (`queue`) + `priority: -10` 整坞接管;
+   `queue-reorder` 注册的是独立 id (`queue-reorder`, `order: 30`),官方坞那一格
+   完全保留 —— `list` 槽按 id 分格,同 id 才遮蔽。官方以后给这个坞加的能力
+   (编辑/steer/附件/折叠,以及将来新增的)都不会被挡掉。
+2. **只加拖拽**。组件渲染 `null`,每次渲染后按 `inbox['next-turn']` 的顺序给
+   官方行写 `data-queue-reorder-id`,再在 document 上装一次捕获阶段的
+   dragstart/dragover/drop/dragend 代理。
+3. **顺序由宿主决定**。`POST /queue-reorder/reorder` 走标准 inbox splice
+   (`packages/core/agent-loop/src/inbox.ts`),`agent/inbox/spliced` 事件广播给
+   所有客户端,所以前端不做乐观重排。摘除前校验两个位置,插入被拒绝时把消息
+   放回原处 —— 失败的拖拽不会丢消息。
+
+**代价**:依赖官方 DOM 的三条事实(坞根 `data-queue-dock`、持久行是 `li`、
+本地回显行带 `data-submission-echo`),外加「持久行顺序 = `next-turn` 减去已进
+transcript 的提交」这条过滤。错位是**静默**的,所以
+`patches/queue-reorder/tests/official-dock-contract.mjs` 直接读官方源码盯着
+这几条(以及「官方 `QueueAction` 仍无 reorder 分支」这条本补丁存在的前提),
+官方一改形状 `npm test` 先失败。该测试在没有 DSH 源码检出的机器上 SKIP。
+
+运行中宿主实测:客户端图里 `@local/dsh-client-queue-reorder` 行在位且 `client.js`
+可下载(200),`POST /queue-reorder/reorder` 对无在活 agent 的会话返回
+`session-not-found`(端点真的跑起来了);官方 `ui-conversation` 行仍在,未被遮蔽。
 
 ### ui-settings-model-capabilities 退役(2026-11-03)
 

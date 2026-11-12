@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Queue Reorder",
+    "description": "Drag queued messages to change their send order. The shipped queue dock has no reorder action of its own; this plugin adds dragging to it instead of replacing it."
+  }
+}
