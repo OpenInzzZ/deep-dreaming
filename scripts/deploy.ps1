@@ -83,7 +83,7 @@ if (Test-Path $profilePatch) {
 #      otherwise its row has no owner and the plugin silently never loads.
 $profilePkgPath = Join-Path $dshHome "profiles\$Profile\package.json"
 $profileNodeModules = Join-Path $dshHome "profiles\$Profile\node_modules"
-$bundlePatchDirs = @('session-cleanup', 'queue-reorder', 'temp-session', 'whale-background', 'dsh-project-memory', 'mcp-servers')
+$bundlePatchDirs = @('session-cleanup', 'queue-reorder', 'temp-session', 'whale-background', 'dsh-project-memory')
 $profileDeps = @()
 $profileBundles = @()
 if (Test-Path $profilePkgPath) {
@@ -115,7 +115,6 @@ foreach ($dir in $bundlePatchDirs) {
     # Every @local package named by this bundle's loader rows must resolve from
     # the shared store: the Loader imports the row's `name`, and a row pointing at
     # an unlinked package silently never mounts - no card component, no error.
-    # (The mcp-servers umbrella names one such component package per MCP server.)
     foreach ($rm in [regex]::Matches((Read-Utf8 $repoBundleYml), "name:\s*'?(@local/[^'\r\n]+?)'?\s*(?:\r?\n|$)")) {
         $rowName = $rm.Groups[1].Value.Trim()
         if ($rowName -eq $pkgName) { continue }
@@ -146,7 +145,12 @@ if ((Test-Path $profilePatch) -and (Test-Path $profilePkgPath)) {
         $idMatch = [regex]::Match($block, '- id:\s*[''"]?([A-Za-z0-9@/:_\-.]+)[''"]?')
         if (-not $idMatch.Success) { continue }
         $id = $idMatch.Groups[1].Value
-        $nameMatch = [regex]::Match($block, "name:\s*'?([^'\r\n]+?)'?\s*(?:\r?\n|$)")
+        # Strip either quote style: bundle ymls use single quotes, but a
+        # hand-written profile row (and anything the plugin console writes)
+        # commonly uses double quotes. Leaving the quotes in the captured name
+        # produced an illegal path ("C:\...\node_modules\"@scope/pkg"\package.json")
+        # that aborted this whole check with a raw Test-Path error.
+        $nameMatch = [regex]::Match($block, "name:\s*['`"]?([^'`"\r\n]+?)['`"]?\s*(?:\r?\n|$)")
         if (-not $nameMatch.Success) { continue }
         $name = $nameMatch.Groups[1].Value.Trim()
         if ($bundles -contains $name) {
@@ -204,7 +208,7 @@ if ($homeContent -match 'serverName:\s*memorix') {
 #    repo-side real path, so the repo tree must expose the host node_modules.
 #    Missing/dangling/empty-dir links are (re)created; real dirs that already
 #    provide @deepseek-ai are kept as-is.
-$depPlugins = @('dsh-project-memory', 'session-cleanup', 'queue-reorder', 'temp-session', 'whale-background', 'mcp-servers')
+$depPlugins = @('dsh-project-memory', 'session-cleanup', 'queue-reorder', 'temp-session', 'whale-background')
 if (-not (Test-Path $modulesBase)) {
     Write-Host "  [!] ~/.dsh/profiles/node_modules not found; run ``dsh plugin --profile $Profile add`` first" -ForegroundColor Yellow
 } else {

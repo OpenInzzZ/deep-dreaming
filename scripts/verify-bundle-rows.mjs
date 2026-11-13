@@ -11,7 +11,7 @@
  *   2. yml 里恰好一个 `- insert:` 块，块内的行 id 与清单声明一致（一个 bundle
  *      可以有多行 —— 插件页里它就是「包含的组件」，官方先例 agent-team-profile）；
  *   3. 每行的 name 要么等于本包 package.json 的 name（补丁自己），要么指向仓库里
- *      另一个补丁包（组件包，如 mcp-servers 的每服务一行）；Loader 用 name import
+ *      另一个补丁包（组件包，一行一个）；Loader 用 name import
  *      插件本体，对不上就静默 pending；
  *   4. 被引用的包必须导出 ./package.json 与 ./locale/*.json 且 en/zh 标题齐全、
  *      同一卡内互不相同 —— 组件标题取自**该行 name 指向的包**的 locale
@@ -40,7 +40,6 @@ const BUNDLES = {
     'temp-session': ['temp-session'],
     'whale-background': ['whale-background'],
     'dsh-project-memory': ['project-memory'],
-    'mcp-servers': ['mcp-servers'],
 }
 
 let checks = 0

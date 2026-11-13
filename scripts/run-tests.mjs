@@ -38,8 +38,6 @@ const CHECKS = [
   { path: 'patches/queue-reorder/tests/official-dock-contract.mjs', label: 'queue-reorder: shipped dock DOM contract' },
   { path: 'patches/temp-session/verify-temp-session.mjs', label: 'temp-session: host + button flow' },
   { path: 'patches/whale-background/tests/load-smoke.mjs', label: 'whale-background: image route' },
-  { path: 'patches/mcp-servers/tests/load-smoke.mjs', label: 'mcp-servers: host mapping + live mount' },
-  { path: 'patches/mcp-servers/tests/client-contract.mjs', label: 'mcp-servers: settings page contract' },
 ]
 
 const args = process.argv.slice(2)

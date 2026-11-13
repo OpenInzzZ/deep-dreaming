@@ -19,12 +19,11 @@ deep-dreaming/
 │   ├── session-cleanup/          # 已归档会话的手动物理删除(目录包插件)
 │   ├── queue-reorder/            # 排队消息拖拽排序(装饰官方队列坞,不遮蔽它)
 │   ├── temp-session/             # 侧边栏一键发起不绑定项目的临时会话 + verify
-│   ├── whale-background/         # 会话区域鲸鱼娘背景图(bundle 补丁)
-│   └── mcp-servers/              # 一张设置页管理多个外部 MCP 服务(含 IDEA 代码诊断),加服务不重启
+│   └── whale-background/         # 会话区域鲸鱼娘背景图(bundle 补丁)
 ├── assets/                       # 品牌资产(鲸鱼娘 favicon;不归任何补丁,由 deploy.ps1 同步到 ~/.dsh/assets)
 ├── archive/                      # 已退役的脚本 / 资产 / 补丁(只读保留,不再部署)
 ├── scripts/
-│   ├── install.ps1               # 一键安装:建 junction 兜底(含 @local 自引用)+ 6 个 bundle 补丁全部装成 bundle(先剥遗留行) + MCP Reference Memory + 部署校验(幂等)
+│   ├── install.ps1               # 一键安装:建 junction 兜底(含 @local 自引用)+ 5 个 bundle 补丁全部装成 bundle(先剥遗留行) + MCP Reference Memory + 部署校验(幂等)
 │   ├── deploy.ps1                # 只读校验:同步脚本与资产 + bundle 登记/行属主 + junction + 体检宿主依赖仓库
 │   ├── start-desktop.ps1         # 启动桌面端(已在运行则聚焦窗口)
 │   ├── restart-desktop.ps1       # 重启桌面端(改补丁源码后必须;需 -Force)
@@ -49,14 +48,20 @@ deep-dreaming/
 | [queue-reorder](patches/queue-reorder/) | **排队消息拖拽排序**。官方队列坞（QueueDock）没有任何更改顺序的方式——`QueueAction` 只有 `edit`/`remove`/`steer`。本补丁在官方坞的行上加拖拽，落点经宿主 `/queue-reorder/reorder` 走标准 inbox splice，顺序由 `agent/inbox/spliced` 事件广播。**装饰而非接管**：官方坞照常渲染（编辑/steer/附件/折叠都是官方的），插件注册独立 slot id，官方升级不用跟 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/queue-reorder/README.md) |
 | [temp-session](patches/temp-session/) | 侧边栏底部「临时会话」按钮:一键发起绑定**用户级临时目录**的会话,不关联任何项目 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/temp-session/README.md) |
 | [whale-background](patches/whale-background/) | 会话区域背景:在对话滚动区居中偏右显示鲸鱼娘透明图(13% 透明度),资源缺失时自动跳过而不影响启动 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/whale-background/README.md) |
-| [mcp-servers](patches/mcp-servers/) | **MCP 服务接入**:一张设置页管理多个外部 MCP 服务,清单存在配置里,加/删服务不用改 yml、不用重启。出厂默认那条是 **IDEA 代码诊断**——模型改完代码直接调 `mcp__idea__lint_files` / `get_file_problems` 拿 IDE 实时检查结果(实测冷分析 3.6s、8 文件批量 4.9s、59 个工具),不必为「符号解析不了」跑一遍编译。宿主端对每项挂一个官方 `@deepseek-ai/dsh-mcp-client` 子 fiber(官方一个 entry 只连一个 server,且它的 `z.union` 展不开成表单);客户端半端注册 `settings.section` 页——**运行时没有任何插件贡献 `plugins.row.config`,官方根本没有通用配置编辑器** | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/mcp-servers/README.md) |
+
+> **MCP 服务管理已移交社区插件**（2026-11-13）：本仓库的 `mcp-servers` 补丁已退役归档到
+> [`archive/patches/mcp-servers`](archive/patches/mcp-servers/)，由社区插件
+> **`dsh-mcp-panel`**（设置 → 插件 → MCP，`/mcp` 命令）接管。那套实现用的是**官方行词汇**
+> ——每个服务一条 `@deepseek-ai/dsh-mcp-client` 行——所以现有服务已按该形态迁移进
+> profile 层 `cordis.patch.yml` 的 `- insert:` 列表（`mcp-idea` / `mcp-dbx` / `mcp-api_fox` /
+> `mcp-data_mock`），不为任何一个服务保留插件私有的 `servers` 数组。
 
 ## 快速部署
 
 **推荐一条命令**(任何机器克隆后即可,路径自动推导,无需改动):
 
 ```powershell
-# 在仓库根目录执行:建 junction 兜底(含 @local 自引用)+ 把 6 个 bundle 补丁全部装成 bundle
+# 在仓库根目录执行:建 junction 兜底(含 @local 自引用)+ 把 5 个 bundle 补丁全部装成 bundle
 # (pnpm link + 登记 dsh.profile.bundles,先剥离 profile 层遗留行)
 # + 安装并接线 MCP Reference Memory + 部署校验(幂等,可重复运行)
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
@@ -184,8 +189,9 @@ DSH 桌面端对 profile 的 `cordis.patch.yml` 内置热加载(`watchUserPatche
   - `install.ps1` 因此只在内容真的变化时才写该文件(无变化时 mtime 不变,不再触发
     无谓的整层重载)。
 - **profile manifest(`package.json`)改动热应用**(2026-09-24 实测:`install.ps1`
-  通过桌面 CLI 把 6 个补丁登记进 `dsh.profile.bundles` 并剥离 profile 层遗留行,
-  —— 该数字是当时的实测样本;2026-10-13 起 7(新增 `mcp-servers`),2026-11-03 起 6(退役 `ui-settings-model-capabilities`),机制不变)
+  通过桌面 CLI 把补丁登记进 `dsh.profile.bundles` 并剥离 profile 层遗留行,
+  —— 该数字是当时的实测样本;2026-10-13 起 7(新增 `mcp-servers`),2026-11-03 起 6(退役 `ui-settings-model-capabilities`),
+  2026-11-13 起 5(退役 `mcp-servers`,移交给社区插件 `dsh-mcp-panel`),机制不变)
   运行中的宿主数秒内挂上 bundle 行,四条 host 路由全部 200,无需重启)。
 - **补丁源码(仓库文件)改动不热加载**:模块级 HMR 对 `node_modules` 下的补丁不生效;
   改完源码需**重启桌面端**(`scripts/restart-desktop.ps1`,会结束当前会话,请在空闲时进行);
@@ -361,8 +367,10 @@ ACP stdout)与 LLM(`llm-deepseek-api-key` 跟随官方 `/models` 列表)、
    `settings.models.provider-card`、`conversation.input.dock`、
    `sidebar.footer.action`、`tool.call.toolview`,以及 15 个
    `@deepseek-ai/dsh-client-ui-primitives` 图标导出。
-2. **官方仍无** MCP 服务设置页、会话自动清理、临时会话、队列坞拖拽排序/全文预览,
-   因此 `mcp-servers`、`session-cleanup`、`temp-session` 继续互补。
+2. **官方仍无**会话自动清理、临时会话、队列坞拖拽排序/全文预览,
+   因此 `session-cleanup`、`temp-session` 继续互补。
+   （MCP 服务设置页原本也在这一条里；2026-11-13 起该能力由社区插件
+   `dsh-mcp-panel` 提供，本仓库的 `mcp-servers` 补丁已退役归档。）
    `ui-queue-tools` 当时也靠这条互补存活,但它遮蔽官方整个队列坞、只多出
    「全文预览 + 拖拽排序」两项,官方坞后续每加一项能力都会被它挡掉,
    已于 2026-11-06 退役(见 `archive/README.md`);同日以

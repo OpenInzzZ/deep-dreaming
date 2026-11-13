@@ -28,6 +28,11 @@
 | `ui-settings-model-reasoning/` | 设置「模型」页扩展：给自定义（`llm-pi-ai`）路由逐模型配置**思考开关 + 思考等级**，写回 `reasoningEfforts` | **被后续补丁取代**（不是失败）：迭代为 `patches/ui-settings-model-capabilities`，把同一条目扩成「模型能力」卡片——思考之外并入**图片输入三态**（跟随上游 / 仅文本 / 支持图片），补上官方勾选框无法表达的「继承」状态。loader 条目 id 与包名随之改名（`…-model-reasoning` → `…-model-capabilities`），旧行由 `scripts/install.ps1` 的 `$renamedBundles` 幂等注销 |
 | `ui-settings-model-capabilities/` | 设置「模型」页扩展：给 `llm-pi-ai` 路由逐模型配置**思考开关 + 等级（档位与发送值）**写回 `reasoningEfforts`（仅目录型路由，声明型路由交官方模型行），以及**图片输入三态**（跟随上游 / 仅文本 / 支持图片）写回 `input` | **按要求退役**（2026-11-03），不是被官方取代：移除「我们自己写的思考等级与多模态支持配置」。两层同时做——profile 里各模型的 `reasoningEfforts` / `input` 声明一并删除（副作用：`deepseek-v4.1-flash` 不再声明图片输入，官方按纯文本处理该模型），补丁目录由 `patches/` 移入本归档、profile 登记与两条 junction 已注销；`scripts/install.ps1` 的 `$renamedBundles` 因此推广为 `New = $null` 的退役登记 |
 | `ui-queue-tools/` | 排队消息坞增强：遮蔽官方 `conversation.input.dock` 的 `queue` 单元（`priority: -10`），自绘整块队列坞，额外提供 **hover 全文预览** 与 **拖拽排序**（host 半经 `Inbox.splice` 重排）；其余行为逐版跟随官方坞同步（附件缩略图/文件块、本地排队回显、可继续子代理） | **收益不再配得上成本**（2026-11-06）：官方坞后来已自带多行编辑（`InlineEditor` 本就是 textarea，Enter 保存 / Shift+Enter 换行 / Escape 取消，且处理 IME 组合输入）、5 处 Tooltip、附件缩略图与文件 chip、sending 状态行。补丁真正的增量只剩两项，而**遮蔽是全量替换**——官方之后为该坞新增的任何能力（steer、折叠计数等）都会被补丁版本挡掉，且必须每版人工对齐。loader 行与两条 junction 已由 `$renamedBundles` 的 `New = $null` 幂等注销。**后续(同日)**：官方至今仍没有更改排队顺序的方式(会话控制器的 `QueueAction` 只有 `edit`/`remove`/`steer`)，因此「拖拽排序」这一项以新补丁 `patches/queue-reorder` 回归——但换了形态：不遮蔽官方坞，只往官方行上加拖拽。本归档目录保留作参考(151 行 host 半的 `Inbox.splice` 重排逻辑、客户端拖拽交互、`verify-queue-tools.mjs`)，新补丁的重排语义即源自这里 |
+| `mcp-servers/` | 一张设置页管理多个外部 MCP 服务：清单存在插件的 `servers` 配置数组里，宿主端对每项挂一个官方 `@deepseek-ai/dsh-mcp-client` 子 fiber（官方一个 entry 只连一个 server，且它的 `z.union` 展不开成表单），客户端半端注册 `settings.section` 页；出厂默认那条是 IDEA 代码诊断 | **社区插件已有对应实现**（2026-11-13 按用户要求退役）：社区插件 **`dsh-mcp-panel`**（`dsh plugin --profile desktop add dsh-mcp-panel`，设置 → 插件 → MCP，`/mcp` 命令）覆盖同一片能力，还多出健康诊断、连接状态、重连计数、工具试调与 Streamable HTTP 探测。更关键的是**数据形态**：它读写的正是官方行词汇（每个服务一条 `@deepseek-ai/dsh-mcp-client` 行），而本补丁用的是插件私有的 `servers` 数组——两者并存就是两套事实来源。因此既有 4 个服务（idea / dbx / api_fox / data_mock）已按官方行迁进 profile 层 `cordis.patch.yml` 的 `- insert:` 列表（`mcp-idea` / `mcp-dbx` / `mcp-api_fox` / `mcp-data_mock`），补丁目录移入本归档，profile 依赖、`dsh.profile.bundles` 条目与两条 junction 由 `$renamedBundles` 的 `New = $null` 幂等注销。目录内保留 `lib/index.js`（`planReconcile` / 子 fiber 挂载）、`lib/client.js` 与两份测试，作为「volatile 配置 + 按项 reconcile」的参考实现 |
+
+> **两个归档补丁留下的通用知识**（写进了 `AGENTS.md` 的 pitfalls，代码本身只在归档里）：
+> `mcp-servers` 是「volatile 字段改动不重跑 `apply()`、插件必须自己监听 `loader/volatile-update` 并
+> reconcile」的原始范本；也是 `.volatile()` 会把校验值装箱成 `{ get }`、下游必须先解箱的原始范本。
 
 > `ui-settings-other/` 归档时按新归属拆分过：它的 5 个生命周期脚本与 `scripts/patch-cli.ps1`
 > 一起并入 `web-scripts/`（逐字节相同，因此归档目录里不再留副本），4 个资产分别落到仓库级
@@ -36,6 +41,10 @@
 
 > 教训（也已写进 `AGENTS.md` 的「Adding a New Patch」）：**做 UI 补丁前先在 DSH 源码检出里
 > grep 一遍**（`packages/client/ui-*`），确认官方没做过同一件事。
+>
+> 同一条教训的社区版（`mcp-servers` 归档时补）：**先看社区插件是否已经做过**。这次不是官方
+> 接管，而是社区插件 `dsh-mcp-panel` 早已覆盖同一片能力；它用的还是官方行词汇，接入成本更低。
+> 判断标准应该是「谁的数据形态更接近官方」，而不是「谁先写出来」。
 
 ## `assets/`
 
