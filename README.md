@@ -15,7 +15,6 @@ deep-dreaming/
 ├── README.md                     # 本文件:总览 + 补丁清单
 ├── package.json                  # 仅测试用依赖(react / react-dom / jsdom),npm install 后 npm test
 ├── patches/                      # 全部补丁,一补丁一目录(代码 + 测试 + README)
-│   ├── dsh-project-memory/       # 跨会话项目记忆(MCP Reference Memory 桥接,组合包插件)
 │   ├── session-cleanup/          # 已归档会话的手动物理删除(目录包插件)
 │   ├── queue-reorder/            # 排队消息拖拽排序(装饰官方队列坞,不遮蔽它)
 │   ├── temp-session/             # 侧边栏一键发起不绑定项目的临时会话 + verify
@@ -23,7 +22,7 @@ deep-dreaming/
 ├── assets/                       # 品牌资产(鲸鱼娘 favicon;不归任何补丁,由 deploy.ps1 同步到 ~/.dsh/assets)
 ├── archive/                      # 已退役的脚本 / 资产 / 补丁(只读保留,不再部署)
 ├── scripts/
-│   ├── install.ps1               # 一键安装:建 junction 兜底(含 @local 自引用)+ 5 个 bundle 补丁全部装成 bundle(先剥遗留行) + MCP Reference Memory + 部署校验(幂等)
+│   ├── install.ps1               # 一键安装:建 junction 兜底(含 @local 自引用)+ 4 个 bundle 补丁全部装成 bundle(先剥遗留行) + 退役登记清理 + 部署校验(幂等)
 │   ├── deploy.ps1                # 只读校验:同步脚本与资产 + bundle 登记/行属主 + junction + 体检宿主依赖仓库
 │   ├── start-desktop.ps1         # 启动桌面端(已在运行则聚焦窗口)
 │   ├── restart-desktop.ps1       # 重启桌面端(改补丁源码后必须;需 -Force)
@@ -31,19 +30,15 @@ deep-dreaming/
 │   ├── migrate-icon-names.mjs    # 把 `…Outline16/14` 图标名迁移到 0.2.0-rc.2 的 `…OutlineRegular/Medium`
 │   ├── verify-plugin-meta.mjs    # 复刻官方 readPluginMeta,证明「设置 → 内置插件」会显示我们的标题/描述
 │   ├── verify-bundle-rows.mjs    # 校验每个补丁的 dsh.bundle 声明与包内 cordis.patch.yml 行结构
-│   ├── migrate-dsh-memory.mjs    # 把旧版 .dsh-memory/ 笔记导入 MCP Reference Memory(幂等,可 --dry-run)
-│   ├── migrate-memorix-to-reference.mjs # 把 Memorix 项目快照复制进参考图谱(官方 transfer export + MCP 写入,幂等)
 │   ├── run-tests.mjs             # 跑完整个测试矩阵(npm test)
 │   └── test-deps.mjs             # 验证脚本的 react / jsdom 解析(仓库 node_modules → NODE_PATH → profile)
-├── archive/                      # Web 端时期的脚本与资产(只读保留,不再部署)
-└── .dsh-memory/                  # LEGACY 记忆笔记(旧实现,可导入 MCP Reference Memory),gitignored
+└── .dsh-memory/                  # LEGACY 记忆笔记(旧实现产物,已导出到 Mnemon Native 记忆空间),gitignored
 ```
 
 ## 补丁清单
 
 | 补丁 | 作用 | 部署方式 | 使用文档 |
 | --- | --- | --- | --- |
-| [dsh-project-memory](patches/dsh-project-memory/) | 跨会话项目记忆:**MCP Reference Memory 桥接**(图谱存储/检索/关系都在官方 `@modelcontextprotocol/server-memory`)——注入提示词引导,并在会话**首个被准入步骤**(`agent/pre-step`)召回既有记忆(带上本会话工作区与 `<project>/<topic>` 项目前缀),记忆存取由 `mcp__reference_memory__*` 完成;九个记忆工具调用以**可折叠「记忆阶段」卡片**展示,**不产生额外对话轮次** | 作为 **bundle** 安装:`dsh plugin --profile desktop add`(或 `pnpm add`)进 profile 并登记到 `dsh.profile.bundles` + 全局安装 `@modelcontextprotocol/server-memory` 与 home 层 `reference_memory` MCP 行 | [README](patches/dsh-project-memory/README.md) |
 | [session-cleanup](patches/session-cleanup/) | 手动删除已归档会话(设置页列表 + 会话右键菜单,二次确认,不自动清理) | **bundle**:包内 `cordis.patch.yml` 行 + `install.ps1` pnpm link 进 profile 并登记 `dsh.profile.bundles` | [README](patches/session-cleanup/README.md) |
 | [queue-reorder](patches/queue-reorder/) | **排队消息拖拽排序**。官方队列坞（QueueDock）没有任何更改顺序的方式——`QueueAction` 只有 `edit`/`remove`/`steer`。本补丁在官方坞的行上加拖拽，落点经宿主 `/queue-reorder/reorder` 走标准 inbox splice，顺序由 `agent/inbox/spliced` 事件广播。**装饰而非接管**：官方坞照常渲染（编辑/steer/附件/折叠都是官方的），插件注册独立 slot id，官方升级不用跟 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/queue-reorder/README.md) |
 | [temp-session](patches/temp-session/) | 侧边栏底部「临时会话」按钮:一键发起绑定**用户级临时目录**的会话,不关联任何项目 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/temp-session/README.md) |
@@ -56,21 +51,34 @@ deep-dreaming/
 > profile 层 `cordis.patch.yml` 的 `- insert:` 列表（`mcp-idea` / `mcp-dbx` / `mcp-api_fox` /
 > `mcp-data_mock`），不为任何一个服务保留插件私有的 `servers` 数组。
 
+> **跨会话记忆已移交社区插件**（2026-11-16）：本仓库的 `dsh-project-memory` 补丁已退役归档到
+> [`archive/patches/dsh-project-memory`](archive/patches/dsh-project-memory/)，由社区插件
+> **`dsh-mnemon`**（0.5.46，Mnemon Native Provider + 全局 `mnemon` CLI）接管。那个桥补丁本身
+> 不存任何数据，只注入一段提示词引导和一条会话开始时的召回提示；`dsh-mnemon` 自己拥有这整片
+> 表面（routing 引导、三层召回、自己的工具集、Memory Space），保留它只会让第二个后端同时挂上
+> 提示词。原 MCP Reference Memory 图谱已迁进按工作区划分的 Memory Space
+> （`~/.mnemon/workspaces/<sha256(realpath 工作区)>/data/default/mnemon.db`）。
+> home 层那条 `reference_memory` MCP 行与图谱文件保留作兜底，不再由脚本安装。
+
 ## 快速部署
 
 **推荐一条命令**(任何机器克隆后即可,路径自动推导,无需改动):
 
 ```powershell
-# 在仓库根目录执行:建 junction 兜底(含 @local 自引用)+ 把 5 个 bundle 补丁全部装成 bundle
+# 在仓库根目录执行:建 junction 兜底(含 @local 自引用)+ 把 4 个 bundle 补丁全部装成 bundle
 # (pnpm link + 登记 dsh.profile.bundles,先剥离 profile 层遗留行)
-# + 安装并接线 MCP Reference Memory + 部署校验(幂等,可重复运行)
+# + 部署校验(幂等,可重复运行)
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 # 一般无需重启:profile manifest 与用户层都会热应用(几秒内)。
 # 若插件页卡片或某条 host 路由缺失,再重启(会结束当前会话):
 powershell -ExecutionPolicy Bypass -File .\scripts\restart-desktop.ps1 -Force
 ```
 
-`install.ps1` 还会:剥离 profile 层遗留的 `- insert:` 行(bundle 装失败时原样恢复该行,保证补丁始终有属主)、幂等安装 **MCP Reference Memory**(`npm install -g @modelcontextprotocol/server-memory@2026.7.4`,把 `reference_memory` 行写进 `~/.dsh/cordis.patch.yml` 并移除旧的 `memory-memorix` 行,用 `-SkipMemoryProvider` / 旧别名 `-SkipMemorix` 跳过)、清除 `~/.dsh/AGENTS.md` 里 `memorix setup` 写入的遗留段落,并用桌面端自带的 CLI(`resources\runtime\cli\bin\dsh.cmd plugin --profile desktop add`)装 bundle。所有脚本读写配置文件都走显式 UTF-8(Windows PowerShell 5.1 的 `Get-Content`/`Set-Content` 默认按 ANSI 解码,会把中文注释写成乱码)。
+`install.ps1` 还会:剥离 profile 层遗留的 `- insert:` 行(bundle 装失败时原样恢复该行,保证补丁始终有属主)、执行 `$renamedBundles` 里的**退役登记**(清掉旧包名的 profile 依赖、`dsh.profile.bundles` 条目与遗留 junction),并用桌面端自带的 CLI(`resources\runtime\cli\bin\dsh.cmd plugin --profile desktop add`)装 bundle。所有脚本读写配置文件都走显式 UTF-8(Windows PowerShell 5.1 的 `Get-Content`/`Set-Content` 默认按 ANSI 解码,会把中文注释写成乱码)。
+
+> 跨会话记忆**不再由本仓库安装**:`dsh-mnemon` 接管后,脚本只会**提示**home 层还留着一条
+> `reference_memory` MCP 行(作兜底),不再安装 `@modelcontextprotocol/server-memory`、
+> 也不再写那条行。
 
 动手前它会**只读体检**「共享宿主依赖仓库」`~/.dsh/profiles/node_modules`,并报告桌面端安装与版本——补丁的宿主端 `import '@deepseek-ai/*'` 只能在这里被解析,仓库坏掉时补丁会以 `MODULE_NOT_FOUND` 装不上。
 
@@ -91,23 +99,14 @@ $cli = "D:\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
 & $cli plugin --profile desktop add "$repo\patches\session-cleanup"
 & $cli plugin --profile desktop add "$repo\patches\temp-session"
 & $cli plugin --profile desktop add "$repo\patches\whale-background"
-& $cli plugin --profile desktop add "$repo\patches\dsh-project-memory"
+& $cli plugin --profile desktop add "$repo\patches\queue-reorder"
 # (bundle 层变更由 HMR 热应用;若卡片/路由缺失再重启桌面端)
 
-# 2.5 项目记忆的后端:MCP Reference Memory 全局安装 + 写入 home 层 MCP 行
-#     (install.ps1 已含;旧的 memory-memorix 行会被移除,避免两个记忆服务器并存)
-npm install -g @modelcontextprotocol/server-memory@2026.7.4
-#     ~/.dsh/cordis.patch.yml 需要:
-#       - insert:
-#           - id: memory-mcp-reference
-#             name: "@deepseek-ai/dsh-mcp-client"
-#             config: { serverName: reference_memory, transport: stdio,
-#                       command: mcp-server-memory,
-#                       env: { MEMORY_FILE_PATH: '<home>/.dsh-mcp-reference-memory.jsonl' } }
-# 旧版 .dsh-memory/ 笔记导入参考图谱(在对应项目根执行,幂等):
-node "$repo\scripts\migrate-dsh-memory.mjs"
-# 已有 Memorix 数据复制到参考图谱(可重复 --cwd;归档条目自动跳过,幂等):
-node "$repo\scripts\migrate-memorix-to-reference.mjs" --cwd "D:\GitHub\deep-dreaming" --cwd "D:\GitHub\another-project"
+# 2.5 跨会话记忆:由社区插件 dsh-mnemon 承载(不再由本仓库安装)
+#     dsh plugin --profile desktop add dsh-mnemon
+#     npm install -g @mnemon-dev/mnemon   # dsh-mnemon 需要一个 mnemon CLI 才有 Provider
+#     Memory Space 在「插件 → Mnemon」页建,库落在
+#     ~/.mnemon/workspaces/<sha256(realpath 工作区)>/data/default/mnemon.db
 
 # 3. 部署校验(可随时运行,只读):核对 patch 层引用与 junction、
 #    体检共享依赖仓库,并把桌面端生命周期脚本同步到 ~/.dsh/scripts/
@@ -191,7 +190,8 @@ DSH 桌面端对 profile 的 `cordis.patch.yml` 内置热加载(`watchUserPatche
 - **profile manifest(`package.json`)改动热应用**(2026-09-24 实测:`install.ps1`
   通过桌面 CLI 把补丁登记进 `dsh.profile.bundles` 并剥离 profile 层遗留行,
   —— 该数字是当时的实测样本;2026-10-13 起 7(新增 `mcp-servers`),2026-11-03 起 6(退役 `ui-settings-model-capabilities`),
-  2026-11-13 起 5(退役 `mcp-servers`,移交给社区插件 `dsh-mcp-panel`),机制不变)
+  2026-11-13 起 5(退役 `mcp-servers`,移交给社区插件 `dsh-mcp-panel`),
+  2026-11-16 起 4(退役 `dsh-project-memory`,移交给社区插件 `dsh-mnemon`),机制不变)
   运行中的宿主数秒内挂上 bundle 行,四条 host 路由全部 200,无需重启)。
 - **补丁源码(仓库文件)改动不热加载**:模块级 HMR 对 `node_modules` 下的补丁不生效;
   改完源码需**重启桌面端**(`scripts/restart-desktop.ps1`,会结束当前会话,请在空闲时进行);
@@ -220,12 +220,11 @@ node scripts/run-tests.mjs --list
 # 基础设施(桌面端发现 + 共享依赖仓库体检)
 node scripts/desktop-install.test.mjs                            # 单元测试,纯逻辑,不碰真实 ~/.dsh
 node scripts/verify-plugin-meta.mjs                              # 展示元信息:复刻官方 readPluginMeta,证明页面会显示什么
+node scripts/verify-bundle-rows.mjs                              # 每个补丁的 dsh.bundle 声明 + 包内 cordis.patch.yml 行结构
 # 每个补丁自带无依赖或低依赖测试(测试与脚本随补丁目录):
 node patches/session-cleanup/session-cleanup.test.mjs            # 删除安全闸(仅已归档/非活跃/目录唯一)
 node patches/session-cleanup/verify-session-cleanup.mjs          # 端点 + 设置页列表 + 右键菜单
 node patches/session-cleanup/tests/load-smoke.mjs                # 真实 Cordis 加载冒烟(Invalid effect 回归)
-node patches/dsh-project-memory/tests/plugin.smoke.mjs           # Reference Memory 桥接:Config 校验 + 提示词/事件流(无回顾轮次)
-node patches/dsh-project-memory/tests/client-contract.mjs        # 浏览器半契约(记忆折叠卡注册与渲染)
 node patches/queue-reorder/tests/load-smoke.mjs                  # 真实 Cordis + inbox splice 重排语义(含回滚)
 node patches/queue-reorder/tests/client-contract.mjs             # 浏览器半契约(装饰官方行 + 拖放换算,jsdom)
 node patches/queue-reorder/tests/official-dock-contract.mjs      # 官方 QueueDock 源码契约守卫(无检出时 SKIP)
@@ -255,6 +254,9 @@ Web 端时期修掉的问题,以及下次升级时要先看的地方:
    `memorix_session_start({ projectRoot })`;当时的召回提示带上本会话工作区
    根目录。**0.3.0 起后端改为 MCP Reference Memory**:没有绑定调用,项目隔离
    改为 `<project>/<topic>` 实体命名约定。详见该补丁 README。
+   **2026-11-16 起整条记忆链改由社区插件 `dsh-mnemon` 承载**(那个桥补丁本身已归档;
+   参考图谱按 `<project>` 迁成按工作区划分的 Memory Space,项目边界从命名约定变成
+   物理分离的 `mnemon.db`)。
 5. **回合后的「记忆回顾」已删除**(实测噪音 + 机制限制):`agent.followup(...)`
    的官方语义是「该条目自成一整轮」,所以旧 autoReview 每轮都多开一轮只含
    Thinking + 一句「无需记录」的对话 —— 本机某 62 轮会话里有 23 轮是这么来的。
@@ -293,9 +295,11 @@ Web 端时期修掉的问题,以及下次升级时要先看的地方:
    现按桌面端 release 重建(2026-10-18 已随 **0.2.1-rc.2** 再次物化)。
    **不要试图把这个仓库指到打包运行时**:junction 指向 `app.asar` 内部时 Node 解析
    不了(实测 `readFileSync` ENOENT),物化要 236 MB,删掉投影则 import 直接失败。
-4. **`dsh-project-memory` 的 peer 门槛**:它声明 `@deepseek-ai/dsh-llm: ^0.1.5-rc.2`,
-   而 `^0.1.x` 不包含 `0.2.0-rc.2`,桌面端会因 peer 不满足而**跳过该 bundle**。
-   已改为 `^0.2.0-rc.2`(带 `includePrerelease` 的检查同时接受 `0.2.1-rc.2`)。
+4. **`dsh-project-memory` 的 peer 门槛(该补丁现已归档,留作教训)**:它当初声明
+   `@deepseek-ai/dsh-llm: ^0.1.5-rc.2`,而 `^0.1.x` 不包含 `0.2.0-rc.2`,桌面端会因
+   peer 不满足而**跳过该 bundle**。已改为 `^0.2.0-rc.2`(带 `includePrerelease` 的检查
+   同时接受 `0.2.1-rc.2`)。**教训:补丁的 peer 范围必须跟着运行时 release 走,
+   peer 不满足时宿主只是静默跳过该 bundle。**
 5. **运行状态 / 重启 / 检查更新 / 创建快捷方式整体下线**:这些都以 Web 端生命周期
    为准。原 `ui-settings-other` 已改造为只读余额页
    (`ui-settings-balance`),**随后也退役了** —— 见下一条;
@@ -324,8 +328,9 @@ Web 端时期修掉的问题,以及下次升级时要先看的地方:
 
 1. **会话格式 v4 拒绝 `source.kind = 'plugin'`**:编码时抛
    `format v4 message requires a producer-owned source kind`。插件来源必须写成
-   `plugin:<name>`(v3→v4 迁移器对未知插件的拼写);`dsh-project-memory` 的召回
-   已改。注意这在 0.2.0-rc.2 就已是 v4,只是当时没有测试覆盖到「真实编码器」。
+   `plugin:<name>`(v3→v4 迁移器对未知插件的拼写);原 `dsh-project-memory` 的召回
+   即按此改(该补丁已于 2026-11-16 归档,教训保留)。注意这在 0.2.0-rc.2 就已是 v4,
+   只是当时没有测试覆盖到「真实编码器」。
 2. **不能从 `session/event` 监听器里调 `agent.inject`**:事件在会话自身 append
    尚未发布完(`appending=true`)时分发,`inject` 同步触发
    `inbox.splice → session.append`,被以 `session append cannot reenter while
@@ -446,6 +451,40 @@ transcript 的提交」这条过滤。错位是**静默**的,所以
 仓库 → profile 方向,反方向只有这里兜底);注销 junction 改用 `cmd /c rmdir`
 —— `Remove-Item -Recurse` 会走进 junction 目标。
 
+### dsh-project-memory 退役、记忆移交 dsh-mnemon(2026-11-16)
+
+跨会话记忆整体换后端:本仓库的桥补丁移入
+[`archive/patches/dsh-project-memory/`](archive/patches/dsh-project-memory/),
+由社区插件 **`dsh-mnemon`**(0.5.46)接管。两件事同时发生:
+
+1. **数据迁移**。原 MCP Reference Memory 图谱(240 实体 / 39 关系 / 2894 条
+   observation)按 `<project>/` 前缀拆成 **8 个工作区各自的 Memory Space**,合计
+   **266 条 insight**,导入 `errors` 全 0。库落在
+   `~/.mnemon/workspaces/<sha256(realpath 工作区)>/data/default/mnemon.db`
+   (`storageScope: workspaces`)。完整性对数:observation 合计 829542 字节,
+   draft 合计 841929 字节,差值是 `[topic] ` 前缀与分隔符开销,内容无丢失。
+   **已知损失**:分库后 mnemon 的边不能跨 db,原图谱 39 条关系里有 **4 条跨项目边**
+   丢失(`weinee ↔ taikoo-saas` 两条、`idaas ↔ alibaba-cloud-idaas` 两条),
+   落库后剩 35 条。
+2. **补丁退役**。`$renamedBundles` 新增 `Old='dsh-project-memory'` /
+   `RowId='project-memory'` / `New=$null`;`$bundlePatchDirs` 与 `$depPlugins`
+   摘掉该目录;`run-tests.mjs` 去掉两条冒烟;`package.json` 去掉
+   `migrate:memory`;两个只往参考图谱写数的迁移脚本
+   (`migrate-dsh-memory.mjs` / `migrate-memorix-to-reference.mjs`)一并移入
+   `archive/scripts/`。
+
+`deploy.ps1` 的记忆检查随之从 **FAIL 降级为 INFO**:home 层那条
+`reference_memory` MCP 行如今只是**兜底**(不再有补丁依赖它),`install.ps1` 也
+不再安装 `@modelcontextprotocol/server-memory`、不再写那条行——只提示它还在,
+以及想彻底清掉时的三条命令。这样迁移前的原图仍是唯一副本时不会被脚本顺手删掉。
+
+> **一条 dsh-mnemon 特有的坑(归档时实测)**:Memory Space 是在会话中途建的,
+> 而本轮 View 早在建空间**之前**就组装并缓存了(`ComposerMemoryTurnManager`
+> 按 turn id 缓存),当时 `active` 为空 → `facts()` 的 `routeIds` 里没有 `recall`,
+> 于是 `mnemon_recall` 报 `Source Route is not offered by the current View`,
+> 而 `mnemon_remember` 照常可写(它只要求 `providerReady`)。**开新的一段对话**
+> 即可,View 会按当前的 active 空间重建。
+
 ### 本轮部署状态(2026-09-18,Web 端)
 
 > 这一节记录的是 Web 端时期的实测结果,保留作为对照。桌面端的当前状态见上一节。
@@ -454,18 +493,19 @@ transcript 的提交」这条过滤。错位是**静默**的,所以
 
 - 7 个补丁的 client 行都在 index 的 `__DSH_BOOT__` 组合里(含重新接线的
   whale-background);`/whale-background.png` 返回 200 + PNG;
-- 改过的 temp-session / dsh-project-memory 客户端 bundle 已按新 rev 下发;
+- 改过的 temp-session 客户端 bundle 已按新 rev 下发;
 - (历史,当时后端是 Memorix)Memorix 已装(1.9.4)并按
   `memorix setup --agent dsh --global` 接线,`memorix serve` 已由运行中的 dsh
-  拉起,`mcp__memorix__*` 工具可见可用;0.3.0 起改为 MCP Reference Memory;
-- 旧笔记已迁移:`node scripts/migrate-dsh-memory.mjs` 导入 `.dsh-memory/`
-  的 10 篇(3 篇新建、7 篇命中同名记录被跳过),旧目录保留未删。
+  拉起,`mcp__memorix__*` 工具可见可用;0.3.0 起改为 MCP Reference Memory,
+  2026-11-16 起改为社区插件 dsh-mnemon;
+- 旧笔记已迁移:`archive/scripts/migrate-dsh-memory.mjs`(该脚本随参考图谱一起
+  归档)导入 `.dsh-memory/` 的 10 篇(3 篇新建、7 篇命中同名记录被跳过),旧目录保留未删。
 
 需要**重启**才生效(Web 端当时是 `restart-dsh.ps1`,桌面端现在是
 `scripts/restart-desktop.ps1 -Force`):
 
-- host 半源码改动 —— `patches/dsh-project-memory/lib/index.js`:guidance 段落、
-  第一轮召回(带本会话工作区根目录与绑定步骤)、**移除 autoReview**;
+- host 半源码改动 —— 例如当时 `patches/dsh-project-memory/lib/index.js` 的
+  guidance 段落、第一轮召回与**移除 autoReview**(该补丁已归档);
 - 已有补丁行的 host 半(`/queue`、`/app`、`/session-cleanup`、`/temp-session`、
   `/plugin-toggle`):它们在 21:00 的那次 patch 文件写入后就没再注册,重启后才回来;
 - `package.json` 里的 `dsh.client.inject` 元数据(启动时缓存的扫描结果)。

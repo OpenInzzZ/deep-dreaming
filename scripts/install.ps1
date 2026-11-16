@@ -14,16 +14,10 @@
 # Optional:
 #   -Profile <name>     profile to install into (default: desktop)
 #   -InstallRoot <dir>  DSH desktop installation root (default: auto-detect)
-#   -SkipMemoryBundle   skip the dsh-project-memory install + bundles step
-#   -SkipMemoryProvider skip the MCP Reference Memory global install + row step
-#                       (-SkipMemorix is kept as an alias of the same switch)
 #   -Force              overwrite existing junctions (default: keep)
 param(
     [string]$Profile = 'desktop',
     [string]$InstallRoot = '',
-    [switch]$SkipMemoryBundle,
-    [Alias('SkipMemorix')]
-    [switch]$SkipMemoryProvider,
     [switch]$Force
 )
 $ErrorActionPreference = 'Stop'
@@ -317,7 +311,7 @@ foreach ($l in $links) {
 # The strip happens per patch inside step 3 (immediately before that patch's
 # bundle install) so a crash between the two steps can only ever leave ONE
 # patch without a row, and the removed block is stashed for restore on failure.
-$bundlePatchDirs = @('session-cleanup', 'queue-reorder', 'temp-session', 'whale-background', 'dsh-project-memory')
+$bundlePatchDirs = @('session-cleanup', 'queue-reorder', 'temp-session', 'whale-background')
 $removedRows = @{}
 $failed = 0
 
@@ -360,6 +354,19 @@ $renamedBundles = @(
     @{
         Old   = '@local/dsh-client-mcp-servers'
         RowId = 'mcp-servers'
+        New   = $null
+    }
+    # Retired 2026-11-16: memory moved to the community plugin `dsh-mnemon`
+    # (Mnemon Native provider + the global `mnemon` CLI). The bridge only ever
+    # injected a prompt section and one session-start recall notice pointing at
+    # the `mcp__reference_memory__*` tools; dsh-mnemon owns that whole surface
+    # itself (routing guidance, three-tier recall, its own tool set and Memory
+    # Spaces), so keeping the bridge would mount a SECOND prompt section telling
+    # the agent to use a different backend. The graph it fronted has been
+    # migrated into per-workspace Memory Spaces.
+    @{
+        Old   = 'dsh-project-memory'
+        RowId = 'project-memory'
         New   = $null
     }
 )
@@ -473,7 +480,6 @@ if (-not $desktopCli -and $InstallRoot -ne '') {
     if (Test-Path $candidate) { $desktopCli = $candidate }
 }
 foreach ($dir in $bundlePatchDirs) {
-    if ($dir -eq 'dsh-project-memory' -and $SkipMemoryBundle) { continue }
     $manifestPath = Join-Path $dev "patches\$dir\package.json"
     if (-not (Test-Path $manifestPath)) { continue }
     $pkgName = (Read-Utf8 $manifestPath | ConvertFrom-Json).name
@@ -575,82 +581,29 @@ foreach ($dir in $bundlePatchDirs) {
     }
 }
 
-# --- 3.5. MCP Reference Memory (the project-memory bridge's backend) ----------
-# The bridge (patches\dsh-project-memory) talks to the official reference
-# memory server (@modelcontextprotocol/server-memory) through
-# @deepseek-ai/dsh-mcp-client. This replaces the former Memorix backend: the
-# legacy memory-memorix row is removed so only one memory server mounts, and
-# the reference row is written into the HOME patch layer (the same layer
-# `memorix setup --agent dsh --global` used).
-if (-not $SkipMemoryProvider) {
+# --- 3.5. Legacy MCP Reference Memory backend (NOT provisioned any more) ------
+# Until 2026-11-16 this section installed @modelcontextprotocol/server-memory
+# globally and wrote a `reference_memory` MCP row into the HOME patch layer,
+# because patches\dsh-project-memory was a thin bridge over that graph. The
+# bridge is retired (see the `$renamedBundles` entry above) and memory is now
+# owned by the community plugin `dsh-mnemon` (Mnemon Native + the global
+# `mnemon` CLI), whose graph lives in per-workspace Memory Spaces instead.
+#
+# Deliberately NON-DESTRUCTIVE: an existing home-layer row and its graph file
+# are left in place as a fallback (the migrated copy has already been verified,
+# but the original graph is the only copy of the pre-migration data). Only
+# report the leftovers and how to remove them once the user is satisfied.
+$homePatch = Join-Path $dshHome 'cordis.patch.yml'
+$homeText = Read-Utf8 $homePatch
+if ($homeText -match 'serverName:\s*reference_memory') {
     Write-Host ''
-    Write-Host '== MCP Reference Memory ==' -ForegroundColor Cyan
-
-    # The reference server is installed as a global npm bin; DSH spawns it by
-    # name, exactly like the official mcp-reference-memory example.
-    $memoryBin = Get-Command 'mcp-server-memory' -ErrorAction SilentlyContinue
-    if ($null -ne $memoryBin) {
-        Write-Host '  [OK] mcp-server-memory already installed'
-    } else {
-        Write-Host '  [..] installing @modelcontextprotocol/server-memory@2026.7.4 globally...'
-        if (Invoke-Native 'npm' @('install', '-g', '@modelcontextprotocol/server-memory@2026.7.4')) {
-            $memoryBin = Get-Command 'mcp-server-memory' -ErrorAction SilentlyContinue
-            if ($null -ne $memoryBin) {
-                Write-Host '  [OK] @modelcontextprotocol/server-memory installed'
-            } else {
-                Write-Host '  [WARN] npm install succeeded but mcp-server-memory is not on PATH; check the npm global bin directory' -ForegroundColor Yellow
-            }
-        } else {
-            Write-Host '  [WARN] npm install failed; run manually: npm install -g @modelcontextprotocol/server-memory@2026.7.4' -ForegroundColor Yellow
-        }
-    }
-
-    # The graph file must live outside the package directory (an upgrade would
-    # otherwise wipe it). The official example uses the home directory; use
-    # forward slashes so the YAML scalar needs no escaping.
-    $memoryFile = (Join-Path (Split-Path -Parent $dshHome) '.dsh-mcp-reference-memory.jsonl') -replace '\\', '/'
-    $homePatch = Join-Path $dshHome 'cordis.patch.yml'
-    $homeText = Read-Utf8 $homePatch
-    if ($homeText -match 'serverName:\s*reference_memory') {
-        Write-Host '  [OK] reference_memory row already present in ~/.dsh/cordis.patch.yml'
-    } else {
-        if ($homeText -match '(?m)^\s*-\s*id:\s*memory-memorix\s*$') {
-            $homeText = Remove-PatchInsertItem -Text $homeText -IdPattern 'memory-memorix'
-            # Drop an `- insert:` header the removal left with no items; an empty
-            # insert list is not a meaningful patch.
-            $homeText = [regex]::Replace($homeText, '(?m)^- insert:[ \t]*\r?\n(?![ \t]+-)', '')
-            if ($homeText.Trim() -eq '- insert:') { $homeText = '' }
-            Write-Host '  [OK] removed the legacy memory-memorix row'
-        }
-        $newRow = @(
-            '- insert:',
-            '    - id: memory-mcp-reference',
-            '      name: "@deepseek-ai/dsh-mcp-client"',
-            '      config:',
-            '        serverName: reference_memory',
-            '        transport: stdio',
-            '        command: mcp-server-memory',
-            '        env:',
-            "          MEMORY_FILE_PATH: '$memoryFile'"
-        ) -join "`r`n"
-        $homeText = if ($homeText.Trim().Length -eq 0) { $newRow } else { $homeText.TrimEnd() + "`r`n`r`n" + $newRow }
-        Write-Utf8 $homePatch ($homeText.TrimEnd() + "`r`n")
-        Write-Host "  [OK] wrote the reference_memory row (graph: $memoryFile)"
-    }
-
-    # `memorix setup --agent dsh --global` also wrote a Memorix skill block into
-    # ~/.dsh/AGENTS.md. It tells every session to call memorix_* tools that no
-    # longer exist, so retire that block; the plugin's own prompt section now
-    # carries the reference-memory rules.
-    $agentsFile = Join-Path $dshHome 'AGENTS.md'
-    if (Test-Path $agentsFile) {
-        $agentsText = Read-Utf8 $agentsFile
-        if ($agentsText -match '(?m)^# Memorix') {
-            $updated = [regex]::Replace($agentsText, '(?ms)^# Memorix[^\r\n]*\r?\n.*?(?=^# |\z)', '').Trim()
-            Write-Utf8 $agentsFile $(if ($updated.Length -eq 0) { '' } else { $updated + "`r`n" })
-            Write-Host '  [OK] removed the legacy Memorix section from ~/.dsh/AGENTS.md'
-        }
-    }
+    Write-Host '== Legacy MCP Reference Memory ==' -ForegroundColor Cyan
+    Write-Host '  [INFO] a reference_memory MCP row is still mounted, but nothing in this repo uses it:' -ForegroundColor Yellow
+    Write-Host '         memory moved to dsh-mnemon (Mnemon Native Memory Spaces). Keep it as a' -ForegroundColor DarkGray
+    Write-Host '         fallback, or retire it together with its graph once you are satisfied:' -ForegroundColor DarkGray
+    Write-Host '           remove the `memory-mcp-reference` row from ~/.dsh/cordis.patch.yml' -ForegroundColor DarkGray
+    Write-Host '           npm uninstall -g @modelcontextprotocol/server-memory' -ForegroundColor DarkGray
+    Write-Host '           del "%USERPROFILE%\.dsh-mcp-reference-memory.jsonl"' -ForegroundColor DarkGray
 }
 
 # --- 4. deploy check (junctions for host deps + script/assets sync) ------------

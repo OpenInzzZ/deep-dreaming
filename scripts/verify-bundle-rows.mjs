@@ -39,7 +39,6 @@ const BUNDLES = {
     'queue-reorder': ['queue-reorder'],
     'temp-session': ['temp-session'],
     'whale-background': ['whale-background'],
-    'dsh-project-memory': ['project-memory'],
 }
 
 let checks = 0

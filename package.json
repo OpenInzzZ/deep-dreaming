@@ -8,8 +8,7 @@
   "scripts": {
     "test": "node scripts/run-tests.mjs",
     "install:patches": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1",
-    "deploy:check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy.ps1",
-    "migrate:memory": "node scripts/migrate-dsh-memory.mjs"
+    "deploy:check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy.ps1"
   },
   "devDependencies": {
     "@testing-library/react": "^16.3.2",

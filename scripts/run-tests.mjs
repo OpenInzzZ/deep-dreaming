@@ -31,8 +31,6 @@ const CHECKS = [
   { path: 'patches/session-cleanup/session-cleanup.test.mjs', label: 'session-cleanup: cleanup rules' },
   { path: 'patches/session-cleanup/verify-session-cleanup.mjs', label: 'session-cleanup: settings + card' },
   { path: 'patches/session-cleanup/tests/load-smoke.mjs', label: 'session-cleanup: real Cordis load' },
-  { path: 'patches/dsh-project-memory/tests/plugin.smoke.mjs', label: 'project-memory: bridge + config' },
-  { path: 'patches/dsh-project-memory/tests/client-contract.mjs', label: 'project-memory: memory cards' },
   { path: 'patches/queue-reorder/tests/load-smoke.mjs', label: 'queue-reorder: real Cordis load' },
   { path: 'patches/queue-reorder/tests/client-contract.mjs', label: 'queue-reorder: dock decorator + drag mapping' },
   { path: 'patches/queue-reorder/tests/official-dock-contract.mjs', label: 'queue-reorder: shipped dock DOM contract' },
