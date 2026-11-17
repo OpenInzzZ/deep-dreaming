@@ -359,11 +359,15 @@ $renamedBundles = @(
     # Retired 2026-11-16: memory moved to the community plugin `dsh-mnemon`
     # (Mnemon Native provider + the global `mnemon` CLI). The bridge only ever
     # injected a prompt section and one session-start recall notice pointing at
-    # the `mcp__reference_memory__*` tools; dsh-mnemon owns that whole surface
+    # the `mcp__reference_memory__*` tools; dsh-mnemon owned that whole surface
     # itself (routing guidance, three-tier recall, its own tool set and Memory
     # Spaces), so keeping the bridge would mount a SECOND prompt section telling
     # the agent to use a different backend. The graph it fronted has been
     # migrated into per-workspace Memory Spaces.
+    # 2026-11-17: those Memory Spaces were in turn migrated into
+    # `@modusensus/dsh-mneme` (single library at ~/.dsh/memory/memory.db) by
+    # scripts/migrate-mnemon-to-mneme.mjs, and `dsh-mnemon` plus the global
+    # `mnemon` CLI were uninstalled. `~/.mnemon` is kept as the rollback copy.
     @{
         Old   = 'dsh-project-memory'
         RowId = 'project-memory'
@@ -585,9 +589,10 @@ foreach ($dir in $bundlePatchDirs) {
 # Until 2026-11-16 this section installed @modelcontextprotocol/server-memory
 # globally and wrote a `reference_memory` MCP row into the HOME patch layer,
 # because patches\dsh-project-memory was a thin bridge over that graph. The
-# bridge is retired (see the `$renamedBundles` entry above) and memory is now
-# owned by the community plugin `dsh-mnemon` (Mnemon Native + the global
-# `mnemon` CLI), whose graph lives in per-workspace Memory Spaces instead.
+# bridge is retired (see the `$renamedBundles` entry above) and memory moved on
+# to the community plugin `dsh-mnemon` (Mnemon Native + the global `mnemon`
+# CLI), whose graph lived in per-workspace Memory Spaces -- and as of 2026-11-17
+# on to `@modusensus/dsh-mneme` (single library + ten Markdown mirrors).
 #
 # Deliberately NON-DESTRUCTIVE: an existing home-layer row and its graph file
 # are left in place as a fallback (the migrated copy has already been verified,
@@ -599,8 +604,8 @@ if ($homeText -match 'serverName:\s*reference_memory') {
     Write-Host ''
     Write-Host '== Legacy MCP Reference Memory ==' -ForegroundColor Cyan
     Write-Host '  [INFO] a reference_memory MCP row is still mounted, but nothing in this repo uses it:' -ForegroundColor Yellow
-    Write-Host '         memory moved to dsh-mnemon (Mnemon Native Memory Spaces). Keep it as a' -ForegroundColor DarkGray
-    Write-Host '         fallback, or retire it together with its graph once you are satisfied:' -ForegroundColor DarkGray
+    Write-Host '         memory moved on to @modusensus/dsh-mneme (2026-11-17). Keep the row as' -ForegroundColor DarkGray
+    Write-Host '         a fallback, or retire it together with its graph once you are satisfied:' -ForegroundColor DarkGray
     Write-Host '           remove the `memory-mcp-reference` row from ~/.dsh/cordis.patch.yml' -ForegroundColor DarkGray
     Write-Host '           npm uninstall -g @modelcontextprotocol/server-memory' -ForegroundColor DarkGray
     Write-Host '           del "%USERPROFILE%\.dsh-mcp-reference-memory.jsonl"' -ForegroundColor DarkGray

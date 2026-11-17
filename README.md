@@ -28,11 +28,13 @@ deep-dreaming/
 │   ├── restart-desktop.ps1       # 重启桌面端(改补丁源码后必须;需 -Force)
 │   ├── desktop-install.mjs       # 发现桌面端安装 + 体检共享依赖仓库(解析 + 版本一致性,只读,含单元测试)
 │   ├── migrate-icon-names.mjs    # 把 `…Outline16/14` 图标名迁移到 0.2.0-rc.2 的 `…OutlineRegular/Medium`
+│   ├── migrate-mnemon-to-mneme.mjs # 把 dsh-mnemon 各工作区图谱转换成 dsh-mneme 单库(幂等、可回滚、支持 --dry-run)
+│   ├── migrate-mnemon-to-mneme.test.mjs # 上面的类型映射/标题剥离/幂等键等纯逻辑测试
 │   ├── verify-plugin-meta.mjs    # 复刻官方 readPluginMeta,证明「设置 → 内置插件」会显示我们的标题/描述
 │   ├── verify-bundle-rows.mjs    # 校验每个补丁的 dsh.bundle 声明与包内 cordis.patch.yml 行结构
 │   ├── run-tests.mjs             # 跑完整个测试矩阵(npm test)
 │   └── test-deps.mjs             # 验证脚本的 react / jsdom 解析(仓库 node_modules → NODE_PATH → profile)
-└── .dsh-memory/                  # LEGACY 记忆笔记(旧实现产物,已导出到 Mnemon Native 记忆空间),gitignored
+└── .dsh-memory/                  # LEGACY 记忆笔记(旧实现产物,已导出到参考图谱与各记忆后端),gitignored
 ```
 
 ## 补丁清单
@@ -52,13 +54,19 @@ deep-dreaming/
 > `mcp-data_mock`），不为任何一个服务保留插件私有的 `servers` 数组。
 
 > **跨会话记忆已移交社区插件**（2026-11-16）：本仓库的 `dsh-project-memory` 补丁已退役归档到
-> [`archive/patches/dsh-project-memory`](archive/patches/dsh-project-memory/)，由社区插件
+> [`archive/patches/dsh-project-memory`](archive/patches/dsh-project-memory/)，当时由社区插件
 > **`dsh-mnemon`**（0.5.46，Mnemon Native Provider + 全局 `mnemon` CLI）接管。那个桥补丁本身
 > 不存任何数据，只注入一段提示词引导和一条会话开始时的召回提示；`dsh-mnemon` 自己拥有这整片
 > 表面（routing 引导、三层召回、自己的工具集、Memory Space），保留它只会让第二个后端同时挂上
 > 提示词。原 MCP Reference Memory 图谱已迁进按工作区划分的 Memory Space
 > （`~/.mnemon/workspaces/<sha256(realpath 工作区)>/data/default/mnemon.db`）。
 > home 层那条 `reference_memory` MCP 行与图谱文件保留作兜底，不再由脚本安装。
+>
+> **2026-11-17 再往前一步**：那批按工作区的图谱已迁移进 **`@modusensus/dsh-mneme`**（单库
+> `~/.dsh/memory/memory.db`，10 工作区 / 279 行），`dsh-mnemon` 插件与全局 `mnemon` CLI 已**整体
+> 卸载**。`~/.mnemon` 与 `~/.mnemon.backup-20261116` **原样留在磁盘上**，是这次导入的回滚副本，
+> 运行时不读它们；迁移脚本与撤销方式见文末
+> [§ 记忆迁移 dsh-mnemon → @modusensus/dsh-mneme](#记忆迁移-dsh-mnemon--modusensusdsh-mneme2026-11-17)。
 
 ## 快速部署
 
@@ -102,11 +110,11 @@ $cli = "D:\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
 & $cli plugin --profile desktop add "$repo\patches\queue-reorder"
 # (bundle 层变更由 HMR 热应用;若卡片/路由缺失再重启桌面端)
 
-# 2.5 跨会话记忆:由社区插件 dsh-mnemon 承载(不再由本仓库安装)
-#     dsh plugin --profile desktop add dsh-mnemon
-#     npm install -g @mnemon-dev/mnemon   # dsh-mnemon 需要一个 mnemon CLI 才有 Provider
-#     Memory Space 在「插件 → Mnemon」页建,库落在
-#     ~/.mnemon/workspaces/<sha256(realpath 工作区)>/data/default/mnemon.db
+# 2.5 跨会话记忆:现由 @modusensus/dsh-mneme 承载(dsh-mnemon 已于 2026-11-17 整体卸载)
+#     dsh plugin --profile desktop add @modusensus/dsh-mneme
+#     库落在 ~/.dsh/memory/memory.db + 十个 md 镜像;面板「记忆库」可浏览
+#     若还有旧的 ~/.mnemon 图谱要搬进来(幂等,先干跑):
+#     node scripts/migrate-mnemon-to-mneme.mjs --dry-run   (详见文末迁移小节)
 
 # 3. 部署校验(可随时运行,只读):核对 patch 层引用与 junction、
 #    体检共享依赖仓库,并把桌面端生命周期脚本同步到 ~/.dsh/scripts/
@@ -191,7 +199,9 @@ DSH 桌面端对 profile 的 `cordis.patch.yml` 内置热加载(`watchUserPatche
   通过桌面 CLI 把补丁登记进 `dsh.profile.bundles` 并剥离 profile 层遗留行,
   —— 该数字是当时的实测样本;2026-10-13 起 7(新增 `mcp-servers`),2026-11-03 起 6(退役 `ui-settings-model-capabilities`),
   2026-11-13 起 5(退役 `mcp-servers`,移交给社区插件 `dsh-mcp-panel`),
-  2026-11-16 起 4(退役 `dsh-project-memory`,移交给社区插件 `dsh-mnemon`),机制不变)
+  2026-11-16 起 4(退役 `dsh-project-memory`,移交给社区插件 `dsh-mnemon`;
+  2026-11-17 `dsh-mnemon` 整体卸载、记忆改由 `@modusensus/dsh-mneme` 承载,计数不变
+  —— 两者从来都不是本仓库的补丁),机制不变)
   运行中的宿主数秒内挂上 bundle 行,四条 host 路由全部 200,无需重启)。
 - **补丁源码(仓库文件)改动不热加载**:模块级 HMR 对 `node_modules` 下的补丁不生效;
   改完源码需**重启桌面端**(`scripts/restart-desktop.ps1`,会结束当前会话,请在空闲时进行);
@@ -221,6 +231,7 @@ node scripts/run-tests.mjs --list
 node scripts/desktop-install.test.mjs                            # 单元测试,纯逻辑,不碰真实 ~/.dsh
 node scripts/verify-plugin-meta.mjs                              # 展示元信息:复刻官方 readPluginMeta,证明页面会显示什么
 node scripts/verify-bundle-rows.mjs                              # 每个补丁的 dsh.bundle 声明 + 包内 cordis.patch.yml 行结构
+node scripts/migrate-mnemon-to-mneme.test.mjs                    # mnemon → mneme 迁移的类型映射/标题剥离/幂等键(纯逻辑)
 # 每个补丁自带无依赖或低依赖测试(测试与脚本随补丁目录):
 node patches/session-cleanup/session-cleanup.test.mjs            # 删除安全闸(仅已归档/非活跃/目录唯一)
 node patches/session-cleanup/verify-session-cleanup.mjs          # 端点 + 设置页列表 + 右键菜单
@@ -256,7 +267,9 @@ Web 端时期修掉的问题,以及下次升级时要先看的地方:
    改为 `<project>/<topic>` 实体命名约定。详见该补丁 README。
    **2026-11-16 起整条记忆链改由社区插件 `dsh-mnemon` 承载**(那个桥补丁本身已归档;
    参考图谱按 `<project>` 迁成按工作区划分的 Memory Space,项目边界从命名约定变成
-   物理分离的 `mnemon.db`)。
+   物理分离的 `mnemon.db`)。**2026-11-17 再迁一次**:那批 Memory Space 已并入
+   `@modusensus/dsh-mneme` 的单库多 scope,`dsh-mnemon` 与全局 `mnemon` CLI 均已卸载
+   (详见文末 § 记忆迁移)。
 5. **回合后的「记忆回顾」已删除**(实测噪音 + 机制限制):`agent.followup(...)`
    的官方语义是「该条目自成一整轮」,所以旧 autoReview 每轮都多开一轮只含
    Thinking + 一句「无需记录」的对话 —— 本机某 62 轮会话里有 23 轮是这么来的。
@@ -485,6 +498,93 @@ transcript 的提交」这条过滤。错位是**静默**的,所以
 > 而 `mnemon_remember` 照常可写(它只要求 `providerReady`)。**开新的一段对话**
 > 即可,View 会按当前的 active 空间重建。
 
+### 记忆迁移 dsh-mnemon → @modusensus/dsh-mneme(2026-11-17)
+
+跨会话记忆的第二段迁移:从 `dsh-mnemon`(每个工作区一个 SQLite 图谱)搬到
+`@modusensus/dsh-mneme`(**单库多 scope**)。两边 schema 毫无关系,mnemon 的行
+没有 `title`/`type`,边是 insight-id → insight-id,所以**不能拷文件**,只能转换
+后走 mneme 的写库面。转换器与测试:
+
+```powershell
+node scripts/migrate-mnemon-to-mneme.mjs --dry-run     # 先看要迁什么(默认不写)
+node scripts/migrate-mnemon-to-mneme.mjs               # 真跑(先自动备份 memory.db)
+node scripts/migrate-mnemon-to-mneme.mjs --only deep-dreaming
+```
+
+实测结果(本机,2026-11-17 真跑):**10 个工作区 / 279 行** = 269 条 insight + 10 篇
+document,类型分布 `pitfall×112 history×62 project×60 decision×21 pattern×16
+constraint×8`;其中 112 条 pitfall + 8 条 constraint 共 **120 行受编码门控**。
+第二次真跑 `inserted: 0 / skipped: 279`(幂等成立),镜像十个 md 由
+`service.recoverMirror()` 当场重建,质量闸没有归档任何一行。跑前在副本库上量到的是
+278 行(9 篇 document)——真跑前 deep-dreaming 又多了一篇 document,所以真跑比副本
+多 1 行,不是数字漂移。有行的 share 包 **9 个**(`vip-point-exception-management`
+只有空包号、没有行),库总计 310 行 = 279 导入 + 31 自有。
+
+几个只能这么做、不能更省事的点:
+
+1. **写库面选 `store.save()` 而不是插件自带的 HTTP 面。**
+   `/api/dsh-mneme/create` 把 `source` 硬编码成 `panel` 且**拒收 scope /
+   occurred_at**;standalone 的 `POST /memories` 默认关闭(`externalApiEnabled:
+   false`,本机 8790 端口没开);`/api/dsh-mneme/import` 只吃镜像形态的
+   Markdown、按标题合并,既无 scope 也无 per-row 幂等键。`store.save()` 除了
+   `created_at`/`updated_at`/`content_hash`(store 自己铸)之外,导入关心的列全都收。
+   → 源库里原有的 `created_at` 落到 **`occurred_at`**,注入块打印的就是它。
+2. **读 mnemon 的库必须用裸 `DatabaseSync(..., { readOnly: true })`。**
+   用 mneme 的 `createStore()` 去开 `mnemon.db`,open 阶段会跑 mneme 的 schema
+   migrations,**在源库里建出十张外来表**。测试里用正则断言守住了这一条。
+3. **工作区发现不能只信 `~/.dsh/storages/workspace.json`。**
+   `taikoo-sitewalk-one`(12 条)与 `alibaba-cloud-idaas`(2 条)有数据但不在注册表里,
+   只按注册表发现会**静默漏掉 14 条**。现在的做法是注册表路径 + 每个路径的父目录
+   同级扫描,再用 `realpathSync.native` + sha256 比对 `~/.mnemon/workspaces/<hash>`;
+   没被认领的桶会在报告里逐个列出并警告,不会悄悄丢。
+4. **类型映射决定「导入后看不看得见」。** mneme 的 `CODING_MEMORY_TYPES`
+   (`pitfall` / `constraint` / `rejected_solution`)在**非编码任务里被 `codingGate`
+   直接滤掉**,所以 120 行(全部 pitfall/constraint)只在编码类提问中出现。映射优先用
+   mnemon 的 `tags[1]`(问题-方案 / 变更 / 原理 / 坑 / 决策……),category 只兜底。
+5. **`workspace_scope` 默认写 `explicit`,但隔离还要配合 `strictScope`。**
+   实测 `injectCandidates`:`strictScope=false` 时,任何工作区的会话都能把 10 条
+   注入位全被导入行占满;`strictScope=true` + `explicit` 后 deep-dreaming 的会话只
+   看到 deep-dreaming 的 10 条,taikoo-saas 只看自己的,**未标注工作区的会话拿到 0 条**
+   (fail-closed)。报告里会把这段影响打印出来,不让人以为 `explicit` 自带隔离。
+6. **7154 条边明确丢弃。** mneme 的 `entity_relations` 端点要求**实体名**,
+   而且 `saveAttr` 是快照语义(同一 entity+attr_key 再写会失效前一行),没有忠实
+   译法。宁可不管,也不把它伪装成 tags 塞进去。
+7. **幂等键复用了 share 包的两列。** `share_external_id =
+   mnemon:<hash12>:<kind>:<sourceId>` 做 per-row 去重,`share_pack_id =
+   shortHash(workspacePath)` 做整包撤销(`store.deleteBySharePackId`,面板的撤销
+   按钮也认这一列)。这两列在 store 里只是普通寻址键,没有别处假设它们等于
+   `source === "imported"`。
+
+> 迁移**只写 `~/.dsh/memory/memory.db`**,mnemon 的库**保持只读**、原样保留。
+> 想撤销:`store.deleteBySharePackId(<某工作区的 packId>)` 逐工作区删干净。
+
+**迁移之后的收尾(2026-11-17 当天完成)。** 数据到位、并且确认 mneme 侧无恙(311 行 /
+`mirror_state` 干净 / 8 个镜像文件齐全 / `/api/dsh-mneme/health` 的 `active_rows` 与
+`archived_rows` 对得上)之后,`dsh-mnemon` 被整体下线,分三步:
+
+1. **先 disable 验证,再卸载。** profile 层 `- id: mnemon` 上加 `disabled: true`(一行 + 注释)
+   就能卸掉整个 `mnemon-bundle` 组,因为 bundle 自己的 `cordis.patch.yml` 用一个 `!!js`
+   表达式读这一行的 flag。判据必须是 A/B:`POST /dsh-mnemon-view/list` 在启用时返回
+   **401**(路由存在、要 token),禁用后变 **405**(落 SPA fallback),同时
+   `POST /session-cleanup/probeScope` 保持 **200** 作活体对照 —— 因为 mnemon 的 HTTP 面
+   注册在**动态** `ctx.inject(["connection","webServer"], …)` 门控里,只看 404/405 会误判。
+   profile 层的 yml 改动 **~10–12 秒热重载**,不用重启。
+2. **`dsh plugin remove dsh-mnemon` 会留下 profile 层的主行。** 它把 `package.json` /
+   `pnpm-lock.yaml` / `node_modules` / `dsh.profile.bundles` 都清对了,连两条
+   `mnemon-strategy-*` 行也一起删了,却把 `- id: mnemon`(75 行:id、name 和整段 `config:`)
+   留了下来。这行指向一个已不存在的包,只是因为先前的 `disabled: true` 才没让启动报错;
+   `config.memoryView.entries` 里的两个 `include:mnemon-strategy-*` 引用此时已经悬空。
+   **删它必须按 `- id: <name>` 锚定行范围**,不要用整文件正则
+   (`-replace '(?m)^  disabled: false$'` 曾把两条无关的 strategy 行一起改掉)。
+3. **全局 CLI 单独卸。** `npm uninstall -g @mnemon-dev/mnemon` 会带走 `@mnemon-dev/mnemon`
+   和它依赖的 2 个包,以及 `D:\Environment\nodejs` 下的 `mnemon`/`mnemon.cmd`/`mnemon.ps1`
+   三个 shim;剩下的空 scope 目录 `@mnemon-dev` 要手动删。
+
+**只有数据保留。** `~/.mnemon`(11 个工作区桶 / 9 个 `mnemon.db` / 7.2 MB)在
+`2026-11-17 18:29:35` 之后冻结不动,和 `~/.mnemon.backup-20261116` 一起作为这次导入的
+回滚副本;运行时不读它们,要读就用裸 `DatabaseSync(..., { readOnly: true })`。**不要删**
+——那是 mnemon 那一侧唯一还存在的原始数据。
+
 ### 本轮部署状态(2026-09-18,Web 端)
 
 > 这一节记录的是 Web 端时期的实测结果,保留作为对照。桌面端的当前状态见上一节。
@@ -497,7 +597,8 @@ transcript 的提交」这条过滤。错位是**静默**的,所以
 - (历史,当时后端是 Memorix)Memorix 已装(1.9.4)并按
   `memorix setup --agent dsh --global` 接线,`memorix serve` 已由运行中的 dsh
   拉起,`mcp__memorix__*` 工具可见可用;0.3.0 起改为 MCP Reference Memory,
-  2026-11-16 起改为社区插件 dsh-mnemon;
+  2026-11-16 起改为社区插件 dsh-mnemon,2026-11-17 起改为 @modusensus/dsh-mneme
+  (dsh-mnemon 已卸载);
 - 旧笔记已迁移:`archive/scripts/migrate-dsh-memory.mjs`(该脚本随参考图谱一起
   归档)导入 `.dsh-memory/` 的 10 篇(3 篇新建、7 篇命中同名记录被跳过),旧目录保留未删。
 

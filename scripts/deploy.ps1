@@ -183,18 +183,21 @@ if (Test-Path $homePatch) {
     }
 }
 
-# 2.5. Memory. Memory is owned by the community plugin `dsh-mnemon` (Mnemon
-#      Native provider + the global `mnemon` CLI); the former
-#      `dsh-project-memory` bridge and its MCP Reference Memory backend were
-#      retired 2026-11-16. A leftover `reference_memory` row is therefore NOT a
-#      failure any more -- it is an inert extra server the user may keep as a
-#      fallback or remove. What IS worth checking is that the retired bundle
-#      left no owner behind (section 1.5 covers profiles/node_modules; the row
-#      itself is checked here, because a stale `project-memory` insert row would
-#      point at a package this repo no longer ships and abort the boot).
+# 2.5. Memory. Memory is not owned by this repo. It moved to the community
+#      plugin `dsh-mnemon` (Mnemon Native provider + the global `mnemon` CLI) in
+#      2026-11-16 and on to `@modusensus/dsh-mneme` (single library at
+#      ~/.dsh/memory/memory.db) in 2026-11-17, at which point `dsh-mnemon` and
+#      the global CLI were uninstalled; the former `dsh-project-memory` bridge
+#      and its MCP Reference Memory backend were retired 2026-11-16. A leftover
+#      `reference_memory` row is therefore NOT a failure any more -- it is an
+#      inert extra server the user may keep as a fallback or remove. What IS
+#      worth checking is that the retired bundle left no owner behind (section
+#      1.5 covers profiles/node_modules; the row itself is checked here, because
+#      a stale `project-memory` insert row would point at a package this repo no
+#      longer ships and abort the boot).
 $checked++
 if ($homeContent -match 'serverName:\s*reference_memory') {
-    Write-Host '  [INFO] a legacy reference_memory MCP row is still mounted (dsh-mnemon owns memory now; the row is inert)' -ForegroundColor DarkGray
+    Write-Host '  [INFO] a legacy reference_memory MCP row is still mounted (dsh-mneme owns memory now; the row is inert)' -ForegroundColor DarkGray
 }
 if ($homeContent -match 'serverName:\s*memorix') {
     Write-Host '  [WARN] a Memorix memory row is still mounted alongside the current provider; remove it to avoid two memory servers' -ForegroundColor Yellow
