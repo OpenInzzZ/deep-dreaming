@@ -12,7 +12,7 @@
  * Exposes the `webServer` prefix route `/temp-session` with one endpoint:
  *   ensure { args: {} } -> { ok, value: { workspaceId, path, title, created } }
  * Idempotent: repeated calls return the same workspace. The client half
- * (`lib/client.js`) renders the sidebar-footer action that calls it.
+ * (`lib/client.js`) renders the row directly under the New Session button that calls it.
  */
 
 import os from 'node:os'

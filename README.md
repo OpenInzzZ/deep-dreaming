@@ -17,13 +17,14 @@ deep-dreaming/
 ├── patches/                      # 全部补丁,一补丁一目录(代码 + 测试 + README)
 │   ├── session-cleanup/          # 已归档会话的手动物理删除(目录包插件)
 │   ├── queue-reorder/            # 排队消息拖拽排序(装饰官方队列坞,不遮蔽它)
-│   ├── temp-session/             # 侧边栏一键发起不绑定项目的临时会话 + verify
+│   ├── temp-session/             # 「新会话」按钮下方的临时会话快捷入口，一键发起不绑定项目的临时会话 + verify
 │   ├── todo-board/               # 跨项目的待办/已办/功能分支清单(JSON 为准 + Markdown 镜像)
+│   ├── discussion-plaza/         # 跨工作区交流广场(每个讨论组一份 Markdown + 租约写锁 + 关组确认)
 │   └── whale-background/         # 会话区域鲸鱼娘背景图(bundle 补丁)
 ├── assets/                       # 品牌资产(鲸鱼娘 favicon;不归任何补丁,由 deploy.ps1 同步到 ~/.dsh/assets)
 ├── archive/                      # 已退役的脚本 / 资产 / 补丁(只读保留,不再部署)
 ├── scripts/
-│   ├── install.ps1               # 一键安装:建 junction 兜底(含 @local 自引用)+ 5 个 bundle 补丁全部装成 bundle(先剥遗留行) + 退役登记清理 + 部署校验(幂等)
+│   ├── install.ps1               # 一键安装:建 junction 兜底(含 @local 自引用)+ 6 个 bundle 补丁全部装成 bundle(先剥遗留行) + 退役登记清理 + 部署校验(幂等)
 │   ├── deploy.ps1                # 只读校验:同步脚本与资产 + bundle 登记/行属主 + junction + 体检宿主依赖仓库
 │   ├── start-desktop.ps1         # 启动桌面端(已在运行则聚焦窗口)
 │   ├── restart-desktop.ps1       # 重启桌面端(改补丁源码后必须;需 -Force)
@@ -44,9 +45,10 @@ deep-dreaming/
 | --- | --- | --- | --- |
 | [session-cleanup](patches/session-cleanup/) | 手动删除已归档会话(设置页列表 + 会话右键菜单,二次确认,不自动清理) | **bundle**:包内 `cordis.patch.yml` 行 + `install.ps1` pnpm link 进 profile 并登记 `dsh.profile.bundles` | [README](patches/session-cleanup/README.md) |
 | [queue-reorder](patches/queue-reorder/) | **排队消息拖拽排序**。官方队列坞（QueueDock）没有任何更改顺序的方式——`QueueAction` 只有 `edit`/`remove`/`steer`。本补丁在官方坞的行上加拖拽，落点经宿主 `/queue-reorder/reorder` 走标准 inbox splice，顺序由 `agent/inbox/spliced` 事件广播。**装饰而非接管**：官方坞照常渲染（编辑/steer/附件/折叠都是官方的），插件注册独立 slot id，官方升级不用跟 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/queue-reorder/README.md) |
-| [temp-session](patches/temp-session/) | 侧边栏底部「临时会话」按钮:一键发起绑定**用户级临时目录**的会话,不关联任何项目 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/temp-session/README.md) |
+| [temp-session](patches/temp-session/) | 侧边栏「新会话」按钮下方的「临时会话」行:一键发起绑定**用户级临时目录**的会话,不关联任何项目 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/temp-session/README.md) |
 | [whale-background](patches/whale-background/) | 会话区域背景:在对话滚动区居中偏右显示鲸鱼娘透明图(13% 透明度),资源缺失时自动跳过而不影响启动 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/whale-background/README.md) |
 | [todo-board](patches/todo-board/) | **跨项目的待办 / 已办 / 功能分支清单**。`taikoo-saas` 那套 `TODO.md` / `DONE.md` / `功能分支整理.md` 的局限是文件属于一个仓库,换工作区就看不见;本补丁把清单搬到 `$DSH_HOME/todo-board/board.json`(所有工作区共享)再按原格式生成三份 Markdown 镜像。五个入口:7 个模型工具(`workboard_list`/`workboard_add`/`workboard_update`/`workboard_complete`/`workboard_archive`/`workboard_import`/`workboard_export`,项目默认取会话工作目录名)、`/workboard` 斜杠命令(新增/列出/完成/删除/导入/导出,不进模型)、左侧边栏导航行「工作清单」(点开占用中列整页)、系统提示词小结、整页右侧的单条详情栏(平台 `MarkdownText` 渲染,与镜像同源;可拖拽调宽并记住宽度) | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/todo-board/README.md) |
+| [discussion-plaza](patches/discussion-plaza/) | **跨工作区交流广场**。讨论组是一份 Markdown 文档(`$DSH_HOME/discussion-plaza/groups/<id>.md`,所有工作区共享,id 形如 `dg_xxxxx_yyyyyy`),参与者标识是**工作区/sessionId**(`key` 字段落盘),每个组带**租约写锁**(写入中状态、fencing token、跨进程锁文件)与关闭状态机(讨论中 → 关闭确认中 → 全员确认后已关闭且只读);人类可把组标记为**长期讨论组**(置顶、Agent 不能关,只能由人在面板结束)。三个入口:11 个 `plaza_*` 模型工具(发言里 `@工作区` 或 `wake` 参数**点名唤醒**空闲会话,忙碌/未加载不硬打扰)、`agent/pre-step` 未读与待确认通知、左下角「交流广场」按钮(角标显示**进行中的讨论组数**,中列整页含列表/详情/参与者投票/写锁持有者,人类可新建组/长期标记/解除写锁/移出失联参与者) | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/discussion-plaza/README.md) |
 
 > **MCP 服务管理已移交社区插件**（2026-11-13）：本仓库的 `mcp-servers` 补丁已退役归档到
 > [`archive/patches/mcp-servers`](archive/patches/mcp-servers/)，由社区插件
@@ -75,7 +77,7 @@ deep-dreaming/
 **推荐一条命令**(任何机器克隆后即可,路径自动推导,无需改动):
 
 ```powershell
-# 在仓库根目录执行:建 junction 兜底(含 @local 自引用)+ 把 4 个 bundle 补丁全部装成 bundle
+# 在仓库根目录执行:建 junction 兜底(含 @local 自引用)+ 把 6 个 bundle 补丁全部装成 bundle
 # (pnpm link + 登记 dsh.profile.bundles,先剥离 profile 层遗留行)
 # + 部署校验(幂等,可重复运行)
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
@@ -248,6 +250,11 @@ node patches/temp-session/verify-temp-session.mjs                # temp-session 
 node patches/todo-board/tests/core.test.mjs                      # 跨项目清单:store / markdown / import 规则
 node patches/todo-board/tests/load-smoke.mjs                     # 真实 Cordis + 真实 JSON Schema 校验 + 围栏
 node patches/todo-board/tests/client-contract.mjs                # 侧栏行 + 中列整页 + 页内详情栏(jsdom + 真 React)
+node patches/discussion-plaza/tests/core.test.mjs                # 广场协议:文档往返 / 状态机 / 失联宽限
+node patches/discussion-plaza/tests/mentions.test.mjs            # 广场点名: @工作区 / 边界 / 显式 wake
+node patches/discussion-plaza/tests/store.test.mjs               # 广场存储:并发写 / 租约回收 / fencing / 关组
+node patches/discussion-plaza/tests/load-smoke.mjs               # 11 个工具 schema + 路由围栏 + pre-step 通知(v4 编码)
+node patches/discussion-plaza/tests/client-contract.mjs          # 左下按钮 + 整页列表/详情/新建(jsdom + 真 React)
 node patches/whale-background/tests/load-smoke.mjs               # 鲸鱼娘图片路由 + 资源存在性
 ```
 
@@ -404,7 +411,8 @@ ACP stdout)与 LLM(`llm-deepseek-api-key` 跟随官方 `/models` 列表)、
    只往官方行上加拖拽(见下节)。
 3. **rc.3 新增的 `ui-entry-customization`**(侧边栏面板/会话视图的 More 菜单:
    pin/unpin、浏览插件、创建插件)只作用于 panellist 与 view tab;
-   `temp-session` 挂在 `sidebar.footer.action` 上,不是可 pin 的面板,二者不冲突。
+   `temp-session` 挂在 `sidebar.session.action`（新会话整行的 HOC）上，
+   不是可 pin 的面板，二者不冲突。
 4. **模型能力**:官方 `ModelReasoningEfforts` 仍只对手写声明(declared)的 pi-ai
    路由渲染,目录型路由没有思考入口;图片输入仍是勾选框、表达不了「继承」。
    该能力卡片已于 2026-11-03 退役(见下节),目录型路由因此没有思考入口。

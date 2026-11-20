@@ -28,11 +28,14 @@ dsh 发起会话必须绑定一个工作区(没有工作区时对话输入框是
   闭包内创建),不会重复创建,热重载后的新实例也不会排在旧实例的任务后面。
   路由以 `ctx.effect(...)` 注册在那个子 fiber 上(`webServer` 与
   `workspaceRegistry` 都声明在其中),卸载/热重载时 `/temp-session` 随之注销。
-- **Client 半(`lib/client.js`)**:注册 `sidebar.footer.action` 槽
-  (`id: 'temp-session'`, `order: -10`,排在设置上方);点击流程:
+- **Client 半(`lib/client.js`)**:注册 `sidebar.session.action` HOC 层
+  (`id: 'temp-session'`, `order: -10`)。这一层包裹“新会话”整行,原样收到
+  `children`(Tooltip + 按钮),再追加一行「临时会话」;宽侧栏用列布局把临时会话
+  放在新会话按钮**正下方**,rail 里排在新会话图标下方。左下角 footer 不再有临时
+  会话,留给交流广场。点击流程:
   `POST /temp-session/ensure`(body `{ args: {} }`,解析 `{ ok, value }` 信封)→
   `uiWorkspace.startSession(workspaceId)`(宿主在 ensure 后会把工作区写入
-  客户端基线,不需要手动刷新列表)。失败时按钮下方显示错误行,可重试。
+  客户端基线,不需要手动刷新列表)。失败时行下方显示错误行,可重试。
   样式表以 `data-plugin` + `data-plugin-css` 注入,重复注入有去重守卫。
   > 适配记录(dsh 0.1.5-rc.2):`IWorkspaces` 只剩纯 Controller 面
   > (`list/create/rename/delete/insertBefore/archiveSession/insertSessionBefore`),
@@ -96,8 +99,9 @@ node patches/temp-session/verify-temp-session.mjs   # 契约 + jsdom 渲染/交�
 disposer(卸载即注销路由)、bad-request 守卫与 `args` 守卫(仅接受 `undefined`
 或普通对象,`null`/数组/标量一律 bad-request)、每实例串行链(有序、失败不污染
 链、实例之间互不影响)与并发 `ensure` 经路由的串行化、apply 不返回 thenable 的
-P0 回归守卫、client 半契约(bundle handoff、`sidebar.footer.action` 条目
-id/order、zh/en 字典一致、注入面不含 `connection`、`data-plugin-css` 样式
-去重)。DOM 交互段(按钮渲染 wide/rail 两态、点击后 `POST /temp-session/ensure`
-→ startSession、失败/HTTP 错误/网络错误的错误行)需要 react + jsdom;在仓库根
-执行一次 `npm install` 即可,缺失时自动跳过并提示。
+P0 回归守卫、client 半契约(bundle handoff、`sidebar.session.action` HOC 条目
+id/order、保留 `children` 并把临时会话行追加在其后、zh/en 字典一致、注入面不含
+`connection`、`data-plugin-css` 样式去重)。DOM 交互段(按钮渲染 wide/rail 两态、
+新会话行内容保留、点击后 `POST /temp-session/ensure` → startSession、失败/HTTP
+错误/网络错误的错误行)需要 react + jsdom;在仓库根执行一次 `npm install` 即可,
+缺失时自动跳过并提示。

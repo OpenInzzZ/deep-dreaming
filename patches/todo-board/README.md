@@ -57,6 +57,8 @@ Git、`grep` 全都还能用，镜像就是普通 Markdown 文件）。
 | `/workboard del <id\|#序号>` | 硬删除（真的从 `board.json` 里抹掉） |
 | `/workboard import <路径> [kind]` | 从 Markdown 导入；`kind` 省略时按文件名认 `TODO.md` / `DONE.md` / `功能分支整理.md` |
 | `/workboard export` | 重写三份 Markdown 镜像 |
+| `/workboard renumber` | 预览编号整理（把空洞压掉；不写盘） |
+| `/workboard renumber confirm` | 执行整理；**旧的 #N 引用会失效**，以新编号为准 |
 | `/workboard help` | 用法 |
 
 命令名为什么是 `workboard`：宿主对命令名有硬正则 `^[a-z][a-z0-9_-]*$`
@@ -226,17 +228,30 @@ dataId: yyy, key: zzz
 
 ## 存储细节
 
-- 写入走 `writeTextAtomic`（同目录临时文件 + rename），读改写由
-  `withBoardLock` 按 root 串行化——并发 `add` 不会丢更新。
+- 写入走 `writeTextAtomic`（同目录临时文件 + rename）。读改写有两层锁：
+  1. 进程内 `withBoardLock` 按 root 串行化；
+  2. 跨进程 `board.lock` 文件锁（`link` 原子创建，15 秒租约，最多等 10 秒；
+     抢不到抛 `board-busy`，不会静默覆盖）。所以多个宿主进程共用同一个
+     user-level `board.json` 时，并发 `add` 也不会丢更新，编号也不会重复。
+- **编号是创建时分配的稳定编号**：`number` 在新增/完成时按每个 kind 的历史水位
+  `seq + 1` 分配，落盘时 `assignStableNumbers` 只给缺失/重复的编号补号，**不按
+  位置重排**。所以删除或完成中间一条后，后面的编号保持原样（允许出现 `#1 / #3`
+  空洞），你引用过的 `#N` 不会突然指向另一条。
+- **编号不复用**：`seq` 是历史水位，硬删除一条后水位不下降；下一条新增拿到
+  `seq + 1`，不会复用被删掉的号。JSON 的 `seq`、三份镜像的标题编号与面板里的
+  `#N` 读的是同一组数字。
+- **排序按稳定编号**：`sortItems` 的键是 `kind → number`。因为编号带空洞，列表
+  可能出现 `#1 / #3 / #7`，这是正常的；项目名只作为来源标签留在行内元信息里。
+- **已有号不变，新号接在后面**：升级到稳定编号时不需要迁移脚本——已有条目的
+  编号原样保留，`seq` 取历史最大值；之后新增从最大值 +1 开始。
+- **需要压缩时显式整理**：编号会随新增增长、删除留下空洞。想让它们重新连续，
+  用 `/workboard renumber` 预览，确认后 `/workboard renumber confirm` 执行。
+  **整理是唯一会改变已有编号的动作**，所以不做自动重排——自动重排正是用户
+  刚给的 `#N` 下一轮指向另一条的原因。整理后旧引用失效，以新编号为准。
+- ID 是 `tb_<kind>_<时间戳36><随机 hex>`，带 `taken` 去重；跨进程即使同一毫秒，
+  24 位随机后缀也让碰撞概率可以忽略。
 - `board.json` 语法错误会抛 `board-corrupt`，**不会**静默清空。
 - `isoDate()` 用**本地**日期，不是 `toISOString()`（东八区会差一天）。
-- **序号是位置，不是历史自增号**：每次落盘前 `renumberItems` 把每个 `kind` 重排成
-  连续的 `1..N`（未归档的在前，归档的接在后面）。所以删掉中间一条之后，剩下的是
-  `#1 / #2`，不会留 `#1 / #3` 的空洞；完成中间一条之后，后面的序号也会往前收；
-  新增总是接在当前末尾。JSON 的 `seq`、三份镜像的标题编号与面板里的 `#N` 读的是同一组数字。
-- **排序只按序号，不按项目**：`sortItems` 的键是 `kind → number`。`view.items` 是界面
-  直接渲染的顺序，如果中间还夹一层 `project`，跨项目时就会印出 `#2 / #1 / #3` 这样的
-  倒序，看起来和「编号丢了」一模一样。项目名只作为来源标签留在行内元信息里。
 
 ## 安装与部署
 
@@ -263,15 +278,16 @@ patches/todo-board/node_modules → ~/.dsh/profiles/node_modules
 ## 测试
 
 ```powershell
-node patches/todo-board/tests/core.test.mjs         # 48 项：store / markdown / import / 详情 / 序号（含 #N 过滤）/ /workboard 命令
+node patches/todo-board/tests/core.test.mjs         # 50 项：store / markdown / import / 详情 / 稳定编号 / 手动整理 / /workboard 命令
 node patches/todo-board/tests/load-smoke.mjs        # 30 项：真实 Cordis + 真实 schema 校验 + 命令座位
 node patches/todo-board/tests/client-contract.mjs   # 31 项：侧栏导航行 + 中列整页 + 页内详情栏（整行点击、拖拽宽度）
 ```
 
 三个脚本各自覆盖一个**静默失败面**：
 
-- `core.test.mjs` —— 纯逻辑：序号规整（删除后压实、完成中间一条后后序前收、
-  跨项目时顺序与编号一致）、`archived` 不复活、本地日期、
+- `core.test.mjs` —— 纯逻辑：稳定编号（删除/完成后不回填、`seq` 水位不复用、
+  跨项目按 `number` 排序）、手动整理（预览不写、confirm 压缩、旧引用失效提示）、
+  `archived` 不复活、本地日期、
   三种文档的解析与渲染往返、`renderItemDoc` 的三种标题形态（详情页与镜像必须同源，
   否则「界面一套、文件一套」），以及 `/workboard` 六种调用形态（新增 / 列出 / done / del /
   import / export）与 `resolveRef` 对 `#序号`、裸数字、完整 id 的解析。

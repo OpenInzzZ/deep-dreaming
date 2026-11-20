@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Discussion plaza",
+    "description": "A cross-workspace discussion plaza: each group is one Markdown document with a leased write lock and a status machine (discussing / writing / confirming close / closed); sessions from every workspace talk through plaza_* tools."
+  }
+}

@@ -387,8 +387,8 @@ function ItemRow({ item, selected, onComplete, onArchive, onOpen, t }) {
       onOpen(item);
     },
     children: [
-      // 序号：同一个 tab 内 #1、#2……，与 Markdown 镜像里的编号同源（`item.number`），
-      // 这样"界面上第 #3 条"和"文件里第 3 条"指的是同一条。
+      // 序号：创建时分配的稳定编号（删除/完成后不回填，允许空洞），
+      // 与 Markdown 镜像里的编号同源（`item.number`）。
       jsx('span', { className: 'tb-num', title: '#' + String(item.number ?? '?'), children: '#' + String(item.number ?? '?') }, 'num'),
       jsx('span', { className: 'tb-badge', 'data-kind': item.kind, children: badge }, 'badge'),
       jsxs('div', { className: 'tb-row-main', children: [
@@ -502,7 +502,7 @@ function BoardPage({ t }) {
    * 不再按项目分组：这是**跨项目**清单，项目名当分组标题等于把一个横切的
    * 维度竖着摆回去，每个 tab 里还会被切成一堆只有一两行的块（用户明确要求去掉）。
    * 项目仍留在每行的元信息里，需要时看得见来源。排序交给 store 的 `sortItems`
-   * （kind → project → number），界面不再重排。
+   * （kind → number），界面不再重排；编号稳定，允许空洞。
    */
   const rows = filtered;
 

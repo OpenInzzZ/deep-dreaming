@@ -10,6 +10,8 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { spawn } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
 
 import {
@@ -460,6 +462,41 @@ await test('并发 add 不丢更新', async () => {
   }
 })
 
+await test('跨进程并发 add 也不丢更新、编号不重复', async () => {
+  const { root } = await scratch()
+  try {
+    const moduleUrl = pathToFileURL(join(import.meta.dirname, '..', 'lib', 'board.js')).href
+    const childPath = join(root, 'race-child.mjs')
+    await writeFile(childPath, [
+      `import { createBoardAccess } from ${JSON.stringify(moduleUrl)}`,
+      'const access = createBoardAccess({ rootDir: process.argv[2] })',
+      'for (let index = 0; index < 5; index += 1) {',
+      '  await access.add({ title: process.argv[3] + " " + index, project: "xproc" })',
+      '}',
+    ].join('\n'), 'utf8')
+    const run = (tag) => new Promise((resolvePromise, rejectPromise) => {
+      const child = spawn(process.execPath, [childPath, root, tag], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+      let stderr = ''
+      child.stderr.on('data', (chunk) => { stderr += String(chunk) })
+      child.on('error', rejectPromise)
+      child.on('exit', (code) => {
+        if (code === 0) resolvePromise()
+        else rejectPromise(new Error(`${tag} child exited ${code}: ${stderr}`))
+      })
+    })
+    await Promise.all([run('a'), run('b')])
+
+    const access = createBoardAccess({ rootDir: root })
+    const listed = await access.list({ project: 'xproc' })
+    assert.equal(listed.matched, 10, 'both processes must contribute all five items')
+    const numbers = listed.items.map((item) => item.number).sort((left, right) => left - right)
+    assert.deepEqual(numbers, Array.from({ length: 10 }, (_unused, index) => index + 1))
+    assert.equal(new Set(listed.items.map((item) => item.id)).size, 10, 'ids must stay unique across processes')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 await test('refreshMirrors 在 JSON 缺失时也要建出镜像', async () => {
   const { root, paths } = await scratch()
   try {
@@ -619,16 +656,16 @@ await test('/workboard 无参列出未完成项，且不含已办', async () => 
     const result = await executeTodoCommand(access, invocationOf(''))
     assert.equal(result.kind, 'success')
     assert.match(result.text, /未完成的待办 1 条/)
-    // 归档的「甲」被排到未归档项之后，所以剩下那条「乙」现在是 #1——序号是
-    // 位置而不是历史自增号（见 `renumberItems`）。
-    assert.match(result.text, /#1 \[TODO\] · p  乙/)
+    // 归档的「甲」仍是 #1，剩下的「乙」保持创建时的 #2——编号是稳定引用，
+    // 不随列表位置变化（这是用户明确要求的：他给的 #N 不能因为完成/删除而指到别的条目）。
+    assert.match(result.text, /#2 \[TODO\] · p  乙/)
     assert.ok(!result.text.includes('甲'), 'the completed item must not be listed as open')
   } finally {
     await rm(root, { recursive: true, force: true })
   }
 })
 
-await test('序号在删除后连续压实，不会留下空洞', async () => {
+await test('删除中间一条不回填编号，历史水位不下降', async () => {
   const { root } = await scratch()
   try {
     const access = createBoardAccess({ rootDir: root })
@@ -637,28 +674,28 @@ await test('序号在删除后连续压实，不会留下空洞', async () => {
     const third = await access.add({ title: '丙', project: 'p' })
     assert.deepEqual([first.number, second.number, third.number], [1, 2, 3])
 
-    // 删掉中间那条：剩下两条必须是 #1 / #2，而不是 #1 / #3。
+    // 删掉中间那条：剩下两条保持 #1 / #3，不会把「丙」改成 #2。
     await access.remove(second.item.id)
     const view = await access.view()
-    assert.deepEqual(view.items.map((item) => item.number), [1, 2])
+    assert.deepEqual(view.items.map((item) => item.number), [1, 3])
     assert.deepEqual(view.items.map((item) => item.title), ['甲', '丙'])
-    // JSON 里的 seq 也要跟着压实，否则下一次新增又会从 4 开始。
-    assert.equal(view.board.seq.todo, 2)
+    // seq 是历史水位，不能因为硬删除降到 2，否则下一条会复用 #3。
+    assert.equal(view.board.seq.todo, 3)
 
     // 镜像里的编号与界面同源（都读 `item.number`）。
     const todoDoc = await readFile(access.paths.todo, 'utf8')
     assert.match(todoDoc, /\[TODO\] 1\. 甲/)
-    assert.match(todoDoc, /\[TODO\] 2\. 丙/)
+    assert.match(todoDoc, /\[TODO\] 3\. 丙/)
 
-    // 再新增一条，接在末尾成为 #3。
+    // 再新增一条：接在历史水位之后成为 #4，而不是复用删除的 #2。
     const fourth = await access.add({ title: '丁', project: 'p' })
-    assert.equal(fourth.number, 3)
+    assert.equal(fourth.number, 4)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
 })
 
-await test('完成中间一条后，后面的序号往前收，跨项目也一样', async () => {
+await test('完成中间一条后，后面的编号保持不动，跨项目也一样', async () => {
   const { root } = await scratch()
   try {
     const access = createBoardAccess({ rootDir: root })
@@ -668,31 +705,63 @@ await test('完成中间一条后，后面的序号往前收，跨项目也一�
     await access.add({ title: '丙', project: 'taikoo-saas' })
     assert.deepEqual((await access.view()).items.map((item) => item.number), [1, 2, 3])
 
-    // 完成 #2（乙）：剩下的待办顺序与编号都要是「甲 #1、丙 #2」，递增。
+    // 完成 #2（乙）：剩下的待办编号保持「甲 #1、丙 #3」，不回填。
     // 注意 `view.items` 是混合视图（已办排在最后），这里只看待办。
     await access.complete(b.item.id, {})
     const view = await access.view()
     const open = view.items.filter((item) => item.kind === 'todo')
     assert.deepEqual(open.map((item) => item.title), ['甲', '丙'])
-    assert.deepEqual(open.map((item) => item.number), [1, 2])
+    assert.deepEqual(open.map((item) => item.number), [1, 3])
     // 已办自己也是从 #1 起算的。
     assert.deepEqual(
       view.items.filter((item) => item.kind === 'done').map((item) => item.number),
       [1],
     )
 
-    // 再新增接在末尾成为 #3，回执里的号码就是存盘后的那个。
+    // 再新增接在历史水位之后成为 #4，回执里的号码就是存盘后的那个。
     const added = await access.add({ title: '丁', project: 'deep-dreaming' })
-    assert.equal(added.number, 3)
+    assert.equal(added.number, 4)
     assert.deepEqual(
       (await access.view()).items.filter((item) => item.kind === 'todo').map((item) => item.number),
-      [1, 2, 3],
+      [1, 3, 4],
     )
 
     const todoDoc = await readFile(access.paths.todo, 'utf8')
     assert.match(todoDoc, /\[TODO\] 1\. 甲/)
-    assert.match(todoDoc, /\[TODO\] 2\. 丙/)
-    assert.match(todoDoc, /\[TODO\] 3\. 丁/)
+    assert.match(todoDoc, /\[TODO\] 3\. 丙/)
+    assert.match(todoDoc, /\[TODO\] 4\. 丁/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+await test('/workboard renumber 预览不写，confirm 整理编号', async () => {
+  const { root } = await scratch()
+  try {
+    const access = createBoardAccess({ rootDir: root })
+    await access.add({ title: '甲', project: 'p' })
+    const second = await access.add({ title: '乙', project: 'p' })
+    await access.add({ title: '丙', project: 'p' })
+    await access.remove(second.item.id)
+    assert.deepEqual((await access.view()).items.map((item) => item.number), [1, 3])
+
+    const preview = await executeTodoCommand(access, invocationOf('renumber'))
+    assert.equal(preview.kind, 'success')
+    assert.match(preview.text, /编号整理预览/)
+    assert.match(preview.text, /丙  #3 → #2/)
+    // 预览不能落盘：编号仍然是 #1 / #3。
+    assert.deepEqual((await access.view()).items.map((item) => item.number), [1, 3])
+
+    const confirmed = await executeTodoCommand(access, invocationOf('renumber confirm'))
+    assert.equal(confirmed.kind, 'success')
+    assert.match(confirmed.text, /已整理 1 条编号/)
+    const after = await access.view()
+    assert.deepEqual(after.items.map((item) => item.number), [1, 2])
+    assert.equal(after.board.seq.todo, 2)
+
+    // 整理后新号从压缩后的末尾继续；旧的 #3 引用已失效（这里 #3 属于新条目）。
+    const added = await access.add({ title: '丁', project: 'p' })
+    assert.equal(added.number, 3)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

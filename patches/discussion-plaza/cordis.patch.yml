@@ -1,0 +1,13 @@
+# discussion-plaza: 跨工作区交流广场（bundle 层行）。
+#
+# 这一行由包自己拥有（`dsh.bundle.patch`），不要在 profile 的 cordis.patch.yml 里
+# 再 insert 同名行 —— 两层同 id 会让启动 fail-loud 抛
+# `TypeError: duplicate loader entry id: discussion-plaza`。
+#
+# config 全部留空，走 `lib/index.js` 里的默认值：
+#   根目录 `$DSH_HOME/discussion-plaza`，工具 / 提示词 / 通知 / 写锁租约全部默认开。
+# 需要改的话在这里写 `config: { rootDir: '...' }`，但注意改完要重启桌面端：
+# bundle 自己的 cordis.patch.yml 不在 watchUserPatches 的监视范围内。
+- insert:
+    - id: discussion-plaza
+      name: '@local/dsh-discussion-plaza'

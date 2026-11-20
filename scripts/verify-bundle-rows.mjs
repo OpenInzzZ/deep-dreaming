@@ -40,6 +40,7 @@ const BUNDLES = {
     'temp-session': ['temp-session'],
     'whale-background': ['whale-background'],
     'todo-board': ['todo-board'],
+    'discussion-plaza': ['discussion-plaza'],
 }
 
 let checks = 0

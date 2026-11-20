@@ -46,8 +46,9 @@ deep-dreaming/
 ├── patches/                       # One directory per patch
 │   ├── session-cleanup/           # Manual physical deletion of archived sessions
 │   ├── queue-reorder/             # Drag-to-reorder queued messages (decorates the shipped queue dock, never shadows it)
-│   ├── temp-session/              # Sidebar button for ad-hoc temp sessions
+│   ├── temp-session/              # New Session row shortcut for ad-hoc temp sessions
 │   ├── todo-board/                # Cross-project todo / done / feature-branch board (agent tools + sidebar row/main page + in-page detail column; JSON truth + Markdown mirrors)
+│   ├── discussion-plaza/          # Cross-workspace discussion plaza: one Markdown doc per group + leased write lock + all-participant close confirmation + human-marked long-term groups + @mention wake (agent tools + bottom-left button with active-group badge + main page)
 │   └── whale-background/          # Whale-girl background image in chat area
 ├── assets/                        # Brand asset synced to ~/.dsh/assets (whale favicon; no patch owns it)
 ├── archive/                       # Retired material, kept read-only (see archive/README.md)
@@ -236,16 +237,21 @@ node scripts/verify-bundle-rows.mjs
 # Pure logic tests (no DSH runtime needed)
 node patches/session-cleanup/session-cleanup.test.mjs
 node patches/todo-board/tests/core.test.mjs
+node patches/discussion-plaza/tests/core.test.mjs
+node patches/discussion-plaza/tests/mentions.test.mjs
+node patches/discussion-plaza/tests/store.test.mjs
 
 # Cordis load smoke tests (need host dependency links)
 node patches/session-cleanup/tests/load-smoke.mjs
 node patches/whale-background/tests/load-smoke.mjs
 node patches/queue-reorder/tests/load-smoke.mjs
 node patches/todo-board/tests/load-smoke.mjs
+node patches/discussion-plaza/tests/load-smoke.mjs
 
 # Client contract tests (jsdom-optional)
 node patches/queue-reorder/tests/client-contract.mjs
 node patches/todo-board/tests/client-contract.mjs
+node patches/discussion-plaza/tests/client-contract.mjs
 
 # Upstream-source guards (skip when no DSH checkout is present)
 node patches/queue-reorder/tests/official-dock-contract.mjs
@@ -356,6 +362,7 @@ The migration itself: 240 entities / 39 relations / 2894 observations were conve
 | queue-reorder | `lib/index.js` | `lib/client.js` | `/queue-reorder` | (none) |
 | temp-session | `lib/index.js` | `lib/client.js` | `/temp-session` | (none) |
 | todo-board | `lib/index.js` | `lib/client.js` | `/todo-board` | `todo-board` (the entry id; no registration call in 0.2.x) |
+| discussion-plaza | `lib/index.js` | `lib/client.js` | `/discussion-plaza` | `discussion-plaza` (the entry id; no registration call in 0.2.x) |
 | whale-background | `lib/index.js` | `lib/client.js` | (none) | (none) |
 
 > Retired 2026-11-16: `dsh-project-memory` (the MCP Reference Memory bridge — a guidance section plus a

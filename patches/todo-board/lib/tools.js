@@ -84,7 +84,7 @@ const ITEM_SCHEMA = {
   properties: {
     id: { type: 'string', description: '稳定 id；更新/完成/删除时用它定位' },
     kind: { type: 'string', enum: ['todo', 'done', 'branch'] },
-    number: { type: 'integer', description: '同类清单内的序号（Markdown 标题里的 N）' },
+    number: { type: 'integer', description: '同类清单内的稳定编号（创建时分配；删除/完成后不回填，允许空洞）' },
     project: { type: 'string', description: '项目归属；跨项目清单的一级分组键' },
     title: { type: 'string' },
     status: { type: 'string', description: '状态标记：待办默认 TODO（也可写 待验证 等），已办固定 ✅，功能分支为空' },
@@ -145,7 +145,7 @@ export function createTools(access, hooks = {}) {
           project: { type: 'string', description: 'Exact project name (see the projects list in any previous result)' },
           status: { type: 'string', description: 'Exact status marker, e.g. TODO or 待验证' },
           module: { type: 'string', description: 'Feature-branch module name' },
-          number: { type: 'integer', description: 'The #N position inside a kind (the number printed on every row and in the Markdown headings); pass 17 for "#17"; combine with kind when the three lists share numbers' },
+          number: { type: 'integer', description: 'Stable #N assigned at creation (gaps are normal after deletions/completions); pass 17 for "#17"; combine with kind when the three lists share numbers' },
           query: { type: 'string', description: 'Case-insensitive substring over title/project/sections/tags' },
           includeArchived: { type: 'boolean', description: 'Include completed-from and archived rows (default false)' },
           limit: { type: 'integer', description: 'Max rows returned (default all matched)' },

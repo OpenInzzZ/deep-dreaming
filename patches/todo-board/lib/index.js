@@ -291,6 +291,10 @@ export function apply(ctx, config = {}) {
           '记录新事项时请记到这里，**不要**写进当前仓库的 `TODO.md` / `DONE.md` 一类项目文件',
           '（那是项目自己的交付物）；会话内的 `todo_write` 只是本轮的临时清单，也不是这里。',
           '用户也能用 `/workboard <标题>` 直接记一条。',
+          '清单里的 `#N` 是**创建时分配的稳定编号**：删除/完成中间一条不会回填，允许出现',
+          '`#1 / #3` 这样的空号；引用用 `#N`，更新/完成等写操作用 id。',
+          '编号变大/空洞多时，请用户用 `/workboard renumber` 预览、`/workboard renumber confirm`',
+          '整理；整理会改变旧 #N 引用，不能自动做。',
           '',
           promptText.value,
         ].join('\n')

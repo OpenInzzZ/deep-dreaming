@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Temp Session",
-    "description": "Adds a sidebar-footer button that starts an ad-hoc conversation in a dedicated scratch directory, for questions that belong to no project. Official new sessions must pick a workspace."
+    "description": "Adds a Temp Session row directly under New Session, starting an ad-hoc conversation in a dedicated scratch directory for questions that belong to no project. Official new sessions must pick a workspace."
   }
 }

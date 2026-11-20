@@ -39,6 +39,11 @@ const CHECKS = [
   { path: 'patches/todo-board/tests/core.test.mjs', label: 'todo-board: store + markdown + import rules' },
   { path: 'patches/todo-board/tests/load-smoke.mjs', label: 'todo-board: real Cordis load + tool schema' },
   { path: 'patches/todo-board/tests/client-contract.mjs', label: 'todo-board: sidebar row + main page' },
+  { path: 'patches/discussion-plaza/tests/core.test.mjs', label: 'discussion-plaza: protocol + close state machine' },
+  { path: 'patches/discussion-plaza/tests/mentions.test.mjs', label: 'discussion-plaza: @mention wake targets' },
+  { path: 'patches/discussion-plaza/tests/store.test.mjs', label: 'discussion-plaza: concurrent writes + lock leases + fencing' },
+  { path: 'patches/discussion-plaza/tests/load-smoke.mjs', label: 'discussion-plaza: real Cordis load + tool schemas + notice' },
+  { path: 'patches/discussion-plaza/tests/client-contract.mjs', label: 'discussion-plaza: footer button + main page' },
   { path: 'patches/whale-background/tests/load-smoke.mjs', label: 'whale-background: image route' },
 ]
 

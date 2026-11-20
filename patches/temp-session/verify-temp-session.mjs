@@ -20,7 +20,7 @@
  * Client half: loads the exact deployed `lib/client.js` the browser will
  * execute, feeds it a module table stubbed with the real platform words
  * (react, react/jsx-runtime, ui-primitives), asserts the registration
- * contract (sidebar.footer.action entry + dictionaries + inject face) plus the
+ * contract (sidebar.session.action HOC + dictionaries + inject face) plus the
  * CSS contract (one `data-plugin` / `data-plugin-css` tag, reused when the
  * bundle body runs again) and that the removed `ctx.locale.bind(NS)` dead call
  * stays removed, then — when jsdom is available — renders the action and
@@ -653,8 +653,8 @@ const clientCtx = {
 }
 exports_.apply(clientCtx)
 
-const actionReg = registrations.find((r) => r.name === 'sidebar.footer.action')
-if (actionReg === undefined) throw new Error('sidebar.footer.action never registered')
+const actionReg = registrations.find((r) => r.name === 'sidebar.session.action')
+if (actionReg === undefined) throw new Error('sidebar.session.action HOC layer never registered')
 if (actionReg.id !== 'temp-session' || actionReg.order !== -10) {
   throw new Error(`action options mismatch: ${JSON.stringify(actionReg)}`)
 }
@@ -668,7 +668,7 @@ const enKeys = Object.keys(dict.dict.en)
 if (JSON.stringify(zhKeys) !== JSON.stringify(enKeys)) {
   throw new Error(`zh/en key mismatch:\nzh: ${zhKeys}\nen: ${enKeys}`)
 }
-console.log(`apply contract OK: sidebar.footer.action id=temp-session order=-10 | dict keys = ${zhKeys.length}`)
+console.log(`apply contract OK: sidebar.session.action HOC id=temp-session order=-10 | dict keys = ${zhKeys.length}`)
 
 // Dead-code guard: the module used to call ctx.locale.bind(NS) and never use
 // the result; `t` reaches the component through the slot's `locale: NS` prop.
@@ -690,6 +690,9 @@ if (cssTag.dataset.pluginCss !== PLUGIN_ID + '/temp-session.css') {
 }
 if (typeof cssTag.textContent !== 'string' || !cssTag.textContent.includes('.ts-btn{')) {
   throw new Error('style tag must carry the injected sheet')
+}
+if (!cssTag.textContent.includes('.ts-stack{')) {
+  throw new Error('style tag must carry the new-session stack layout')
 }
 reEvaluateBundle()
 if (readPluginStyles().length !== 1) {
@@ -714,26 +717,32 @@ const en = dict.dict.en
 const clientInjected = actionReg.inject('session-1')
 const tWithParams = (key) => en[key]
 
+const rowStub = React.createElement('button', { type: 'button', className: 'new-session-stub' }, 'New')
 const rootHost = dom.window.document.createElement('div')
 const root = createRoot(rootHost)
 await act(async () => {
   root.render(React.createElement(actionReg.component, {
     wide: true,
+    children: rowStub,
     startTempSession: clientInjected.startTempSession,
     t: tWithParams,
   }))
 })
 
+if (rootHost.querySelector('.new-session-stub') === null) {
+  throw new Error('the HOC layer must keep the shipped New Session row content')
+}
+const stack = rootHost.querySelector('.ts-stack')
+if (stack === null) throw new Error('wide HOC layer must render the new-session stack')
 const btn = rootHost.querySelector('.ts-btn')
 if (btn === null) throw new Error('action button missing')
 if (btn.getAttribute('aria-label') !== en.title) throw new Error(`aria-label: ${btn.getAttribute('aria-label')}`)
 if (btn.textContent !== en.label) throw new Error(`wide label: ${btn.textContent}`)
-// The wrapper must claim the flex-row width (footerActions is display:flex),
-// or the button's calc(100%+8px) collapses to the label width and the hover
-// chrome only covers the text (the reported bug).
+// The stack claims the New Session row width and puts the temp row underneath;
+// the wrapper must not collapse to the label width.
 const wrap = rootHost.querySelector('.ts-wrap')
 if (wrap === null || wrap.classList.contains('ts-rail-wrap')) throw new Error('wide wrapper must not be rail-mode')
-console.log('render OK: wide row shows icon + label, aria-label set, wrapper claims full width')
+console.log('render OK: New Session row kept, temp row stacked below it')
 
 // click -> POST /temp-session/ensure -> uiWorkspace.startSession
 await act(async () => { fireClick(btn) })
@@ -777,6 +786,7 @@ const railRoot = createRoot(railHost)
 await act(async () => {
   railRoot.render(React.createElement(actionReg.component, {
     wide: false,
+    children: rowStub,
     startTempSession: clientInjected.startTempSession,
     t: tWithParams,
   }))

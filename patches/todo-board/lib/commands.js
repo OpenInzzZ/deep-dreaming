@@ -20,6 +20,8 @@
  */
 import { existsSync } from 'node:fs'
 import { basename } from 'node:path'
+import { renumberBoard } from './board.js'
+import { planCompactNumbers } from './store.js'
 
 /** 命令名（不含斜杠）。已经确认宿主里没有同名命令。 */
 export const COMMAND_NAME = 'workboard'
@@ -28,7 +30,7 @@ export const COMMAND_NAME = 'workboard'
 export const COMMAND_ID = '@local/dsh-todo-board/workboard'
 
 /** 输入提示：客户端在命令被选中后显示在输入框里的占位文案。 */
-export const COMMAND_HINT = '[<标题>|list|done <id|#N>|del <id|#N>|import <路径> [kind]|export]'
+export const COMMAND_HINT = '[<标题>|list|done <id|#N>|del <id|#N>|import <路径> [kind]|export|renumber [confirm]]'
 
 /** 用法说明（子命令写错时原样回给人）。 */
 export const USAGE = [
@@ -38,11 +40,13 @@ export const USAGE = [
   '/workboard del <id|#序号>        删除（危险：真的从清单里抹掉）',
   '/workboard import <路径> [kind] 从 Markdown 文档导入（kind = todo|done|branch）',
   '/workboard export               重写三份 Markdown 镜像',
+  '/workboard renumber             预览编号整理（压缩空洞）',
+  '/workboard renumber confirm     执行整理；旧的 #N 引用会失效',
 ].join('\n')
 
 /**
  * 一条事项在命令回执里的单行写法。
- * 与面板、Markdown 用同一个 `#N` 编号，位置对得上——用户看回执就知道下一句该写什么。
+ * 与面板、Markdown 用同一个 `#N` 稳定编号（删除/完成后不回填），用户看回执就知道下一句该写什么。
  * @param item - 事项。
  */
 export function lineOf(item) {
@@ -166,6 +170,27 @@ export async function executeTodoCommand(access, invocation, hooks = {}) {
     if (head === 'export') {
       const result = await access.refreshMirrors()
       return ok(`已重写 ${result.written.length} 份 Markdown 镜像：\n${result.written.join('\n')}`)
+    }
+
+    if (head === 'renumber') {
+      const confirm = (words[1] ?? '').toLowerCase() === 'confirm'
+      if (!confirm) {
+        const board = await access.read()
+        const plan = planCompactNumbers(board.items)
+        if (plan.changes.length === 0) return ok('编号已经连续，不需要整理。')
+        const preview = plan.changes.slice(0, 10).map(({ item, from, to }) => `${item.title}  #${from ?? '?'} → #${to}`)
+        return ok([
+          `编号整理预览：${plan.changes.length} 条会变号（含归档项，每类从 1 开始）。`,
+          ...preview,
+          ...(plan.changes.length > preview.length ? ['…'] : []),
+          '',
+          '执行会改变旧 #N 引用；确认请发 /workboard renumber confirm',
+        ].join('\n'))
+      }
+      const result = await renumberBoard(access)
+      return await changed(ok(result.count === 0
+        ? '编号已经连续，不需要整理。'
+        : `已整理 ${result.count} 条编号（每类从 1 开始，归档项排在后面）。旧的 #N 引用已失效，请以新编号为准。`))
     }
 
     if (head === 'help') return ok(USAGE)

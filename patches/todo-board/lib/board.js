@@ -12,6 +12,7 @@ import {
   KINDS,
   boardPaths,
   cleanText,
+  compactNumbers,
   completeItem,
   createItem,
   filterItems,
@@ -71,8 +72,8 @@ export function createBoardAccess(config) {
     /** 新增一条。 */
     async add(input) {
       const outcome = await addItem(access, input)
-      // 序号是落盘时压实出来的（`saveBoard` 里的 `renumberItems`），所以回执里的
-      // 编号必须读存盘之后的那份，不能用新建时算出的候选值。
+      // 编号在创建时分配、落盘时保留（`assignStableNumbers` 不会按位置重排），
+      // 所以回执里的编号读存盘后的那份，和镜像/列表看到的一致。
       const id = outcome.result.item.id
       const saved = outcome.saved.items.find((item) => item.id === id) ?? outcome.result.item
       return { item: saved, number: saved.number }
@@ -86,7 +87,7 @@ export function createBoardAccess(config) {
     /** 完成一条（生成 done）。 */
     async complete(id, patch) {
       const outcome = await completeItemById(access, id, patch ?? {})
-      // 同上：done 的最终编号在落盘压实之后才确定。
+      // 同上：done 的编号也在存盘后读，避免回执与镜像不一致。
       const doneId = outcome.result.item.id
       const saved = outcome.saved.items.find((item) => item.id === doneId) ?? outcome.result.item
       return { item: saved, archived: outcome.result.archived }
@@ -191,6 +192,37 @@ export async function completeItemById(access, id, patch) {
       result: { item: done, archived: source.id },
     }
   })
+}
+
+/**
+ * 显式整理编号：每个 kind 内按「未归档在前、归档在后」重排成 1..N。
+ *
+ * 这是唯一会主动改变已有编号的入口，必须由用户确认（命令的 `confirm`）。
+ * 整理后旧 `#N` 引用失效；不在每次保存时自动重排，就是为了不让用户刚给的
+ * 编号在下一轮悄悄指向别的条目。
+ * @param access - 访问器。
+ * @returns `{ count, changes, seq }`。
+ */
+export async function renumberBoard(access) {
+  return access.write((board) => {
+    const plan = compactNumbers(board.items)
+    const changes = plan.changes.map(({ item, from, to }) => ({
+      id: item.id,
+      kind: item.kind,
+      title: item.title,
+      archived: item.archived === true,
+      from,
+      to,
+    }))
+    if (changes.length === 0) {
+      return { changed: false, result: { count: 0, changes: [], seq: plan.seq } }
+    }
+    return {
+      changed: true,
+      board: { ...board, seq: plan.seq, items: board.items },
+      result: { count: changes.length, changes, seq: plan.seq },
+    }
+  }).then((outcome) => outcome.result)
 }
 
 /**

@@ -15,7 +15,7 @@
  * 这一层只做纯逻辑 + 文件读写，不碰 Cordis：工具、路由、设置页都调用它，
  * 测试也可以脱离宿主运行时直接驱动（见 `tests/store.test.mjs`）。
  */
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { link, mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { randomBytes } from 'node:crypto'
@@ -116,7 +116,7 @@ export function emptyBoard() {
 }
 
 /**
- * 把任意读入值收敛成合法清单：坏字段丢掉、序号重排、kind 非法的事项丢弃。
+ * 把任意读入值收敛成合法清单：坏字段丢掉、序号补齐、kind 非法的事项丢弃。
  *
  * 刻意宽容：board.json 是用户也可能手改的文件，一个空字符串或 null 不值得让
  * 整个清单打不开。真正无法修复的情况（JSON 语法错误）由 `loadBoard` 报出来。
@@ -134,10 +134,10 @@ export function normalizeBoard(value) {
     seen.add(item.id)
     items.push(item)
   }
-  // 序号在这里就压实成 1..N（见 `renumberItems`）：读取视图、命令解析（`done #3`）
-  // 与镜像必须看到同一组数字。绝不拿 `seq` 当"下一个"来 bump —— 那会在每次加载
-  // 时把自己的号码当成冲突再 +1，序号一路涨到几百（见 tests/core.test.mjs 的并发用例）。
-  const seq = renumberItems(items)
+  // 序号是**稳定编号**：已有合法编号原样保留，不按位置重排；只给缺失/重复的
+  // 条目补一个高于历史水位的新号。`source.seq` 作为水位下限，硬删除过一个号后
+  // 也不会被新条目复用（引用过 #N 的人不会被指到另一条）。
+  const seq = assignStableNumbers(items, source.seq)
   return {
     version: BOARD_VERSION,
     updatedAt: typeof source.updatedAt === 'string' ? source.updatedAt : nowIso(),
@@ -281,33 +281,42 @@ export async function writeTextAtomic(path, text) {
 }
 
 /**
- * 按 kind 把序号重排成 1..N 的连续编号（原地改 `items`，返回新的 `seq`）。
+ * 给缺失/重复编号的条目补号，并返回每个 kind 的历史水位。
  *
- * 为什么每次写入都要重排：`number` 在界面上是**给人定位用的序号**（面板里的
- * `#3`、`/workboard done #3`、镜像里的 `toc3`），不是数据库自增主键。用递增
- * 计数器会产生空洞——删掉一条之后，剩下的就从 #1 直接跳到 #3，序号与实际位置
- * 脱节。序号越连续，人越好找。
+ * **不重排已有编号**：编号是创建时分配的稳定引用（界面 `#N`、镜像标题、
+ * `done #N` 都读它）。删除/完成中间一条后，后面的编号保持原样，允许出现空洞；
+ * 新条目从水位 +1 开始。`seqFloor` 是 board.json 里的历史水位，用作下限，
+ * 这样硬删除过的号不会被新条目复用。
  *
- * 排序规则：同一 kind 内**未归档的在前**（1..V），已归档的接在后面（V+1..V+A）。
- * 两个区间内部都尽量保持原相对顺序（先比旧序号，再比 id），所以重排只会压实
- * 空洞，不会无缘无故把条目挪位置。
+ * 缺失或重复的编号（手改 JSON、旧数据）会拿到高于水位的号；重复时先出现的那条
+ * 保留原号，后面那条补新号。
  * @param items - 事项数组（会被就地改写 `number`）。
- * @returns 新的 `seq`（各 kind 的条目总数）。
+ * @param seqFloor - 历史水位 `{ todo, done, branch }`（可选）。
+ * @returns 新的 `seq`（各 kind 的最大历史编号）。
  */
-export function renumberItems(items) {
+export function assignStableNumbers(items, seqFloor = {}) {
   const seq = { todo: 0, done: 0, branch: 0 }
+  const used = { todo: new Set(), done: new Set(), branch: new Set() }
   for (const kind of KINDS) {
-    const group = items.filter((item) => item.kind === kind)
-    group.sort((left, right) => {
-      const byArchived = (left.archived === true ? 1 : 0) - (right.archived === true ? 1 : 0)
-      if (byArchived !== 0) return byArchived
-      const byNumber = (left.number ?? Number.MAX_SAFE_INTEGER) - (right.number ?? Number.MAX_SAFE_INTEGER)
-      if (byNumber !== 0) return byNumber
-      return left.id.localeCompare(right.id)
-    })
-    let next = 0
-    for (const item of group) item.number = ++next
-    seq[kind] = next
+    const floor = Number.isInteger(seqFloor?.[kind]) && seqFloor[kind] > 0 ? seqFloor[kind] : 0
+    seq[kind] = floor
+  }
+  // 保留已有的合法且不重复编号；其余标记为待补。
+  for (const item of items) {
+    if (!KINDS.includes(item.kind)) continue
+    if (Number.isInteger(item.number) && item.number > 0 && !used[item.kind].has(item.number)) {
+      used[item.kind].add(item.number)
+      if (item.number > seq[item.kind]) seq[item.kind] = item.number
+    } else {
+      item.number = undefined
+    }
+  }
+  // 补号一定高于历史水位，避免复用删除过的编号。
+  for (const item of items) {
+    if (item.number !== undefined) continue
+    seq[item.kind] += 1
+    item.number = seq[item.kind]
+    used[item.kind].add(item.number)
   }
   return seq
 }
@@ -315,15 +324,16 @@ export function renumberItems(items) {
 /**
  * 落盘清单。
  *
- * 落盘前先 `renumberItems`：JSON 里的序号永远连续，镜像与界面读到的就是同一
- * 组数字（否则「文件里第 3 条」与「界面上 #3」会对不上）。
+ * 落盘前只给缺失/重复的编号补号，**不按位置重排**：`number` 是创建时分配的
+ * 稳定引用（界面 `#N`、镜像标题、`done #N` 都读它），删除/完成中间一条后
+ * 后面的编号保持不动，允许空洞。`board.seq` 是历史水位，保证删除过的号不被复用。
  * @param paths - `boardPaths()` 的结果。
  * @param board - 已规范化的清单。
  * @returns 写回后的清单（`updatedAt` 已刷新）。
  */
 export async function saveBoard(paths, board) {
   const items = board.items
-  const seq = renumberItems(items)
+  const seq = assignStableNumbers(items, board.seq)
   const next = { ...board, version: BOARD_VERSION, updatedAt: nowIso(), seq, items }
   await writeTextAtomic(paths.board, `${JSON.stringify(next, null, 2)}\n`)
   return next
@@ -339,16 +349,171 @@ export async function saveBoard(paths, board) {
 const boardLocks = new Map()
 
 /**
+ * 预览一次「手动整理编号」：每个 kind 内按「未归档在前、归档在后」重排成 1..N。
+ *
+ * 这是唯一会主动改变已有编号的入口，必须由用户显式确认：自动重排会让用户
+ * 刚才引用的 `#N` 指向另一条，正是稳定编号要避免的问题。整理后旧引用失效，
+ * 以新编号为准。
+ * @param items - 事项数组（不改写，只计算）。
+ * @returns `{ seq, changes: [{ item, from, to }] }`。
+ */
+export function planCompactNumbers(items) {
+  const changes = []
+  const seq = { todo: 0, done: 0, branch: 0 }
+  for (const kind of KINDS) {
+    const group = items.filter((item) => item.kind === kind).slice().sort((left, right) => {
+      const byArchived = (left.archived === true ? 1 : 0) - (right.archived === true ? 1 : 0)
+      if (byArchived !== 0) return byArchived
+      const byNumber = (left.number ?? Number.MAX_SAFE_INTEGER) - (right.number ?? Number.MAX_SAFE_INTEGER)
+      if (byNumber !== 0) return byNumber
+      return left.id.localeCompare(right.id)
+    })
+    let next = 0
+    for (const item of group) {
+      next += 1
+      if (item.number !== next) changes.push({ item, from: item.number, to: next })
+    }
+    seq[kind] = next
+  }
+  return { seq, changes }
+}
+
+/** 应用 `planCompactNumbers` 的结果（会改写 `item.number`）。 */
+export function compactNumbers(items) {
+  const plan = planCompactNumbers(items)
+  for (const { item, to } of plan.changes) item.number = to
+  return plan
+}
+
+/**
  * 在清单锁内执行一次读改写。
+ *
+ * 两层锁：
+ * 1. `boardLocks`：同一宿主进程内的 Promise 链，避免同进程并发；
+ * 2. `board.lock` 文件：不同宿主进程共用同一个 user-level board.json 时，
+ *    用 link 原子创建 + 租约回收串行化。只有第一层时，两个进程会各自
+ *    read→modify→write，后 rename 的覆盖先写的，新增整条丢失（编号也会错）。
+ *
+ * 文件锁的租约 15 秒、最多等 10 秒；抢不到抛 `board-busy`，不静默丢更新。
  * @param root - 清单根目录，作为锁的键。
  * @param operation - 收到（可能新建的）清单，返回 `{ board, result }`。
  */
 export function withBoardLock(root, operation) {
   const previous = boardLocks.get(root) ?? Promise.resolve()
-  const run = previous.then(operation, operation)
+  const runLocked = async () => {
+    const lock = await acquireBoardLock(root)
+    try {
+      return await operation()
+    } finally {
+      await releaseBoardLock(lock)
+    }
+  }
   // 链上只保留「跑完」这个事实：失败不能毒化后续变更，错误交给调用方。
+  const run = previous.then(runLocked, runLocked)
   boardLocks.set(root, run.then(() => undefined, () => undefined))
   return run
+}
+
+/** 跨进程锁的租约（毫秒）。板级写操作是毫秒级，15 秒足够覆盖读改写+镜像。 */
+const BOARD_LOCK_TTL_MS = 15_000
+/** 抢锁最多等多久；超过就明确报 board-busy，而不是静默覆盖。 */
+const BOARD_LOCK_WAIT_MS = 10_000
+/** 抢锁重试间隔。 */
+const BOARD_LOCK_RETRY_MS = 25
+/** Windows 上锁文件被并发 link/unlink 时的瞬时共享冲突，按可重试处理。 */
+const BOARD_LOCK_TRANSIENT = new Set(['EPERM', 'EBUSY', 'EACCES'])
+
+/** 等待。 */
+const delay = (ms) => new Promise((done) => { setTimeout(done, ms) })
+
+/** 读文件；不存在返回 undefined（其它错误照抛）。 */
+async function readTextIfExists(path) {
+  try {
+    return await readFile(path, 'utf8')
+  } catch (error) {
+    if (error?.code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+/** 从锁内容解析 token；坏内容返回 undefined。 */
+function lockToken(raw) {
+  try {
+    const parsed = JSON.parse(raw)
+    return typeof parsed?.token === 'string' ? parsed.token : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 抢跨进程锁文件。
+ *
+ * 用「写临时文件 + link」让锁文件原子出现；已存在时看 mtime 租约，过期就
+ * 双重 stat 确认后回收。Windows 上 link/stat/unlink 偶发共享冲突，按可重试
+ * 错误处理，不把瞬时错误当成抢锁失败。
+ * @param root - 清单根目录。
+ * @returns `{ path, token }`，交给 releaseBoardLock。
+ */
+async function acquireBoardLock(root) {
+  await mkdir(root, { recursive: true })
+  const path = join(root, 'board.lock')
+  const deadline = Date.now() + BOARD_LOCK_WAIT_MS
+  for (;;) {
+    const token = randomBytes(8).toString('hex')
+    const temporary = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
+    await writeFile(temporary, `${JSON.stringify({ token, pid: process.pid, at: new Date().toISOString() })}\n`, 'utf8')
+    try {
+      await link(temporary, path)
+      return { path, token }
+    } catch (error) {
+      if (error?.code !== 'EEXIST') {
+        const transient = error?.code === 'EPERM' || error?.code === 'EBUSY' || error?.code === 'EACCES'
+        if (!transient) throw error
+      }
+    } finally {
+      await unlink(temporary).catch(() => undefined)
+    }
+
+    let info
+    try {
+      info = await stat(path)
+    } catch (error) {
+      if (error?.code === 'ENOENT' || BOARD_LOCK_TRANSIENT.has(error?.code)) {
+        await delay(BOARD_LOCK_RETRY_MS)
+        continue
+      }
+      throw error
+    }
+    if (Date.now() - info.mtimeMs > BOARD_LOCK_TTL_MS) {
+      // 双重确认：读 token + 再 stat；若 mtime 变了，说明已被别人换手，不能删。
+      const before = info.mtimeMs
+      await readTextIfExists(path)
+      const after = await stat(path).catch(() => undefined)
+      if (after !== undefined && after.mtimeMs === before) {
+        await unlink(path).catch(() => undefined)
+        continue
+      }
+    }
+    if (Date.now() >= deadline) {
+      const failure = new Error(`board 正在被另一个进程写入（锁：${path}），等待 ${BOARD_LOCK_WAIT_MS}ms 超时`)
+      failure.code = 'board-busy'
+      throw failure
+    }
+    await delay(BOARD_LOCK_RETRY_MS)
+  }
+}
+
+/** 释放自己持有的跨进程锁；token 不匹配说明锁已被回收/换手，不能删别人的。 */
+async function releaseBoardLock(lock) {
+  try {
+    const raw = await readTextIfExists(lock.path)
+    if (raw === undefined) return
+    if (lockToken(raw) !== lock.token) return
+    await unlink(lock.path).catch(() => undefined)
+  } catch {
+    // 释放失败不能掩盖业务结果：锁文件会在租约到期后被下一个写者回收。
+  }
 }
 
 /**
@@ -380,12 +545,12 @@ export function filterItems(items, options = {}) {
 }
 
 /**
- * 清单排序：先 kind（在混合视图里待办在前、已办随后、分支最后），再条目序号。
+ * 清单排序：先 kind（在混合视图里待办在前、已办随后、分支最后），再条目编号。
  *
- * 不按 project 排：`number` 在 `renumberItems` 之后是每个 kind 内连续的位置，
- * 界面直接把 `#N` 印在行首，所以「顺序」和「编号」必须是同一件事。曾经按
- * project 排（分组时代的遗留），跨项目时会出现 `#2 / #1 / #3` 这种倒序，
- * 看起来就像编号丢了。同序号的（手改过的数据）用 id 兜底，保证稳定。
+ * 不按 project 排：`number` 是每个 kind 内稳定、可能带空洞的编号（删除/完成后
+ * 不回填），界面直接把 `#N` 印在行首。曾按 project 排（分组时代的遗留），跨项目
+ * 时会出现 `#2 / #1 / #3` 这种倒序，看起来就像编号丢了。同序号的（手改过的数据）
+ * 用 id 兜底，保证稳定。
  * @param items - 待排序事项（原地排序并返回）。
  */
 export function sortItems(items) {

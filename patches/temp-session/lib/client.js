@@ -3,8 +3,13 @@
  * registers the user-level temp directory (default `~/.dsh/tmp-workspaces/`)
  * as a real Workspace titled "临时会话". It then appears as a workspace group
  * in the sidebar browser — users can click its "+" or "新会话" row just like
- * any project. The sidebar-footer action is a one-click shortcut that jumps
- * directly to a new session inside that workspace.
+ * any project.
+ *
+ * The shortcut now lives directly under the New Session button: the
+ * `sidebar.session.action` HOC wraps that row's content, and this module
+ * returns the shipped button followed by a "临时会话" row (in the rail it
+ * stacks a 36px icon below the New Session icon). The sidebar footer is left
+ * to discussion-plaza.
  *
  * Hand-written in the client-bundle contract (no build step): the shell's
  * module loader receives this file through `window.__ModuleLoader__.load` and
@@ -35,20 +40,21 @@ const NS = 'sidebar.tempSession';
    and removes them when the bundle unloads, and the `data-plugin-css` key
    keeps a re-injection (hot reload) from stacking a second copy. */
 const CSS = [
-  /* Wrap: the footerActions seat is a flex row, so the wrapper must claim the
-     full width — otherwise the button's calc(100% + 8px) collapses to the
-     content width and the hover chrome only covers the label (unlike the
-     settings trigger, which sits in a block container). */
-  '.ts-wrap{flex:1 1 auto;min-width:0;display:flex;flex-direction:column}',
-  /* Wide footer row: compact 34px rhythm like the settings trigger. */
-  '.ts-btn{flex:none;display:flex;align-items:center;gap:8px;width:calc(100% + 8px);height:34px;margin:4px -4px 4px;padding:6px 2px 6px 10px;box-sizing:border-box;border:none;border-radius:12px;background:transparent;cursor:pointer;overflow:hidden;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:14px;line-height:22px}',
+  /* Wide: the HOC wrapper becomes the New Session row's single flex child, so
+     it owns the width and stacks the shipped button above our 34px row. */
+  '.ts-stack{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:6px}',
+  '.ts-rail-layer{display:flex;flex-direction:column;align-items:flex-start;gap:4px}',
+  /* Wrap: claim the row width inside the stack (the old footer was a flex row). */
+  '.ts-wrap{flex:none;min-width:0;display:flex;flex-direction:column}',
+  /* Wide row: compact 34px rhythm, transparent so it reads as a secondary action. */
+  '.ts-btn{flex:none;display:flex;align-items:center;gap:8px;width:100%;height:34px;margin:0;padding:6px 10px;box-sizing:border-box;border:none;border-radius:12px;background:transparent;cursor:pointer;overflow:hidden;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:14px;line-height:22px}',
   '.ts-btn:hover{background:var(--dsw-alias-interactive-bg-hover)}',
   '.ts-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}',
   '.ts-btn[disabled]{opacity:.6;cursor:default}',
   /* Rail: the same 36x36 circle box as the other rail controls. */
   '.ts-btn.ts-rail{width:36px;height:36px;margin:8px 0 10px;justify-content:center;gap:0;padding:0;border-radius:50%}',
   '.ts-wrap.ts-rail-wrap{flex:none;align-items:center}',
-  '.ts-label{overflow:hidden;white-space:nowrap}',
+  '.ts-label{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}',
   '.ts-error{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:11px;line-height:16px;color:var(--dsw-alias-state-error-primary);margin:0 0 2px 10px}',
 ].join('');
 
@@ -108,8 +114,8 @@ const call = async (endpoint, args) => {
 }
 
 /**
- * Sidebar-footer action row: wide shows icon + label, rail only the icon.
- * Clicking calls the host `/temp-session` ensure endpoint, then starts a
+ * One row under the New Session button: wide shows icon + label, rail only the
+ * icon. Clicking calls the host `/temp-session` ensure endpoint, then starts a
  * session bound to the temp workspace.
  */
 function TempSessionAction({ wide, startTempSession, t }) {
@@ -135,14 +141,28 @@ function TempSessionAction({ wide, startTempSession, t }) {
       disabled: busy ? true : undefined,
       onClick: run,
       children: [
-        jsx(IconSparkleRegular, { key: 'icon', size: wide ? 16 : 18 }),
-        wide ? jsx('span', { key: 'label', className: 'ts-label', children: busy ? t('busy') : t('label') }, 'label') : null,
+        jsx(IconSparkleRegular, { size: wide ? 16 : 18 }, 'icon'),
+        wide ? jsx('span', { className: 'ts-label', children: busy ? t('busy') : t('label') }, 'label') : null,
       ],
     }, 'temp-session-action'),
   ] });
 }
 
-/** Contribute the sidebar-footer temp-session action. */
+/**
+ * `sidebar.session.action` HOC: keep the shipped New Session button and append
+ * the temp-session row directly below it. Wide uses a column stack; the rail
+ * stacks the icon under the New Session icon (the row is already a column).
+ */
+function TempSessionLayer({ wide, children, startTempSession, t }) {
+  const action = jsx(TempSessionAction, { wide: wide === true, startTempSession, t }, 'temp-session-action')
+  const row = React.isValidElement(children) ? React.cloneElement(children, { key: 'new-session' }) : children
+  return jsxs('div', {
+    className: wide === true ? 'ts-stack' : 'ts-rail-layer',
+    children: [row, action],
+  })
+}
+
+/** Contribute the temp-session row under the New Session button. */
 function apply(ctx) {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'temp-session: dictionaries')
 
@@ -163,13 +183,13 @@ function apply(ctx) {
     ctx.uiWorkspace.startSession(value.workspaceId);
   }
 
-  ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
-    name: 'sidebar.footer.action',
+  ctx.slots.inject('sidebar.session.action', () => ctx.slots.register({
+    name: 'sidebar.session.action',
     id: 'temp-session',
     order: -10,
     locale: NS,
     inject: () => ({ startTempSession }),
-  }, TempSessionAction))
+  }, TempSessionLayer))
 }
 
 (function () {

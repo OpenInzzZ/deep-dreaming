@@ -277,7 +277,8 @@ $links = @(
     @{ n = 'dsh-client-ui-temp-session';             d = 'temp-session' },
     @{ n = 'dsh-client-whale-background';            d = 'whale-background' },
     @{ n = 'dsh-client-queue-reorder';               d = 'queue-reorder' },
-    @{ n = 'dsh-todo-board';                         d = 'todo-board' }
+    @{ n = 'dsh-todo-board';                         d = 'todo-board' },
+    @{ n = 'dsh-discussion-plaza';                   d = 'discussion-plaza' }
 )
 foreach ($l in $links) {
     $target = Join-Path $dev "patches\$($l.d)"
@@ -312,7 +313,7 @@ foreach ($l in $links) {
 # The strip happens per patch inside step 3 (immediately before that patch's
 # bundle install) so a crash between the two steps can only ever leave ONE
 # patch without a row, and the removed block is stashed for restore on failure.
-$bundlePatchDirs = @('session-cleanup', 'queue-reorder', 'temp-session', 'whale-background', 'todo-board')
+$bundlePatchDirs = @('session-cleanup', 'queue-reorder', 'temp-session', 'whale-background', 'todo-board', 'discussion-plaza')
 $removedRows = @{}
 $failed = 0
 
