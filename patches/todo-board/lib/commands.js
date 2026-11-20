@@ -180,7 +180,7 @@ export async function executeTodoCommand(access, invocation, hooks = {}) {
       `已记到跨项目工作清单：${lineOf(item)}`,
       `项目 ${item.project} · ${written.written.length} 份镜像已更新`,
       '',
-      '要补背景/方案，用 todo_update 工具，或点左侧边栏「工作清单」里这一条改。',
+      '要补背景/方案，用 workboard_update 工具，或点左侧边栏「工作清单」里这一条改。',
     ].join('\n'))
   } catch (error) {
     // 领域层抛的错都带 `code`（`title-required` / `item-not-found` / `import-empty`…），

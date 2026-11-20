@@ -19,7 +19,7 @@ Git、`grep` 全都还能用，镜像就是普通 Markdown 文件）。
   `cordis.patch.yml` 自带。
 - **JSON 为准，Markdown 是镜像**。每次写动作都会重写三份镜像；手改镜像**不会**
   回写 JSON（镜像里没有 id，人工编辑无法可靠归属）。要从已有 Markdown 迁进来，
-  用 `todo_import`（按 `kind + project + title` 幂等）。
+  用 `workboard_import`（按 `kind + project + title` 幂等）。
 - 三个入口共用同一份数据：模型工具（主入口）、左侧边栏面板、系统提示词小结。
 
 ## 五个入口
@@ -30,13 +30,13 @@ Git、`grep` 全都还能用，镜像就是普通 Markdown 文件）。
 
 | 工具 | 用途 |
 |------|------|
-| `todo_list` | 按 `kind` / `project` / `status` / `module` / `query` 过滤查询 |
-| `todo_add` | 新增一条（项目默认取**当前会话工作目录名**） |
-| `todo_update` | 按 `id` 改标题、状态、小节、标记 |
-| `todo_complete` | 把待办转成已办（原条归档并留住溯源） |
-| `todo_archive` | 归档；`hard: true` 则物理删除 |
-| `todo_import` | 从既有 Markdown 导入（`dryRun` 可先看） |
-| `todo_export` | 返回路径与计数；`write: true` 重写三份镜像 |
+| `workboard_list` | 按 `kind` / `project` / `status` / `module` / **序号（`#N`）** / `query` 过滤查询 |
+| `workboard_add` | 新增一条（项目默认取**当前会话工作目录名**） |
+| `workboard_update` | 按 `id` 改标题、状态、小节、标记 |
+| `workboard_complete` | 把待办转成已办（原条归档并留住溯源） |
+| `workboard_archive` | 归档；`hard: true` 则物理删除 |
+| `workboard_import` | 从既有 Markdown 导入（`dryRun` 可先看） |
+| `workboard_export` | 返回路径与计数；`write: true` 重写三份镜像 |
 
 `project` 不传时取 `exec.agent.session.header.cwd` 的 basename，所以「在哪个工作区
 调用就落哪个项目」，模型不必先问一句"这是哪个项目"。显式传 `project` 仍然覆盖。
@@ -168,7 +168,7 @@ Git、`grep` 全都还能用，镜像就是普通 Markdown 文件）。
 ……
 ```
 
-小节：`根因 / 实现 / 验证 / 遗留 / 关联`。`todo_complete` 生成的新条目会带
+小节：`根因 / 实现 / 验证 / 遗留 / 关联`。`workboard_complete` 生成的新条目会带
 `fromId` 指向原待办，原待办转为 `archived`（不出现在镜像里，但仍可查询）。
 
 ### 功能分支（`kind: 'branch'`）—— 对齐 `zky_doc/功能分支整理.md`
@@ -263,8 +263,8 @@ patches/todo-board/node_modules → ~/.dsh/profiles/node_modules
 ## 测试
 
 ```powershell
-node patches/todo-board/tests/core.test.mjs         # 47 项：store / markdown / import / 详情 / 序号 / /workboard 命令
-node patches/todo-board/tests/load-smoke.mjs        # 29 项：真实 Cordis + 真实 schema 校验 + 命令座位
+node patches/todo-board/tests/core.test.mjs         # 48 项：store / markdown / import / 详情 / 序号（含 #N 过滤）/ /workboard 命令
+node patches/todo-board/tests/load-smoke.mjs        # 30 项：真实 Cordis + 真实 schema 校验 + 命令座位
 node patches/todo-board/tests/client-contract.mjs   # 31 项：侧栏导航行 + 中列整页 + 页内详情栏（整行点击、拖拽宽度）
 ```
 
@@ -298,10 +298,10 @@ node patches/todo-board/tests/client-contract.mjs   # 31 项：侧栏导航行 +
 
 ## 已知边界
 
-- **手改镜像不回写**。JSON 是唯一真相；要从 Markdown 迁进来请用 `todo_import`。
+- **手改镜像不回写**。JSON 是唯一真相；要从 Markdown 迁进来请用 `workboard_import`。
 - **镜像不是逐字节兼容原文件**。格式、小节、标题后缀、目录结构都对齐，但多项目
   时会插入项目分组与 `<!-- 项目：X -->` 注释（源文档只有单项目）。
-- **`todo_complete` 是「新建 + 归档」**，不是原地改 `kind`：已办清单的溯源字段
+- **`workboard_complete` 是「新建 + 归档」**，不是原地改 `kind`：已办清单的溯源字段
   （`fromId`）与待办的 `archived` 都依赖这条路径，原地改会丢掉溯源。
 - 功能分支的「发版后整条移除」没有自动执行，按原文档的约定由人决定何时归档。
 - **详情栏在整页内部，不占用平台右侧边栏**。平台那一列只在「中列显示会话」时存在
@@ -316,7 +316,7 @@ node patches/todo-board/tests/client-contract.mjs   # 31 项：侧栏导航行 +
   换一个浏览器数据目录、或清站点的本地存储，都会回到默认比例。它只是阅读偏好，丢了不影响
   功能；拖拽期间禁用了列表的文本选中，结束后恢复。
 - **`/workboard <标题>` 一律建成待办**。要记功能分支条目（带模块与 DDL/SQL/Nacos 三个硬
-  交付物标记）仍走 `todo_add` 工具或面板——命令只有一行输入，塞不下这些结构。
+  交付物标记）仍走 `workboard_add` 工具或面板——命令只有一行输入，塞不下这些结构。
 - **`/workboard` 不产生模型回合**。它是给人用的直接动作，执行完只在会话日志里留
   `command/run` 与 `command/done` 两条 log-only 事件；模型要到下一轮才从系统提示词
   的摘要里看到新增的条目。

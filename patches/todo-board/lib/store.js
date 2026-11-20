@@ -354,10 +354,10 @@ export function withBoardLock(root, operation) {
 /**
  * 过滤清单。
  * @param items - 全部事项。
- * @param options - `{ kind, project, status, module, query, includeArchived }`。
+ * @param options - `{ kind, project, status, module, number, query, includeArchived }`。
  */
 export function filterItems(items, options = {}) {
-  const { kind, project, status, module, query, includeArchived } = options
+  const { kind, project, status, module, number, query, includeArchived } = options
   const needle = typeof query === 'string' ? query.trim().toLowerCase() : ''
   return items.filter((item) => {
     if (item.archived === true && includeArchived !== true) return false
@@ -365,6 +365,9 @@ export function filterItems(items, options = {}) {
     if (project !== undefined && item.project !== project) return false
     if (status !== undefined && item.status !== status) return false
     if (module !== undefined && item.module !== module) return false
+    // 序号：给「功能分支 #17」这类引用一个精确过滤面。序号只在同一 kind 内唯一，
+    // 所以精确定位时应当同时给 kind；不给就返回所有 kind 里同号的那几条。
+    if (number !== undefined && item.number !== number) return false
     if (needle.length > 0) {
       const haystack = [item.title, item.project, item.module, item.status, ...item.tags, ...Object.values(item.sections)]
         .filter((part) => typeof part === 'string')

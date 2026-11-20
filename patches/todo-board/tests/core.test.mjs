@@ -18,6 +18,7 @@ import {
   completeItem,
   createItem,
   emptyBoard,
+  filterItems,
   isoDate,
   normalizeBoard,
   resolveBoardRoot,
@@ -158,6 +159,25 @@ await test('sortItems 按序号排，不按项目排（跨项目时编号必须�
   ])
   assert.deepEqual(items.map((item) => item.number), [1, 2, 3])
   assert.deepEqual(items.map((item) => item.id), ['a', 'b', 'c'])
+})
+
+await test('filterItems 支持按 #序号 精确过滤（`功能分支 #17` 的查询面）', () => {
+  const items = [
+    { id: 't1', kind: 'todo', project: 'p', number: 1 },
+    { id: 'b1', kind: 'branch', project: 'p', number: 1 },
+    { id: 'b17', kind: 'branch', project: 'p', number: 17 },
+    { id: 'b18', kind: 'branch', project: 'p', number: 18, archived: true },
+  ]
+  // 只给序号：三个清单里同号的都返回（#1 在待办与功能分支里各有一条）。
+  assert.deepEqual(filterItems(items, { number: 1 }).map((item) => item.id), ['t1', 'b1'])
+  // 序号 + kind 才是精确定位：模型读「功能分支 #17」时应当这样查。
+  assert.deepEqual(filterItems(items, { kind: 'branch', number: 17 }).map((item) => item.id), ['b17'])
+  // 归档条目默认不出现；要查历史条目得显式 includeArchived。
+  assert.deepEqual(filterItems(items, { kind: 'branch', number: 18 }).map((item) => item.id), [])
+  assert.deepEqual(
+    filterItems(items, { kind: 'branch', number: 18, includeArchived: true }).map((item) => item.id),
+    ['b18'],
+  )
 })
 
 console.log('— markdown —')

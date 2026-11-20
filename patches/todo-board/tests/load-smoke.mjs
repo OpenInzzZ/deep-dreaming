@@ -302,7 +302,7 @@ try {
     const fiber = await mount(ctx)
     try {
       const names = tools.map((tool) => tool.name).sort()
-      assert.deepEqual(names, ['todo_add', 'todo_archive', 'todo_complete', 'todo_export', 'todo_import', 'todo_list', 'todo_update'])
+      assert.deepEqual(names, ['workboard_add', 'workboard_archive', 'workboard_complete', 'workboard_export', 'workboard_import', 'workboard_list', 'workboard_update'])
     } finally {
       await fiber.dispose()
     }
@@ -351,23 +351,42 @@ try {
     const definitions = createTools(access, {})
     const byName = new Map(definitions.map((definition) => [definition.name, definition]))
 
-    const listValue = await byName.get('todo_list').execute({}, {})
-    hostTools.validateJsonSchemaValue(byName.get('todo_list').output.schema, listValue, 'value')
+    const listValue = await byName.get('workboard_list').execute({}, {})
+    hostTools.validateJsonSchemaValue(byName.get('workboard_list').output.schema, listValue, 'value')
 
     const addValue = { item: added.item, number: added.number, project: added.item.project }
-    hostTools.validateJsonSchemaValue(byName.get('todo_add').output.schema, addValue, 'value')
+    hostTools.validateJsonSchemaValue(byName.get('workboard_add').output.schema, addValue, 'value')
 
     const complete = await access.complete(added.item.id, {})
-    hostTools.validateJsonSchemaValue(byName.get('todo_complete').output.schema, { item: complete.item, archived: complete.archived }, 'value')
+    hostTools.validateJsonSchemaValue(byName.get('workboard_complete').output.schema, { item: complete.item, archived: complete.archived }, 'value')
 
-    const exported = await byName.get('todo_export').execute({}, {})
-    hostTools.validateJsonSchemaValue(byName.get('todo_export').output.schema, exported, 'value')
+    const exported = await byName.get('workboard_export').execute({}, {})
+    hostTools.validateJsonSchemaValue(byName.get('workboard_export').output.schema, exported, 'value')
+  })
+
+  await test('workboard_list 用 number 定位 #N（与 kind 组合才精确）', async () => {
+    const access = createBoardAccess({ rootDir: join(root, 'by-number') })
+    const todo = await access.add({ title: '待办一', project: 'demo' })
+    const first = await access.add({ title: '分支一', kind: 'branch', project: 'demo', module: 'M' })
+    const second = await access.add({ title: '分支二', kind: 'branch', project: 'demo', module: 'M' })
+    const list = createTools(access, {}).find((definition) => definition.name === 'workboard_list')
+
+    // 「功能分支 #2」的查询形态：kind + number，精确落到那一条。
+    const one = await list.execute({ kind: 'branch', number: second.number }, {})
+    assert.deepEqual(one.items.map((item) => item.id), [second.item.id])
+
+    // 不带 kind 时返回三个清单里同号的那几条（#1 在待办与功能分支里各有一条）。
+    const shared = await list.execute({ number: 1 }, {})
+    assert.deepEqual(
+      shared.items.map((item) => item.id).sort(),
+      [todo.item.id, first.item.id].sort(),
+    )
   })
 
   await test('render 产出 text 块', async () => {
     const access = createBoardAccess({ rootDir: join(root, 'render') })
     const definitions = createTools(access, {})
-    const add = definitions.find((definition) => definition.name === 'todo_add')
+    const add = definitions.find((definition) => definition.name === 'workboard_add')
     const value = await add.execute({ title: '渲染测试', project: 'demo' }, {})
     const blocks = add.output.render({ title: '渲染测试' }, value)
     assert.ok(Array.isArray(blocks) && blocks.length > 0)
@@ -382,9 +401,9 @@ try {
     assert.equal(defaultProjectOf(undefined), '')
   })
 
-  await test('todo_add 不带 project 时落到会话工作目录', async () => {
+  await test('workboard_add 不带 project 时落到会话工作目录', async () => {
     const access = createBoardAccess({ rootDir: join(root, 'default-project') })
-    const add = createTools(access, {}).find((definition) => definition.name === 'todo_add')
+    const add = createTools(access, {}).find((definition) => definition.name === 'workboard_add')
     const value = await add.execute({ title: '无项目' }, { agent: { session: { header: { cwd: '/work/other-repo' } } } })
     assert.equal(value.project, 'other-repo')
   })

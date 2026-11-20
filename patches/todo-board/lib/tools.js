@@ -131,10 +131,12 @@ export function createTools(access, hooks = {}) {
 
   return [
     {
-      name: 'todo_list',
+      name: 'workboard_list',
       description:
         'List cross-project TODO / DONE / feature-branch items from the shared board (one board for every workspace). ' +
-        'Use it at the start of a task to see what is still open, or to find the id you need for todo_update / todo_complete. ' +
+        'Use it at the start of a task to see what is still open, or to find the id you need for workboard_update / workboard_complete. ' +
+        'Pass number to resolve a "#N" reference (e.g. "功能分支 #17"): every row prints its #N, and the same number appears ' +
+        'in the Markdown headings; combine it with kind because each of the three lists restarts at 1. ' +
         'Filter by project, kind, status or a free-text query. Read-only.',
       parameters: {
         type: 'object',
@@ -143,6 +145,7 @@ export function createTools(access, hooks = {}) {
           project: { type: 'string', description: 'Exact project name (see the projects list in any previous result)' },
           status: { type: 'string', description: 'Exact status marker, e.g. TODO or 待验证' },
           module: { type: 'string', description: 'Feature-branch module name' },
+          number: { type: 'integer', description: 'The #N position inside a kind (the number printed on every row and in the Markdown headings); pass 17 for "#17"; combine with kind when the three lists share numbers' },
           query: { type: 'string', description: 'Case-insensitive substring over title/project/sections/tags' },
           includeArchived: { type: 'boolean', description: 'Include completed-from and archived rows (default false)' },
           limit: { type: 'integer', description: 'Max rows returned (default all matched)' },
@@ -184,6 +187,7 @@ export function createTools(access, hooks = {}) {
           project: typeof args?.project === 'string' ? args.project : undefined,
           status: typeof args?.status === 'string' ? args.status : undefined,
           module: typeof args?.module === 'string' ? args.module : undefined,
+          number: Number.isInteger(args?.number) ? args.number : undefined,
           query: typeof args?.query === 'string' ? args.query : undefined,
           includeArchived: args?.includeArchived === true,
           limit: Number.isInteger(args?.limit) ? args.limit : undefined,
@@ -198,11 +202,11 @@ export function createTools(access, hooks = {}) {
       },
     },
     {
-      name: 'todo_add',
+      name: 'workboard_add',
       description:
         'Add one item to the shared cross-project board. Defaults: kind=todo, project=the calling session\'s workspace folder name, ' +
         'date=today, status=TODO. Sections are the Markdown sub-headings of the item body (背景/现状/方案/…), so write real content ' +
-        'there instead of stuffing everything into the title. Use todo_import to bring in an existing TODO.md instead.',
+        'there instead of stuffing everything into the title. Use workboard_import to bring in an existing TODO.md instead.',
       parameters: {
         type: 'object',
         properties: {
@@ -249,7 +253,7 @@ export function createTools(access, hooks = {}) {
       },
     },
     {
-      name: 'todo_update',
+      name: 'workboard_update',
       description:
         'Update one item by id: change title/project/status/date/module/flags, or merge sections (a section you pass replaces that ' +
         'section only; pass an empty string to drop it; omitted sections are kept). Set status to 已实现 / 待验证 etc. as work progresses ' +
@@ -257,7 +261,7 @@ export function createTools(access, hooks = {}) {
       parameters: {
         type: 'object',
         properties: {
-          id: { type: 'string', description: 'Item id from todo_list / todo_add' },
+          id: { type: 'string', description: 'Item id from workboard_list / workboard_add' },
           title: { type: 'string' },
           project: { type: 'string' },
           status: { type: 'string' },
@@ -289,7 +293,7 @@ export function createTools(access, hooks = {}) {
       },
     },
     {
-      name: 'todo_complete',
+      name: 'workboard_complete',
       description:
         'Mark a TODO item done: the original is archived and a DONE entry is created (the DONE doc keeps its own richer section set: ' +
         '根因/实现/验证/遗留/关联). Pass the sections you already know; anything omitted falls back to carrying the todo body over. ' +
@@ -322,10 +326,10 @@ export function createTools(access, hooks = {}) {
       },
     },
     {
-      name: 'todo_archive',
+      name: 'workboard_archive',
       description:
         'Archive (soft-delete) or hard-delete one item. Archived items leave the Markdown mirrors but stay queryable with ' +
-        'includeArchived; hard deletion is irreversible. Prefer todo_complete for finished work — this is for mistakes and cleanup.',
+        'includeArchived; hard deletion is irreversible. Prefer workboard_complete for finished work — this is for mistakes and cleanup.',
       parameters: {
         type: 'object',
         properties: {
@@ -355,7 +359,7 @@ export function createTools(access, hooks = {}) {
       },
     },
     {
-      name: 'todo_import',
+      name: 'workboard_import',
       description:
         'Import items from an existing Markdown list (the taikoo-saas formats: `TODO.md`, `DONE.md`, `功能分支整理.md`). ' +
         'Give the file path AND the kind; headings become item titles, `**小节**` blocks become sections, the `— YYYY-MM-DD` suffix ' +
@@ -400,7 +404,7 @@ export function createTools(access, hooks = {}) {
       },
     },
     {
-      name: 'todo_export',
+      name: 'workboard_export',
       description:
         'Regenerate the three Markdown mirrors (TODO.md / DONE.md / 功能分支整理.md) from board.json, or just report where they are. ' +
         'Writes are already mirrored automatically on every change; call this after editing board.json by hand or after deleting a mirror file.',

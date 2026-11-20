@@ -1,5 +1,5 @@
 /**
- * 从既有 Markdown 文档里把事项读回来（`todo_import` 的实现核心）。
+ * 从既有 Markdown 文档里把事项读回来（`workboard_import` 的实现核心）。
  *
  * 只为**三份已知形态**服务，不是通用 Markdown 解析器：
  *   - `TODO.md`      `### [状态] N. 标题 — 日期`

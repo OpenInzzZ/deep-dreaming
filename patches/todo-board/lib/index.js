@@ -7,7 +7,7 @@
  * 共享），再用同样格式生成三份 Markdown 镜像，既能跨项目查，又保持原来的读法。
  *
  * 三个入口共用同一份数据：
- *   1. 模型工具 `todo_list` / `todo_add` / … —— 会话里读写（**主入口**）
+ *   1. 模型工具 `workboard_list` / `workboard_add` / … —— 会话里读写（**主入口**）
  *   2. 左侧边栏 → 全屏面板 —— 人肉浏览与编辑
  *   3. 系统提示词小结 —— 让模型知道清单里还有哪些没做完
  *
@@ -286,7 +286,7 @@ export function apply(ctx, config = {}) {
       text: () => (promptText.value.length > 0
         ? [
           '以下是**跨项目**工作清单（`~/.dsh/todo-board/board.json`，所有工作区共享），',
-          '用 todo_list 查看完整内容，todo_add / todo_complete / todo_update 增改。',
+          '用 workboard_list 查看完整内容，workboard_add / workboard_complete / workboard_update 增改。',
           '',
           '记录新事项时请记到这里，**不要**写进当前仓库的 `TODO.md` / `DONE.md` 一类项目文件',
           '（那是项目自己的交付物）；会话内的 `todo_write` 只是本轮的临时清单，也不是这里。',

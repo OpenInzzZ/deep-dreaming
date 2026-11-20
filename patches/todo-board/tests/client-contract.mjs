@@ -668,17 +668,24 @@ if (!canRender) {
     const view = mount(page, { t })
     try {
       await waitFor(() => view.container.querySelectorAll('.tb-tab').length === 3, 'the tabs')
-      view.container.querySelector('.tb-row-title').click()
+      // 行要等 `/todo-board/view` 回来才有：tabs 是无条件渲染的，不能拿它当"已加载"。
+      await waitFor(() => view.container.querySelector('.tb-row-title') !== null, 'the todo row')
+      const firstTitle = view.container.querySelector('.tb-row-title')
+      assert.ok(firstTitle !== null, 'the todo row title is missing')
+      firstTitle.click()
       await waitFor(() => view.container.querySelector('.tb-side')?.getAttribute('data-detail-id') === 'tb_t_1',
         'the first detail')
 
       // 切到「已办」tab，点另一条：同一个详情栏换成它，用户不离开清单。
       const doneTab = [...view.container.querySelectorAll('.tb-tab')]
         .find((node) => node.textContent.startsWith('filterDone'))
+      assert.ok(doneTab !== undefined, 'the done tab is missing')
       doneTab.click()
       await waitFor(() => view.container.querySelectorAll('.tb-row-title').length === 1, 'the done row')
       assert.equal(view.container.querySelector('.tb-row-title').textContent, 'NPE 修复')
-      view.container.querySelector('.tb-row-title').click()
+      const doneTitle = view.container.querySelector('.tb-row-title')
+      assert.ok(doneTitle !== null, 'the done row title is missing')
+      doneTitle.click()
       await waitFor(() => view.container.querySelector('.tb-side')?.getAttribute('data-detail-id') === 'tb_d_1',
         'the second detail')
       const ids = fetchStub.calls
@@ -687,7 +694,9 @@ if (!canRender) {
       assert.deepEqual(ids, ['tb_t_1', 'tb_d_1'], 'each pick re-reads its own document')
 
       // 关闭按钮：详情栏消失、行不再选中。
-      view.container.querySelector('.tb-side-head button').click()
+      const closeButton = view.container.querySelector('.tb-side-head button')
+      assert.ok(closeButton !== null, 'the detail close button is missing')
+      closeButton.click()
       await waitFor(() => view.container.querySelector('.tb-side') === null, 'the detail column to close')
       assert.equal(view.container.querySelector('.tb-row').getAttribute('data-selected'), 'false')
     } finally {
