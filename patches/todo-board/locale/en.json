@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Cross-project board",
+    "description": "One TODO / DONE / feature-branch board shared by every workspace: agents read and write it through the todo_* tools, the sidebar opens a full panel, and it mirrors into TODO.md / DONE.md / 功能分支整理.md."
+  }
+}

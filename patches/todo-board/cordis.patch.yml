@@ -1,0 +1,12 @@
+# todo-board: 跨项目待办 / 已办 / 功能分支清单（bundle 层行）。
+#
+# 这一行由包自己拥有（`dsh.bundle.patch`），不要在 profile 的 cordis.patch.yml 里
+# 再 insert 同名行 —— 两层同 id 会让启动 fail-loud 抛
+# `TypeError: duplicate loader entry id: todo-board`。
+#
+# config 全部留空，走 `lib/index.js` 里的默认值（默认根目录 `$DSH_HOME/todo-board`）。
+# 需要改的话在这里写 `config: { rootDir: '...' }`，但注意改完要重启桌面端：
+# bundle 自己的 cordis.patch.yml 不在 watchUserPatches 的监视范围内。
+- insert:
+    - id: todo-board
+      name: '@local/dsh-todo-board'

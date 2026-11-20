@@ -1,6 +1,6 @@
 # deep-dreaming
 
-> **目标平台**: DSH **桌面端**(Electron,`@deepseek-ai/dsh-desktop`),当前适配 **`0.2.1-rc.5`**
+> **目标平台**: DSH **桌面端**(Electron,`@deepseek-ai/dsh-desktop`),当前适配 **`0.2.2-rc.5`**
 > (profile:`~/.dsh/profiles/desktop`;宿主:打包运行时 `resources/app.asar/dsh`;宿主端口由桌面端动态分配)
 > Web 端(`dsh web`)已**不再维护**,其生命周期脚本归档在 [`archive/`](archive/README.md)
 
@@ -18,11 +18,12 @@ deep-dreaming/
 │   ├── session-cleanup/          # 已归档会话的手动物理删除(目录包插件)
 │   ├── queue-reorder/            # 排队消息拖拽排序(装饰官方队列坞,不遮蔽它)
 │   ├── temp-session/             # 侧边栏一键发起不绑定项目的临时会话 + verify
+│   ├── todo-board/               # 跨项目的待办/已办/功能分支清单(JSON 为准 + Markdown 镜像)
 │   └── whale-background/         # 会话区域鲸鱼娘背景图(bundle 补丁)
 ├── assets/                       # 品牌资产(鲸鱼娘 favicon;不归任何补丁,由 deploy.ps1 同步到 ~/.dsh/assets)
 ├── archive/                      # 已退役的脚本 / 资产 / 补丁(只读保留,不再部署)
 ├── scripts/
-│   ├── install.ps1               # 一键安装:建 junction 兜底(含 @local 自引用)+ 4 个 bundle 补丁全部装成 bundle(先剥遗留行) + 退役登记清理 + 部署校验(幂等)
+│   ├── install.ps1               # 一键安装:建 junction 兜底(含 @local 自引用)+ 5 个 bundle 补丁全部装成 bundle(先剥遗留行) + 退役登记清理 + 部署校验(幂等)
 │   ├── deploy.ps1                # 只读校验:同步脚本与资产 + bundle 登记/行属主 + junction + 体检宿主依赖仓库
 │   ├── start-desktop.ps1         # 启动桌面端(已在运行则聚焦窗口)
 │   ├── restart-desktop.ps1       # 重启桌面端(改补丁源码后必须;需 -Force)
@@ -45,6 +46,7 @@ deep-dreaming/
 | [queue-reorder](patches/queue-reorder/) | **排队消息拖拽排序**。官方队列坞（QueueDock）没有任何更改顺序的方式——`QueueAction` 只有 `edit`/`remove`/`steer`。本补丁在官方坞的行上加拖拽，落点经宿主 `/queue-reorder/reorder` 走标准 inbox splice，顺序由 `agent/inbox/spliced` 事件广播。**装饰而非接管**：官方坞照常渲染（编辑/steer/附件/折叠都是官方的），插件注册独立 slot id，官方升级不用跟 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/queue-reorder/README.md) |
 | [temp-session](patches/temp-session/) | 侧边栏底部「临时会话」按钮:一键发起绑定**用户级临时目录**的会话,不关联任何项目 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/temp-session/README.md) |
 | [whale-background](patches/whale-background/) | 会话区域背景:在对话滚动区居中偏右显示鲸鱼娘透明图(13% 透明度),资源缺失时自动跳过而不影响启动 | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/whale-background/README.md) |
+| [todo-board](patches/todo-board/) | **跨项目的待办 / 已办 / 功能分支清单**。`taikoo-saas` 那套 `TODO.md` / `DONE.md` / `功能分支整理.md` 的局限是文件属于一个仓库,换工作区就看不见;本补丁把清单搬到 `$DSH_HOME/todo-board/board.json`(所有工作区共享)再按原格式生成三份 Markdown 镜像。五个入口:7 个模型工具(`todo_list`/`todo_add`/`todo_update`/`todo_complete`/`todo_archive`/`todo_import`/`todo_export`,项目默认取会话工作目录名)、`/workboard` 斜杠命令(新增/列出/完成/删除/导入/导出,不进模型)、左侧边栏导航行「工作清单」(点开占用中列整页)、系统提示词小结、整页右侧的单条详情栏(平台 `MarkdownText` 渲染,与镜像同源;可拖拽调宽并记住宽度) | **bundle**:包内 `cordis.patch.yml` 行 + pnpm link + `dsh.profile.bundles` | [README](patches/todo-board/README.md) |
 
 > **MCP 服务管理已移交社区插件**（2026-11-13）：本仓库的 `mcp-servers` 补丁已退役归档到
 > [`archive/patches/mcp-servers`](archive/patches/mcp-servers/)，由社区插件
@@ -100,6 +102,7 @@ $repo = (Resolve-Path .).Path          # 在仓库根执行;其它位置请指�
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-plugin-session-cleanup" -Target "$repo\patches\session-cleanup"
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-ui-temp-session" -Target "$repo\patches\temp-session"
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-client-whale-background" -Target "$repo\patches\whale-background"
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\@local\dsh-todo-board" -Target "$repo\patches\todo-board"
 
 # 2. 逐个装成 bundle:用桌面端自带 CLI(包声明了 dsh.bundle,CLI 自动登记 dsh.profile.bundles)
 #    装之前先删掉 profile 层同 id 的 - insert: 行,否则两层同 id 会让启动 fail-loud
@@ -108,6 +111,7 @@ $cli = "D:\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
 & $cli plugin --profile desktop add "$repo\patches\temp-session"
 & $cli plugin --profile desktop add "$repo\patches\whale-background"
 & $cli plugin --profile desktop add "$repo\patches\queue-reorder"
+& $cli plugin --profile desktop add "$repo\patches\todo-board"
 # (bundle 层变更由 HMR 热应用;若卡片/路由缺失再重启桌面端)
 
 # 2.5 跨会话记忆:现由 @modusensus/dsh-mneme 承载(dsh-mnemon 已于 2026-11-17 整体卸载)
@@ -133,6 +137,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1
 - **`~/.dsh/profiles/node_modules` 必须是按运行时版本物化的实目录。** 它曾经是 web 时代 npx 缓存留下的 **250 条指向 `%LOCALAPPDATA%\npm-cache\_npx\<hash>\node_modules` 的软链**:一次 `npm cache clean`(或缓存 GC)就能让全部补丁同时 `MODULE_NOT_FOUND`;而且那套包比打包运行时落后一个 minor(schemastery 3.18.2 vs 3.18.4)—— 这正是「卡片在、设置表单没有」的根因,因为 `.volatile()` 在 3.18.2 里不存在(可编辑分区只收 volatile 字段)。2026-10-13 已按运行时版本重物化:临时目录里 `npm i @deepseek-ai/dsh-llm@0.2.0-rc.2 @deepseek-ai/dsh-mcp-client@0.2.0-rc.2`(cordis / schemastery 交给 npm 自己解析,**不要手抄版本号**),旧目录**移出**到 `~/.dsh/store-npx-era-<ts>`(未删除),`@local/*` 链接按快照 `~/.dsh/store-snapshot-<ts>.tsv` 恢复。
   **2026-10-18 又按 `0.2.1-rc.2` 重物化了一次**(`npm i @deepseek-ai/dsh-llm@0.2.1-rc.2 @deepseek-ai/dsh-mcp-client@0.2.1-rc.2 @deepseek-ai/dsh-session-format-catalog@0.2.1-rc.2`,最后一个供测试里的真实 v4 编码器使用),旧树保留在 `~/.dsh/store-npx-era-20261017-190810`。`deploy.ps1` 现在**既**检查任何指向 `npm-cache\_npx` 的 store 条目,**也**比对 store 里 `@deepseek-ai/dsh-llm` 与桌面端版本 —— 不一致即 FAIL(此前只检查"可解析",实测 app 0.2.1 + store 0.2.0 曾被误判为 OK)。
   **2026-10-30 再按 `0.2.1-rc.5` 物化**(桌面端在 2026-10-29 自动更新,而 store 已退回 `dsh-llm` 0.2.0-rc.2 / `cordis` 4.0.4 / `schemastery` 3.18.4,deploy 直接 FAIL):`npm i @deepseek-ai/dsh-llm@0.2.1-rc.5 @deepseek-ai/dsh-mcp-client@0.2.1-rc.5 @deepseek-ai/dsh-session-format-catalog@0.2.1-rc.5`;新树为 `cordis` 4.0.5 / `schemastery` 3.18.5 / `cosmokit` 1.8.6,旧树保留在 `~/.dsh/store-0.2.0-rc.2-20261030-105152`,快照 `~/.dsh/store-snapshot-20261030-105152.tsv`。顺带清掉了归档补丁留下的 `@local/dsh-client-ui-settings-other` 断链。
+  **2026-11-19 按 `0.2.2-rc.5` 物化**(桌面端自动更新,store 还投影着 rc.3,deploy 报 `dsh-llm 0.2.2-rc.3 != 0.2.2-rc.5`):同样三步换树。新树 `@deepseek-ai/cordis` **4.1.0** / `cosmokit` **1.9.0** / `schemastery` **3.19.0**,与 `resources/app.asar/dsh/node_modules/@deepseek-ai/*` 一致;包集合与 rc.3 完全相同,换树后重建 4 个 `@local` junction。旧树保留在 `~/.dsh/store-0.2.2-rc.3-20261119-101007`,快照 `~/.dsh/store-snapshot-20261119-101007.tsv`。详见文末「0.2.2-rc.5 适配补记」。
 
 ## 故障恢复
 
@@ -240,6 +245,9 @@ node patches/queue-reorder/tests/load-smoke.mjs                  # 真实 Cordis
 node patches/queue-reorder/tests/client-contract.mjs             # 浏览器半契约(装饰官方行 + 拖放换算,jsdom)
 node patches/queue-reorder/tests/official-dock-contract.mjs      # 官方 QueueDock 源码契约守卫(无检出时 SKIP)
 node patches/temp-session/verify-temp-session.mjs                # temp-session host + client 契约 + 点击流程
+node patches/todo-board/tests/core.test.mjs                      # 跨项目清单:store / markdown / import 规则
+node patches/todo-board/tests/load-smoke.mjs                     # 真实 Cordis + 真实 JSON Schema 校验 + 围栏
+node patches/todo-board/tests/client-contract.mjs                # 侧栏行 + 中列整页 + 页内详情栏(jsdom + 真 React)
 node patches/whale-background/tests/load-smoke.mjs               # 鲸鱼娘图片路由 + 资源存在性
 ```
 
@@ -412,6 +420,69 @@ ACP stdout)与 LLM(`llm-deepseek-api-key` 跟随官方 `/models` 列表)、
    entry 在 `resolveAccountOptions` 抛 `models is no longer configurable` 而不激活;
    schemastery 会保留未知键)。已再次从
    `~/.dsh/profiles/desktop/cordis.patch.yml` 删除 —— 注意设置页面保存模型时可能把它写回。
+
+### 0.2.2-rc.5 适配补记(2026-11-19)
+
+桌面端自动更新到 **0.2.2-rc.5**(exe `FileVersion` 0.2.2-rc.5,打包运行时自报
+release commit `3f85d88`)。rc.3→rc.5 共 **448** 个变更文件,过滤掉
+`package.json` / notes / tests / docs / snapshots 后**真实源码改动只有 19 个**,
+全部集中在 **web 搜索与抓取链路**:
+
+`packages/bundle/base/cordis.patch.yml`、
+`packages/client/ui-settings-web-search/src/client/{WebSearchCard.tsx,locales.ts}`、
+`packages/experimental/liveshare/src/host/tunnel-worker.ts`、
+`packages/extensions/tool-cordis/src/api-catalog.ts`、
+`packages/llm/llm-deepseek/src/translate.ts`、`packages/llm/llm/src/error.ts`、
+`packages/web/{tool-web,web-search-deepseek,web}/src/*`。
+
+补丁依赖的宿主面**全部零改动**:`packages/host/webserver`、`packages/settings`、
+`packages/client/{modules,ui-slots,ui-workspace,connection,ui-conversation,ui-sidebar,ui-settings-plugins,ui-primitives,ui-session,locale}`、
+`packages/agent`、`packages/session/session`、`packages/session-format`。
+`QueueDock.tsx` / `QueueDock.module.css` rc.3→rc.5 **完全未改**;
+`packages/client/connection/src/rpc-host.ts` 里 `() => owner.webServer.register(route)`
+那处缺陷**也仍未修** —— 自建 fenced 路由方案必须继续保留。
+
+唯一的**行为变更**不影响本仓库:base 组合删掉了 `web` 行的
+`searchProvider: deepseek-search-api`,改由 `dsh-web` 按模型 provider 路由自动选择
+(DeepSeek 路由走旧版 Messages 搜索并按 token 计费,其他路由仍走 Search API)。
+本机 `agent-default-model` 走 `taikoo-cgh` 网关,**不是** DeepSeek 路由,
+因此仍走 DeepSeek Search API,无需迁移。`llm-deepseek/translate.ts` 新增的
+`stop_reason === 'refusal'` → `CONTENT_REFUSED` 处理同样与本仓库无关。
+
+核查动作与结论:
+
+1. **共享依赖仓库按 rc.5 重物化**(部署不变量那条的第三次迭代):
+   `npm i` 三个根包到 `@0.2.2-rc.5`,旧树保留在
+   `~/.dsh/store-0.2.2-rc.3-20261119-101007`。新树 `@deepseek-ai/cordis` **4.1.0**
+   (上一次是 4.0.5)、`cosmokit` **1.9.0**(1.8.6)、`schemastery` **3.19.0**(不变),
+   与 `resources/app.asar/dsh/node_modules/@deepseek-ai/*` 逐字一致。
+   包集合与 rc.3 的完全相同(31 个 `@deepseek-ai` entry、20 个顶层目录),
+   换树后按快照 `~/.dsh/store-snapshot-20261119-101007.tsv` 重建了 4 个 `@local` junction。
+2. **`deploy.ps1` PASS**:`dsh 0.2.2-rc.5`、store 31/31 可解析、
+   `[OK] schemastery 3.19.0`、`[OK] dsh-llm 0.2.2-rc.5`、4 个 bundle 行属主正确、
+   4 个 `patches/<p>/node_modules` junction 正常、无 npm-cache 软链、无退役残留。
+3. **测试矩阵 12/12**(`npm test`,rc.5 检出下重跑一次结论不变):
+   含 session-cleanup 39 项纯逻辑、verify-plugin-meta 24 项、verify-bundle-rows 19 项、
+   三个 load-smoke(跑在真 Cordis 4.1.0 / schemastery 3.19.0 上)、
+   queue-reorder 的 client-contract 与 official-dock-contract。
+4. **运行中宿主探针(端口 59131)全绿**:`/session-cleanup/{getConfig,listArchived}`、
+   `/queue-reorder/reorder`(参数校验应答)、`/temp-session/ensure`、
+   `/whale-background.png` 均 200;带 `Origin: http://evil.example` 的跨站 POST
+   被 fence 挡成 **403**。
+   > 提醒:旧文档里的 `/session-cleanup/probeScope`、`/queue-reorder/ping`
+   > 已不存在,现在会答 `unknown endpoint`;真实端点是 getConfig / setConfig /
+   > resetConfig / listArchived / deleteArchived 与 reorder / ensure。
+5. **客户端图 88 个 entry**,四个 `@local` 行全部在场且 `client.js` 都能下载(200),
+   每行的 `inject` 依赖(connection / locale / ui-conversation / ui-sidebar /
+   ui-workspace / ui-settings-plugins / api-workspace-controller)都能在图中找到声明方。
+   社区插件同时在场:`dsh-mcp-panel` 0.6.31、`billion-context` 0.1.216、
+   `dshmarket` 1.73.20、`@modusensus/dsh-mneme` 0.16.0;`dsh-read-animation` 0.1.2
+   是纯 host 插件,没有 client 半属正常。
+6. **结论:四个补丁无需改代码。** rc.5 的 19 个源码变更没有一个落在补丁的依赖面上。
+
+> 排查手法备注:`GET /plugins/events` 是 SSE 长连接,`Invoke-WebRequest` 永不返回,
+> 必须 `curl.exe -s -N --max-time 6`;在 `app.asar` 里搜字符串用
+> `findstr /C:"..." /M <asar>`(100–500ms),`Select-String` 扫整个 asar 会超时。
 
 ### queue-reorder:拖拽排序以「装饰」形态回归(2026-11-06)
 

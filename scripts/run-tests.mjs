@@ -36,6 +36,9 @@ const CHECKS = [
   { path: 'patches/queue-reorder/tests/client-contract.mjs', label: 'queue-reorder: dock decorator + drag mapping' },
   { path: 'patches/queue-reorder/tests/official-dock-contract.mjs', label: 'queue-reorder: shipped dock DOM contract' },
   { path: 'patches/temp-session/verify-temp-session.mjs', label: 'temp-session: host + button flow' },
+  { path: 'patches/todo-board/tests/core.test.mjs', label: 'todo-board: store + markdown + import rules' },
+  { path: 'patches/todo-board/tests/load-smoke.mjs', label: 'todo-board: real Cordis load + tool schema' },
+  { path: 'patches/todo-board/tests/client-contract.mjs', label: 'todo-board: sidebar row + main page' },
   { path: 'patches/whale-background/tests/load-smoke.mjs', label: 'whale-background: image route' },
 ]
 

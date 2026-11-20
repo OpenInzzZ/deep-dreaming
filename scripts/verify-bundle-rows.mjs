@@ -39,6 +39,7 @@ const BUNDLES = {
     'queue-reorder': ['queue-reorder'],
     'temp-session': ['temp-session'],
     'whale-background': ['whale-background'],
+    'todo-board': ['todo-board'],
 }
 
 let checks = 0

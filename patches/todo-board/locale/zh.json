@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "跨项目清单",
+    "description": "一份所有工作区共享的待办 / 已办 / 功能分支清单：模型通过 todo_* 工具读写，左侧边栏可浏览编辑，并同步生成 TODO.md / DONE.md / 功能分支整理.md 三份 Markdown 镜像。"
+  }
+}
