@@ -6,19 +6,35 @@
  * 但**清单跟着仓库走**——换一个项目就是另一份清单，跨项目的「我到底还有哪些
  * 事没做」无处可查。
  *
- * 所以权威数据搬到一个用户级文件 `$DSH_HOME/todo-board/board.json`：
- * 每条事项带 `project` 字段，工作区只是它的一个标签，不再是它的容器。
+ * 所以权威数据搬到一个用户级数据库 `$DSH_HOME/todo-board/board.db`
+ * （SQLite，`node:sqlite`；见 `lib/sqlite.js`）：每条事项带 `project` 字段，
+ * 工作区只是它的一个标签，不再是它的容器。旧的 `board.json` 是首次启动的迁移
+ * 导入源，之后只在 `workboard_export json:true` 时作为显式导出生成。
  * Markdown 退化成**只读镜像**（`TODO.md` / `DONE.md` / `功能分支整理.md`），
- * 由 `lib/markdown.js` 从 board.json 生成，格式沿用 taikoo-saas 的既有约定，
+ * 由 `lib/markdown.js` 从库里的清单生成，格式沿用 taikoo-saas 的既有约定，
  * 用户仍然可以直接读、直接 diff、直接贴进任何仓库。
  *
- * 这一层只做纯逻辑 + 文件读写，不碰 Cordis：工具、路由、设置页都调用它，
- * 测试也可以脱离宿主运行时直接驱动（见 `tests/store.test.mjs`）。
+ * 这一层只做纯逻辑 + 存储编排，不碰 Cordis：工具、路由、设置页都调用它，
+ * 测试也可以脱离宿主运行时直接驱动（见 `tests/core.test.mjs`）。
  */
+import { existsSync } from 'node:fs'
 import { link, mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import { randomBytes } from 'node:crypto'
+import {
+  BOARD_DB_FILE,
+  backupBoardJson,
+  openDatabase,
+  readMeta,
+  readRows,
+  writeBoardJson,
+  writeMeta,
+  writeRows,
+} from './sqlite.js'
+
+/** 原子写文本的实现已挪到 `fs-utils.js`；这里重新导出，保住调用方的导入路径。 */
+export { writeTextAtomic } from './fs-utils.js'
 
 /** board.json 的结构版本；将来改结构时靠它做迁移。 */
 export const BOARD_VERSION = 1
@@ -97,12 +113,14 @@ export function isoDate(now) {
 }
 
 /**
- * 存储布局：一个 JSON 权威文件 + 三份 Markdown 镜像。
+ * 存储布局：一个 SQLite 权威库 + 三份 Markdown 镜像；`board.json` 只是迁移来源
+ * 与显式导出目标（`workboard_export json:true`）。
  * @param root - 清单根目录（`resolveBoardRoot` 的结果）。
  */
 export function boardPaths(root) {
   return {
     root,
+    db: join(root, BOARD_DB_FILE),
     board: join(root, 'board.json'),
     todo: join(root, 'TODO.md'),
     done: join(root, 'DONE.md'),
@@ -241,18 +259,52 @@ export function createId(kind, taken) {
 /**
  * 读清单。
  *
- * 文件不存在不是错误——第一次用插件时它本来就不存在，返回空清单并标记
- * `created: true`，让上层决定要不要立刻落盘。JSON 语法错误才是真错误：静默
- * 当成空清单会覆盖掉用户手里的全部记录，所以抛 `board-corrupt`。
+ * 库不存在不是错误——第一次用插件时它本来就不存在，返回空清单并标记
+ * `created: true`，让上层决定要不要立刻落盘。首次打开时会尝试把同目录的
+ * `board.json` 迁移进来（迁移后留一份 `.migrated-*.bak`）：JSON 语法错误才是
+ * 真错误，静默当成空清单会覆盖掉用户手里的全部记录，所以抛 `board-corrupt`。
+ *
+ * 读路径也会创建空库与 schema：这样「第一次打开面板」不依赖任何一次写操作，
+ * 也让 `created` 标记的语义与旧的 JSON 文件一致。
  * @param paths - `boardPaths()` 的结果。
  */
 export async function loadBoard(paths) {
+  const existed = existsSync(paths.db)
+  const db = await openDatabase(paths.db)
+  try {
+    await migrateJsonToDatabase(paths, db)
+    const rows = readRows(db)
+    const board = normalizeBoard({
+      version: rows.meta.version,
+      updatedAt: rows.meta.updated_at,
+      seq: rows.seq,
+      items: rows.items,
+    })
+    return !existed && board.items.length === 0 ? { ...board, created: true } : board
+  } finally {
+    db.close()
+  }
+}
+
+/**
+ * 首次打开时把旧的 `board.json` 导入 SQLite。
+ *
+ * `meta.storage === 'sqlite'` 是迁移完成标记：写过一次就不再读 JSON，所以
+ * 迁移后即使 JSON 还留在原地（改名失败的情况）也不会重复导入、不会出现
+ * 「改 JSON 反而生效」的歧义。整个导入只有一个事务（`writeRows`），标记在
+ * 事务之后写；进程在两者之间崩溃时下次重跑即可，最坏重复导入一次。
+ * @param paths - `boardPaths()` 的结果。
+ * @param db - 已打开的库。
+ */
+async function migrateJsonToDatabase(paths, db) {
+  if (readMeta(db, 'storage') !== undefined) return
   let raw
   try {
     raw = await readFile(paths.board, 'utf8')
   } catch (error) {
-    if (error?.code === 'ENOENT') return { ...emptyBoard(), created: true }
-    throw error
+    if (error?.code !== 'ENOENT') throw error
+    writeMeta(db, 'storage', 'sqlite')
+    return
   }
   let parsed
   try {
@@ -262,22 +314,11 @@ export async function loadBoard(paths) {
     failure.code = 'board-corrupt'
     throw failure
   }
-  return normalizeBoard(parsed)
-}
-
-/**
- * 原子写文本：先写同目录临时文件再 rename。
- *
- * 直接 `writeFile` 到目标路径时，进程在写一半被杀会留下半份 JSON，下一次读就
- * 是 `board-corrupt`；rename 在同一卷上是原子的，读者要么看到旧版要么看到新版。
- * @param path - 目标文件。
- * @param text - 完整内容。
- */
-export async function writeTextAtomic(path, text) {
-  await mkdir(dirname(path), { recursive: true })
-  const temporary = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
-  await writeFile(temporary, text, 'utf8')
-  await rename(temporary, path)
+  writeRows(db, normalizeBoard(parsed))
+  writeMeta(db, 'storage', 'sqlite')
+  writeMeta(db, 'json_migrated_at', nowIso())
+  // 备份失败不能阻断迁移：数据已经进库，原件留在原处也只是冗余。
+  await backupBoardJson(paths.board).catch(() => undefined)
 }
 
 /**
@@ -335,8 +376,35 @@ export async function saveBoard(paths, board) {
   const items = board.items
   const seq = assignStableNumbers(items, board.seq)
   const next = { ...board, version: BOARD_VERSION, updatedAt: nowIso(), seq, items }
-  await writeTextAtomic(paths.board, `${JSON.stringify(next, null, 2)}\n`)
+  const db = await openDatabase(paths.db)
+  try {
+    writeRows(db, next)
+    writeMeta(db, 'storage', 'sqlite')
+  } finally {
+    db.close()
+  }
   return next
+}
+
+/**
+ * 导出 `board.json` 快照。
+ *
+ * 这是**显式**动作（`workboard_export json:true`），不是运行时写入路径：权威
+ * 数据仍在 SQLite，导出文件只用于人工排障、备份、以及把清单交给别的工具。
+ * 与镜像不同，它不随每次写操作刷新——否则又回到「每次改一条就重写整份 JSON」。
+ * @param paths - `boardPaths()` 的结果。
+ * @param board - 当前清单。
+ * @returns 导出的文件路径。
+ */
+export async function exportBoardJson(paths, board) {
+  const snapshot = normalizeBoard({
+    version: board.version,
+    updatedAt: board.updatedAt,
+    seq: board.seq,
+    items: board.items,
+  })
+  await writeBoardJson(paths.board, snapshot)
+  return paths.board
 }
 
 /**

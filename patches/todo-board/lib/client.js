@@ -143,6 +143,11 @@ const CSS = [
   '.tb-input{height:28px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:13px;padding:0 8px;min-width:0}',
   '.tb-input:focus{outline:none;border-color:var(--dsw-alias-brand-primary)}',
   '.tb-search{width:180px}',
+  /* 「一键归档」：两段式按钮，第二段（确认态）用错误色，避免误触清空整页。 */
+  '.tb-action{flex:none;height:28px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary);font-family:inherit;font-size:12px;cursor:pointer}',
+  '.tb-action:hover{border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary)}',
+  '.tb-action[data-armed="true"]{border-color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-label-primary-foreground)}',
+  '.tb-action[disabled]{opacity:.5;cursor:default}',
 
   /*
    * 正文区是两栏：左列列表自己滚，右列详情栏固定宽度。详情栏不是平台右侧边栏
@@ -228,6 +233,9 @@ const zh = {
   addKindBranch: '功能分支',
   complete: '标记完成',
   archive: '归档',
+  archiveAll: '一键归档',
+  archiveAllConfirm: '确认归档',
+  archiveAllHint: '把「已办」里所有条目归档（软删除：从列表与镜像消失，仍可在 board.json 中查回）',
   sections: '正文小节',
   error: '读取失败',
   busy: '处理中…',
@@ -262,6 +270,9 @@ const en = {
   addKindBranch: 'Branch',
   complete: 'Complete',
   archive: 'Archive',
+  archiveAll: 'Archive all',
+  archiveAllConfirm: 'Confirm archive',
+  archiveAllHint: 'Archive every DONE item (soft delete: it leaves the list and mirrors, and stays queryable in board.json)',
   sections: 'Body sections',
   error: 'Load failed',
   busy: 'Working…',
@@ -460,6 +471,8 @@ function BoardPage({ t }) {
   // 详情栏正开着的那一条；null 表示详情栏收起。只存 id：正文由 DetailPane
   // 自己去 `/todo-board/detail` 取，清单刷新时不必把正文再搬一遍。
   const [selectedId, setSelectedId] = useState(null);
+  // 「一键归档」的两段式确认态：第一下只亮按钮，第二下才真正落到宿主。
+  const [archiveAllArmed, setArchiveAllArmed] = useState(false);
   // 详情栏宽度：null = 还没拖过，交给 CSS 的 clamp(300px,32%,440px) 随窗口缩放；
   // 拖过之后是固定 px，并记进 localStorage（下次打开还是这个宽度）。
   const [sideWidth, setSideWidth] = useState(() => readSavedDetailWidth());
@@ -482,6 +495,15 @@ function BoardPage({ t }) {
   }, []);
 
   useEffect(() => { void reload() }, [reload]);
+
+  // 一键归档的确认态：切 tab 时收起，5 秒内没再点也收起——这个按钮会清空整个
+  // 「已办」tab，不能让「点过一次」永久留在武装状态。
+  useEffect(() => { setArchiveAllArmed(false) }, [kind]);
+  useEffect(() => {
+    if (archiveAllArmed === false) return undefined;
+    const timer = setTimeout(() => setArchiveAllArmed(false), 5000);
+    return () => clearTimeout(timer);
+  }, [archiveAllArmed]);
 
   const items = view?.items ?? [];
   const filtered = useMemo(() => {
@@ -626,6 +648,29 @@ function BoardPage({ t }) {
         jsx('button', { type: 'button', className: 'tb-tab', 'data-active': String(kind === 'branch'), onClick: () => setKind('branch'), children: t('filterBranch') + ' ' + counts.branch }, 'branch'),
       ] }, 'tabs'),
       jsx('span', { className: 'tb-grow' }, 'grow'),
+      // 一键归档只出现在「已办」tab：其他两个清单有条目级动作，不需要批量清空。
+      // 两段式：第一下进入确认态，第二下才调用宿主；归档是软删除，可在
+      // board.json / `workboard_list includeArchived: true` 里查回。
+      kind === 'done' && counts.done > 0
+        ? jsx('button', {
+            type: 'button',
+            className: 'tb-action',
+            'data-action': 'archive-all',
+            'data-armed': String(archiveAllArmed === true),
+            title: t('archiveAllHint'),
+            disabled: busy ? true : undefined,
+            onClick: () => {
+              if (archiveAllArmed === false) { setArchiveAllArmed(true); return }
+              void act(async () => {
+                await call('archiveAll', { kind: 'done' })
+                setArchiveAllArmed(false)
+              })
+            },
+            children: archiveAllArmed === true
+              ? t('archiveAllConfirm') + ' ' + String(counts.done)
+              : t('archiveAll') + ' ' + String(counts.done),
+          }, 'archive-all')
+        : null,
       jsx('input', {
         className: 'tb-input tb-search', type: 'search', value: query, placeholder: t('search'),
         'aria-label': t('search'), onChange: (event) => setQuery(event.target.value),

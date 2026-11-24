@@ -211,7 +211,7 @@ export function renderTodoDoc(board) {
  */
 export function renderDoneDoc(board) {
   const items = board.items
-    .filter((item) => item.kind === 'done')
+    .filter((item) => item.kind === 'done' && item.archived !== true)
     .sort((left, right) => (right.date.localeCompare(left.date)) || (right.number - left.number))
   const lines = [
     '# DONE 清单',
@@ -311,7 +311,7 @@ export function mirrorPaths(paths) {
  */
 export function renderSummary(board) {
   const open = board.items.filter((item) => item.kind === 'todo' && item.archived !== true)
-  const done = board.items.filter((item) => item.kind === 'done')
+  const done = board.items.filter((item) => item.kind === 'done' && item.archived !== true)
   const branches = board.items.filter((item) => item.kind === 'branch' && item.archived !== true)
   const lines = [`待办 ${open.length} 条 · 已办 ${done.length} 条 · 功能分支 ${branches.length} 条`]
   if (open.length > 0) {

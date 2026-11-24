@@ -334,7 +334,7 @@ export function createTools(access, hooks = {}) {
         type: 'object',
         properties: {
           id: { type: 'string' },
-          hard: { type: 'boolean', description: 'true = remove from board.json permanently; default false = archive' },
+          hard: { type: 'boolean', description: 'true = remove from the board database permanently; default false = archive' },
         },
         required: ['id'],
       },
@@ -406,12 +406,14 @@ export function createTools(access, hooks = {}) {
     {
       name: 'workboard_export',
       description:
-        'Regenerate the three Markdown mirrors (TODO.md / DONE.md / 功能分支整理.md) from board.json, or just report where they are. ' +
-        'Writes are already mirrored automatically on every change; call this after editing board.json by hand or after deleting a mirror file.',
+        'Regenerate the three Markdown mirrors (TODO.md / DONE.md / 功能分支整理.md) from the SQLite board, ' +
+        'and/or export a board.json snapshot next to the database (backup, manual inspection, or handing the list to another tool). ' +
+        'Writes are already mirrored automatically on every change; the JSON snapshot is explicit-only and is not the live store.',
       parameters: {
         type: 'object',
         properties: {
           write: { type: 'boolean', description: 'true = rewrite the mirrors now; default false = only report paths' },
+          json: { type: 'boolean', description: 'true = also export board.json (explicit snapshot of the SQLite board)' },
         },
       },
       output: {
@@ -419,7 +421,8 @@ export function createTools(access, hooks = {}) {
           type: 'object',
           properties: {
             root: { type: 'string' },
-            board: { type: 'string' },
+            db: { type: 'string' },
+            json: { type: 'string' },
             files: { type: 'array', items: { type: 'string' } },
             counts: {
               type: 'object',
@@ -432,16 +435,18 @@ export function createTools(access, hooks = {}) {
           },
         },
         render: (_args, value) => text(
-          `Board: ${value?.board}\nMirrors${_args?.write === true ? ' (rewritten)' : ''}:\n` +
+          `Board DB: ${value?.db}\nJSON snapshot: ${value?.json}\nMirrors${_args?.write === true ? ' (rewritten)' : ''}:\n` +
           (Array.isArray(value?.files) ? value.files.map((file) => `- ${file}`).join('\n') : ''),
         ),
       },
       async execute(args) {
+        if (args?.json === true) await access.exportJson()
         if (args?.write === true) await access.refreshMirrors()
         const view = await access.view()
         return {
           root: view.paths.root,
-          board: view.paths.board,
+          db: view.paths.db,
+          json: view.paths.board,
           files: [view.paths.todo, view.paths.done, view.paths.branch],
           counts: view.summary.counts,
         }

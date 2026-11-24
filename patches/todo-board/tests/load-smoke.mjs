@@ -178,12 +178,15 @@ function harness(options = {}) {
  * 这里照抄它的 guarded 包装：把导出的 `inject` 原样带上，让 Cordis 真正等到依赖
  * 就绪再调 `apply`。
  * @param ctx - Cordis 上下文。
+ * @param config - 可选入口配置（不传走插件默认值）。
  */
-async function mount(ctx) {
+async function mount(ctx, config) {
   const guarded = {
     name: host.name,
     inject: host.inject,
-    apply(inner) { return host.apply(inner) },
+    // 默认指向临时目录：测试绝不能因为某条用例忘了传 config 就去碰真实的
+    // ~/.dsh/todo-board —— 迁移会建库并把 board.json 改名，这种副作用不可逆。
+    apply(inner) { return host.apply(inner, { rootDir: join(root, 'default'), ...(config ?? {}) }) },
   }
   const fiber = ctx.plugin(guarded)
   await fiber
@@ -539,12 +542,43 @@ try {
 
   await test('probe 端点回配置与路径', async () => {
     const { ctx, routes } = harness()
-    const fiber = await mount(ctx)
+    const probeRoot = join(root, 'probe-board')
+    const fiber = await mount(ctx, { rootDir: probeRoot })
     try {
       const result = await callRoute(routes[0], { url: '/todo-board/probe', headers: HOME_HEADERS, body: '{}' })
       assert.equal(result.status, 200)
-      assert.ok(result.body.value.paths.root.endsWith('todo-board'))
+      assert.equal(result.body.value.paths.root, probeRoot)
+      assert.equal(result.body.value.paths.db, join(probeRoot, 'board.db'))
       assert.equal(typeof result.body.value.config, 'object')
+    } finally {
+      await fiber.dispose()
+    }
+  })
+
+  await test('archiveAll 端点批量归档「已办」', async () => {
+    const { ctx, routes } = harness()
+    const fiber = await mount(ctx, { rootDir: join(root, 'archive-all') })
+    try {
+      const add = (title) => callRoute(routes[0], {
+        url: '/todo-board/add',
+        headers: HOME_HEADERS,
+        body: JSON.stringify({ args: { kind: 'done', title, project: 'p' } }),
+      })
+      await add('已办一')
+      await add('已办二')
+      const before = await callRoute(routes[0], { url: '/todo-board/view', headers: HOME_HEADERS, body: '{}' })
+      assert.equal(before.body.value.summary.counts.done, 2)
+
+      const archived = await callRoute(routes[0], {
+        url: '/todo-board/archiveAll',
+        headers: HOME_HEADERS,
+        body: JSON.stringify({ args: { kind: 'done' } }),
+      })
+      assert.equal(archived.status, 200)
+      assert.deepEqual(archived.body.value, { kind: 'done', archived: 2 })
+
+      const after = await callRoute(routes[0], { url: '/todo-board/view', headers: HOME_HEADERS, body: '{}' })
+      assert.equal(after.body.value.summary.counts.done, 0, 'archived DONE items must leave the visible list')
     } finally {
       await fiber.dispose()
     }

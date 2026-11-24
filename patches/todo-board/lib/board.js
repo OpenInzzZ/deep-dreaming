@@ -4,8 +4,8 @@
  *
  * 所有写动作都走 `withBoardLock`：不同工作区的会话可能**同时**调用工具，而
  * 一次调用是 read→modify→write 三步；不加锁时后写的会把先写的新增整条覆盖掉。
- * 写成功之后顺手重写三份 Markdown 镜像——镜像永远与 JSON 同一次提交，不存在
- * "JSON 改了、文档还是旧的"的窗口。
+ * 写成功之后顺手重写三份 Markdown 镜像——镜像永远与库里的清单同一次提交，
+ * 不存在"库改了、文档还是旧的"的窗口。
  */
 import { readFile } from 'node:fs/promises'
 import {
@@ -15,6 +15,7 @@ import {
   compactNumbers,
   completeItem,
   createItem,
+  exportBoardJson,
   filterItems,
   loadBoard,
   mergeItem,
@@ -97,6 +98,11 @@ export function createBoardAccess(config) {
       const outcome = await archiveItem(access, id)
       return outcome.result
     },
+    /** 一键归档：某一类清单里的全部未归档条目。 */
+    async archiveAll(kind) {
+      const outcome = await archiveAllItems(access, kind)
+      return outcome.result
+    },
     /** 硬删除。 */
     async remove(id) {
       const outcome = await deleteItem(access, id)
@@ -106,6 +112,11 @@ export function createBoardAccess(config) {
     importFile: (options) => importFile(access, options),
     /** 只重写镜像。 */
     refreshMirrors: () => refreshMirrors(access),
+    /** 导出 board.json 快照（显式动作：备份 / 人工排障 / 交给别的工具）。 */
+    async exportJson() {
+      const board = normalizeBoard(await access.read())
+      return exportBoardJson(paths, board)
+    },
     /** 单条详情（右侧边栏的详情页用）。 */
     detail: (id) => itemDetail(access, id),
     /** 面板/提示词用的整体视图。 */
@@ -118,7 +129,7 @@ export function createBoardAccess(config) {
  * 重写三份 Markdown 镜像。
  *
  * 单独成函数是因为「只重写镜像、不动 JSON」也是一个合法动作（用户删了某个
- * .md 想让它长回来）。镜像写失败不能回滚 JSON：JSON 才是权威数据，镜像只是
+ * .md 想让它长回来）。镜像写失败不能回滚库：库才是权威数据，镜像只是
  * 视图；把错误抛给调用方让它显示在结果里即可。
  * @param paths - `boardPaths()` 的结果。
  * @param board - 清单。
@@ -241,6 +252,32 @@ export async function archiveItem(access, id) {
 }
 
 /**
+ * 一键归档：把某一类清单里所有未归档条目一次性归档（软删除）。
+ *
+ * 与 `archiveItem` 同一语义（留在 `board.json`、从列表/tab 计数/镜像里消失），
+ * 区别只在批量：一次锁内读改写、一次落盘、一次重写镜像，而不是逐条点 N 次。
+ * 空集时不写盘（`changed: false`），避免无意义的文件改动与镜像重写。
+ * @param access - 访问器。
+ * @param kind - 清单种类：`todo` / `done` / `branch`。
+ */
+export async function archiveAllItems(access, kind) {
+  if (!KINDS.includes(kind)) {
+    throw badRequest('unknown-kind', `未知清单种类：${String(kind)}`, { kind, kinds: KINDS })
+  }
+  return access.write((board) => {
+    const stamp = nowIso()
+    let archived = 0
+    const items = board.items.map((item) => {
+      if (item.kind !== kind || item.archived === true) return item
+      archived += 1
+      return { ...item, archived: true, updatedAt: stamp }
+    })
+    if (archived === 0) return { changed: false, board, result: { kind, archived: 0 } }
+    return { changed: true, board: { ...board, items }, result: { kind, archived } }
+  })
+}
+
+/**
  * 硬删除一条事项：真的从 board.json 里抹掉。
  *
  * 与 `archiveItem` 分开是有意的：归档是日常工作（完成、清理视图），删除是
@@ -274,10 +311,10 @@ export async function listItems(access, options = {}) {
 }
 
 /**
- * 只重写镜像（JSON 不动）。
+ * 只重写镜像（库不动）。
  *
- * 走 `write` 的锁是必要的：镜像由 board.json 渲染，如果此刻另一路正在写 JSON，
- * 不加锁就可能把旧内容盖在新镜像上。`changed:false` 让 `write` 跳过 JSON 落盘，
+ * 走 `write` 的锁是必要的：镜像由库里的清单渲染，如果此刻另一路正在写库，
+ * 不加锁就可能把旧内容盖在新镜像上。`changed:false` 让 `write` 跳过落库，
  * 这里再单独写三份 Markdown。
  * @param access - 访问器。
  */

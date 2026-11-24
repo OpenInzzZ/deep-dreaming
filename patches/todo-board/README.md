@@ -3,7 +3,8 @@
 把「待办事项」从**单个仓库的文件**变成**跨项目共享的一份清单**：
 
 ```
-~/.dsh/todo-board/board.json        ← 唯一真相（所有工作区共享）
+~/.dsh/todo-board/board.db          ← 唯一真相（SQLite，所有工作区共享）
+~/.dsh/todo-board/board.json        ← 迁移来源 / 显式导出快照（不参与运行时写入）
 ~/.dsh/todo-board/TODO.md           ← 生成物：待办镜像
 ~/.dsh/todo-board/DONE.md           ← 生成物：已办镜像
 ~/.dsh/todo-board/功能分支整理.md    ← 生成物：功能分支镜像
@@ -17,9 +18,10 @@ Git、`grep` 全都还能用，镜像就是普通 Markdown 文件）。
 
 - 插件类型：**bundle**（包名 `@local/dsh-todo-board`），loader 行由包内
   `cordis.patch.yml` 自带。
-- **JSON 为准，Markdown 是镜像**。每次写动作都会重写三份镜像；手改镜像**不会**
-  回写 JSON（镜像里没有 id，人工编辑无法可靠归属）。要从已有 Markdown 迁进来，
-  用 `workboard_import`（按 `kind + project + title` 幂等）。
+- **SQLite 为准，Markdown 是镜像**。每次写动作都会重写三份镜像；`board.json`
+  只在首次启动时作为迁移导入源，之后由 `workboard_export json:true` 显式导出。
+  手改镜像**不会**回写库（镜像里没有 id，人工编辑无法可靠归属）。要从已有
+  Markdown 迁进来，用 `workboard_import`（按 `kind + project + title` 幂等）。
 - 三个入口共用同一份数据：模型工具（主入口）、左侧边栏面板、系统提示词小结。
 
 ## 五个入口
@@ -36,7 +38,7 @@ Git、`grep` 全都还能用，镜像就是普通 Markdown 文件）。
 | `workboard_complete` | 把待办转成已办（原条归档并留住溯源） |
 | `workboard_archive` | 归档；`hard: true` 则物理删除 |
 | `workboard_import` | 从既有 Markdown 导入（`dryRun` 可先看） |
-| `workboard_export` | 返回路径与计数；`write: true` 重写三份镜像 |
+| `workboard_export` | 返回路径与计数；`write: true` 重写镜像，`json: true` 导出 `board.json` 快照 |
 
 `project` 不传时取 `exec.agent.session.header.cwd` 的 basename，所以「在哪个工作区
 调用就落哪个项目」，模型不必先问一句"这是哪个项目"。显式传 `project` 仍然覆盖。
@@ -54,7 +56,7 @@ Git、`grep` 全都还能用，镜像就是普通 Markdown 文件）。
 | `/workboard` | 列出未完成的待办（含已办 / 功能分支的条数） |
 | `/workboard <标题>` | 新增一条待办；`project` 默认取当前工作区目录名 |
 | `/workboard done <id\|#序号>` | 标记已办（原条归档并留住溯源） |
-| `/workboard del <id\|#序号>` | 硬删除（真的从 `board.json` 里抹掉） |
+| `/workboard del <id\|#序号>` | 硬删除（真的从库里抹掉） |
 | `/workboard import <路径> [kind]` | 从 Markdown 导入；`kind` 省略时按文件名认 `TODO.md` / `DONE.md` / `功能分支整理.md` |
 | `/workboard export` | 重写三份 Markdown 镜像 |
 | `/workboard renumber` | 预览编号整理（把空洞压掉；不写盘） |
@@ -87,6 +89,10 @@ Git、`grep` 全都还能用，镜像就是普通 Markdown 文件）。
 - 每条按 tab 内的 `#N` 编号（与 Markdown 镜像里的编号同源），一次平铺、不按项目分组，
   项目只作为来源标签留在行内元信息里
 - 行内勾选完成、归档
+- 「已办」tab 顶部有**一键归档**：两段式按钮（第一下进入确认态，5 秒内再点一次才执行），
+  一次把该 tab 所有条目软删除（`archived: true`）。条目仍留在 `board.db` 里，可用
+  `workboard_list includeArchived: true` 查回，**不是物理删除**；切 tab 或 5 秒无操作
+  自动退出确认态，避免误触清空整页
 - 点**整行任意位置**（标题、元信息、序号都行）在整页右侧的详情栏打开这条事项的渲染版详情（见下）
 - 底部可新增；行上有未办事项时，侧栏 glyph 右上角带一颗点
 
@@ -226,19 +232,31 @@ dataId: yyy, key: zzz
 - 工具注册对重名**逐个兜住**并跳过（`tools.register` 对重复名字是抛错而不是覆盖），
   不让重复注册把整个 `apply` 回滚掉。
 
-## 存储细节
+## 存储细节（SQLite）
 
-- 写入走 `writeTextAtomic`（同目录临时文件 + rename）。读改写有两层锁：
-  1. 进程内 `withBoardLock` 按 root 串行化；
-  2. 跨进程 `board.lock` 文件锁（`link` 原子创建，15 秒租约，最多等 10 秒；
-     抢不到抛 `board-busy`，不会静默覆盖）。所以多个宿主进程共用同一个
-     user-level `board.json` 时，并发 `add` 也不会丢更新，编号也不会重复。
+- 权威库是 `board.db`（`node:sqlite`，Node 22.5+ 内置，零第三方依赖；宿主是
+  Electron 44 / Node 24，已实测可用）。表结构见 `lib/sqlite.js`：`items` 一条一行
+  （`kind` / `archived` / `number` / `project` 建索引）、`seq` 存每个 kind 的编号
+  水位、`meta` 存结构版本与迁移标记；`sections` / `tags` / `flags` 是 JSON 文本列
+  （用途是整条渲染，不是按节查询）。
+- **写入是事务内的行级写入**（`BEGIN IMMEDIATE` … `COMMIT`），不再整份文件重写。
+  WAL + `busy_timeout = 10s`：读不阻塞写，另一个进程正在写时最多等 10 秒再报错。
+- 读改写仍有两层锁：进程内 `withBoardLock` 按 root 串行化「读 → 改 → 写」，
+  跨进程 `board.lock` 文件锁（`link` 原子创建，15 秒租约；抢不到抛 `board-busy`）。
+  SQLite 事务保证单次落盘原子，锁文件保证跨进程的读改写序列。
+- **首次启动自动迁移**：`board.db` 不存在且同目录有 `board.json` 时，在
+  `loadBoard` 里一次性导入（`normalizeBoard` → `writeRows`），再把原文件改名为
+  `board.json.migrated-<时间>.bak`。`meta.storage` 是迁移完成标记，之后不再读 JSON；
+  JSON 语法错误会抛 `board-corrupt`，**不会**静默清空、也不会建空库顶掉数据。
+- **JSON 导出是显式动作**：`workboard_export json:true`（或端点 `/todo-board/export`
+  的 `args.json`）把当前清单写一份 `board.json` 快照，用于备份、人工排障、交给别的
+  工具。它不随每次写刷新——否则又回到「改一条就重写整份 JSON」。
 - **编号是创建时分配的稳定编号**：`number` 在新增/完成时按每个 kind 的历史水位
   `seq + 1` 分配，落盘时 `assignStableNumbers` 只给缺失/重复的编号补号，**不按
   位置重排**。所以删除或完成中间一条后，后面的编号保持原样（允许出现 `#1 / #3`
   空洞），你引用过的 `#N` 不会突然指向另一条。
 - **编号不复用**：`seq` 是历史水位，硬删除一条后水位不下降；下一条新增拿到
-  `seq + 1`，不会复用被删掉的号。JSON 的 `seq`、三份镜像的标题编号与面板里的
+  `seq + 1`，不会复用被删掉的号。库里的 `seq`、三份镜像的标题编号与面板里的
   `#N` 读的是同一组数字。
 - **排序按稳定编号**：`sortItems` 的键是 `kind → number`。因为编号带空洞，列表
   可能出现 `#1 / #3 / #7`，这是正常的；项目名只作为来源标签留在行内元信息里。
@@ -250,7 +268,6 @@ dataId: yyy, key: zzz
   刚给的 `#N` 下一轮指向另一条的原因。整理后旧引用失效，以新编号为准。
 - ID 是 `tb_<kind>_<时间戳36><随机 hex>`，带 `taken` 去重；跨进程即使同一毫秒，
   24 位随机后缀也让碰撞概率可以忽略。
-- `board.json` 语法错误会抛 `board-corrupt`，**不会**静默清空。
 - `isoDate()` 用**本地**日期，不是 `toISOString()`（东八区会差一天）。
 
 ## 安装与部署
@@ -278,18 +295,21 @@ patches/todo-board/node_modules → ~/.dsh/profiles/node_modules
 ## 测试
 
 ```powershell
-node patches/todo-board/tests/core.test.mjs         # 50 项：store / markdown / import / 详情 / 稳定编号 / 手动整理 / /workboard 命令
-node patches/todo-board/tests/load-smoke.mjs        # 30 项：真实 Cordis + 真实 schema 校验 + 命令座位
-node patches/todo-board/tests/client-contract.mjs   # 31 项：侧栏导航行 + 中列整页 + 页内详情栏（整行点击、拖拽宽度）
+node patches/todo-board/tests/core.test.mjs         # 53 项：store / markdown / import / 详情 / 稳定编号 / 手动整理 / SQLite 迁移 / /workboard 命令
+node patches/todo-board/tests/load-smoke.mjs        # 31 项：真实 Cordis + 真实 schema 校验 + 命令座位 + archiveAll 端点
+node patches/todo-board/tests/client-contract.mjs   # 32 项：侧栏导航行 + 中列整页 + 页内详情栏（整行点击、拖拽宽度、一键归档）
 ```
 
 三个脚本各自覆盖一个**静默失败面**：
 
 - `core.test.mjs` —— 纯逻辑：稳定编号（删除/完成后不回填、`seq` 水位不复用、
   跨项目按 `number` 排序）、手动整理（预览不写、confirm 压缩、旧引用失效提示）、
-  `archived` 不复活、本地日期、
-  三种文档的解析与渲染往返、`renderItemDoc` 的三种标题形态（详情页与镜像必须同源，
-  否则「界面一套、文件一套」），以及 `/workboard` 六种调用形态（新增 / 列出 / done / del /
+  `archived` 不复活、本地日期、**旧 board.json 自动迁移进 board.db**（原文件改名
+  备份、二次加载不重复导入、坏 JSON 报 `board-corrupt`）、SQLite 往返保留
+  `archived` / `fromId` / `sections`、三种文档的解析与渲染往返、`renderItemDoc`
+  的三种标题形态（详情页与镜像必须同源，
+  否则「界面一套、文件一套」），`archiveAll` 批量归档（软删除、镜像同步清空、不碰
+  其他清单、空集不写盘）；以及 `/workboard` 六种调用形态（新增 / 列出 / done / del /
   import / export）与 `resolveRef` 对 `#序号`、裸数字、完整 id 的解析。
 - `load-smoke.mjs` —— 真实 `@deepseek-ai/cordis` 的 `ctx.plugin()` 装载流程、
   真实的 `assertSupportedJsonSchema` / `validateJsonSchemaValue`，以及一个会真的
@@ -304,7 +324,9 @@ node patches/todo-board/tests/client-contract.mjs   # 31 项：侧栏导航行 +
   `['slots','locale']`、动态 `ctx.inject` 一次都不调）、zh/en 字典键集一致，以及**真渲染**
   （侧栏 glyph 的未办点、整页的计数与三个 tab、`#N` 序号、不再按项目分组、功能分支标记写成
   「无Nacos」而不是「无NACOS」、空态、错误信封变成 `role="alert"`、`POST /todo-board/view`
-  的 `{ args }` 请求体、点整行任意位置（标题 / 元信息 / 序号）都能在整页右侧开详情栏、
+  的 `{ args }` 请求体、已办 tab 的一键归档两段式确认（第一下不发请求、第二下才
+  `POST /todo-board/archiveAll` 且 `args.kind === 'done'`）、点整行任意位置（标题 / 元信息 /
+  序号）都能在整页右侧开详情栏、
   行内的完成 / 归档按钮不会冒泡成"打开详情"、拖选文本后的 click 被忽略、
   从 `/todo-board/detail` 取这一条的 Markdown 交给渲染器、换一条会重读、关闭按钮收起详情栏、
   拖拽手柄改宽度并写进 `localStorage`、双击复位、失败信息留在详情栏里、整页刷新后侧栏的点
@@ -314,7 +336,7 @@ node patches/todo-board/tests/client-contract.mjs   # 31 项：侧栏导航行 +
 
 ## 已知边界
 
-- **手改镜像不回写**。JSON 是唯一真相；要从 Markdown 迁进来请用 `workboard_import`。
+- **手改镜像不回写**。SQLite 是唯一真相；要从 Markdown 迁进来请用 `workboard_import`。
 - **镜像不是逐字节兼容原文件**。格式、小节、标题后缀、目录结构都对齐，但多项目
   时会插入项目分组与 `<!-- 项目：X -->` 注释（源文档只有单项目）。
 - **`workboard_complete` 是「新建 + 归档」**，不是原地改 `kind`：已办清单的溯源字段

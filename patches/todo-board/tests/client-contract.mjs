@@ -461,6 +461,47 @@ if (!canRender) {
     }
   })
 
+  // 3c-c. 「已办」tab 的一键归档：两段式确认，第二下才真的打宿主。
+  await checkAsync('the DONE tab offers a two-step archive-all that posts to the host', async () => {
+    const fetchStub = installFetch(VIEW)
+    const view = mount(page, { t })
+    const button = () => view.container.querySelector('[data-action="archive-all"]')
+    try {
+      await waitFor(() => view.container.querySelectorAll('.tb-tab').length === 3, 'the tabs')
+      const doneTab = [...view.container.querySelectorAll('.tb-tab')]
+        .find((node) => node.textContent.startsWith('filterDone'))
+      assert.ok(doneTab !== undefined, 'the done tab is missing')
+      doneTab.click()
+      await waitFor(() => button() !== null, 'the archive-all button')
+
+      assert.equal(button().getAttribute('data-armed'), 'false', 'the button must start unarmed')
+      assert.equal(button().textContent, 'archiveAll 1', 'the label carries the DONE count')
+
+      // 第一下：只进入确认态，不发请求——这个按钮会清空整个 tab，不能一键误触。
+      button().click()
+      await waitFor(() => button()?.getAttribute('data-armed') === 'true', 'the armed state')
+      assert.equal(button().textContent, 'archiveAllConfirm 1')
+      assert.equal(
+        fetchStub.calls.some((row) => String(row.url).includes('/archiveAll')),
+        false,
+        'the first click must not archive anything',
+      )
+
+      // 第二下：POST /todo-board/archiveAll，参数带上 kind。
+      button().click()
+      await waitFor(
+        () => fetchStub.calls.some((row) => String(row.url).endsWith('/todo-board/archiveAll')),
+        'the archiveAll call',
+      )
+      const archiveCall = fetchStub.calls.find((row) => String(row.url).endsWith('/todo-board/archiveAll'))
+      assert.equal(archiveCall.init.method, 'POST')
+      assert.deepEqual(JSON.parse(archiveCall.init.body), { args: { kind: 'done' } })
+    } finally {
+      view.unmount()
+      fetchStub.restore()
+    }
+  })
+
   // 3d. 空清单：渲染空态而不是崩溃。
   await checkAsync('empty board renders the empty state', async () => {
     const fetchStub = installFetch({ items: [], summary: { counts: { todo: 0, done: 0, branch: 0 } } })

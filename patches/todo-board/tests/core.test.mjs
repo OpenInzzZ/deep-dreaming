@@ -7,7 +7,8 @@
  *   2. 导入的解析规则（三种标题形态、`**小节**` 切块、幂等跳过）。
  *   3. 并发写不丢更新（`withBoardLock` 的存在理由）。
  */
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -369,11 +370,14 @@ await test('add / list / update / complete / archive / delete 全链路', async 
     const left = await access.list({ includeArchived: true })
     assert.equal(left.matched, 1)
 
-    // 镜像与 JSON 同时存在
+    // 镜像由库里的清单渲染；board.json 只在显式导出时出现。
     const todoText = await readFile(paths.todo, 'utf8')
     assert.match(todoText, /^# TODO 清单\n/)
-    const board = JSON.parse(await readFile(paths.board, 'utf8'))
-    assert.equal(board.version, 1)
+    assert.equal(existsSync(paths.board), false, 'the live store is board.db, not board.json')
+    await access.exportJson()
+    const exported = JSON.parse(await readFile(paths.board, 'utf8'))
+    assert.equal(exported.version, 1)
+    assert.equal(exported.items.length, 1)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -497,7 +501,7 @@ await test('跨进程并发 add 也不丢更新、编号不重复', async () => 
   }
 })
 
-await test('refreshMirrors 在 JSON 缺失时也要建出镜像', async () => {
+await test('refreshMirrors 在库为空时也要建出镜像', async () => {
   const { root, paths } = await scratch()
   try {
     const access = createBoardAccess({ rootDir: root })
@@ -508,12 +512,64 @@ await test('refreshMirrors 在 JSON 缺失时也要建出镜像', async () => {
   }
 })
 
-await test('坏 JSON 报 board-corrupt 而不是静默清空', async () => {
+await test('坏 board.json 在迁移时报 board-corrupt 而不是静默清空', async () => {
   const { root, paths } = await scratch()
   try {
     await writeFile(paths.board, '{ not json', 'utf8')
     const access = createBoardAccess({ rootDir: root })
     await assert.rejects(() => access.list({}), (error) => error.code === 'board-corrupt')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+await test('旧 board.json 首次加载自动迁移进 board.db 并留备份', async () => {
+  const { root, paths } = await scratch()
+  try {
+    // 造一份旧格式 JSON（与迁移前插件写出的结构一致）。
+    await writeFile(paths.board, JSON.stringify({
+      version: 1,
+      updatedAt: '2026-11-19T00:00:00.000Z',
+      seq: { todo: 2, done: 0, branch: 0 },
+      items: [
+        { id: 'tb_t_old1', kind: 'todo', number: 1, project: 'p', title: '旧待办一', status: 'TODO', date: '2026-11-19', sections: { 背景: '旧数据' }, tags: [], createdAt: '2026-11-19T00:00:00.000Z', updatedAt: '2026-11-19T00:00:00.000Z' },
+        { id: 'tb_t_old2', kind: 'todo', number: 2, project: 'p', title: '旧待办二', status: 'TODO', date: '2026-11-19', sections: {}, tags: [], createdAt: '2026-11-19T00:00:00.000Z', updatedAt: '2026-11-19T00:00:00.000Z' },
+      ],
+    }), 'utf8')
+
+    const access = createBoardAccess({ rootDir: root })
+    const listed = await access.list({})
+    assert.equal(listed.matched, 2)
+    assert.equal(listed.items[0].title, '旧待办一')
+    assert.ok(existsSync(paths.db), 'board.db must be created by the migration')
+    assert.equal(existsSync(paths.board), false, 'the migrated JSON must be renamed to a .bak')
+    const backups = (await readdir(root)).filter((name) => name.startsWith('board.json.migrated-') && name.endsWith('.bak'))
+    assert.equal(backups.length, 1, 'exactly one migration backup')
+
+    // 再读一次不重复导入、编号不变。
+    const again = await createBoardAccess({ rootDir: root }).list({})
+    assert.equal(again.matched, 2)
+    assert.deepEqual(again.items.map((item) => item.number), [1, 2])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+await test('SQLite 往返保留 archived / fromId / sections', async () => {
+  const { root } = await scratch()
+  try {
+    const access = createBoardAccess({ rootDir: root })
+    const added = await access.add({ title: '待办甲', project: 'p', sections: { 背景: '起因' } })
+    await access.complete(added.item.id, { sections: { 实现: '做了' } })
+    // 换一个访问器（相当于关库重开），确认字段真的落进了表而不是内存。
+    const board = await createBoardAccess({ rootDir: root }).read()
+    const done = board.items.find((item) => item.kind === 'done')
+    assert.ok(done !== undefined)
+    assert.equal(done.fromId, added.item.id)
+    assert.equal(done.sections['实现'], '做了')
+    const source = board.items.find((item) => item.id === added.item.id)
+    assert.equal(source.archived, true)
+    assert.equal(source.sections['背景'], '起因')
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -874,6 +930,44 @@ await test('/workboard help 与写错的子命令都给出用法', async () => {
     const missing = await executeTodoCommand(access, invocationOf('done'))
     assert.equal(missing.kind, 'error')
     assert.match(missing.text, /缺少要标记已办的事项/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+await test('archiveAll 一键归档「已办」：全部软删除、镜像同步、不动其他清单', async () => {
+  const { root, paths } = await scratch()
+  try {
+    const access = createBoardAccess({ rootDir: root })
+    await access.add({ kind: 'done', title: '已办一', project: 'p1', date: '2026-11-20' })
+    await access.add({ kind: 'done', title: '已办二', project: 'p2', date: '2026-11-21' })
+    await access.add({ kind: 'todo', title: '待办一', project: 'p1' })
+    await access.add({ kind: 'branch', title: '分支一', project: 'p1', module: 'm' })
+
+    const first = await access.archiveAll('done')
+    assert.deepEqual(first, { kind: 'done', archived: 2 })
+
+    // 软删除：条目仍在 board.json 里，只是标了 archived；其他清单不受影响。
+    const board = await access.read()
+    const done = board.items.filter((item) => item.kind === 'done')
+    assert.equal(done.length, 2, '归档是软删除，不能把条目从库里抹掉')
+    for (const item of done) assert.equal(item.archived, true)
+    assert.equal(board.items.filter((item) => item.kind === 'todo' && item.archived !== true).length, 1)
+    assert.equal(board.items.filter((item) => item.kind === 'branch' && item.archived !== true).length, 1)
+
+    // 计数与镜像同步：已办 0，DONE.md 回到空态。
+    const view = await access.view()
+    assert.equal(view.summary.counts.done, 0)
+    assert.ok((await readFile(paths.done, 'utf8')).includes('暂无已完成事项'))
+    // 系统提示词里的摘要也按「未归档」计，不能把刚归档的已办算进去。
+    assert.match(view.prompt, /已办 0 条/)
+
+    // 再点一次：没有可归档的，不写盘（changed=false）。
+    const again = await access.archiveAll('done')
+    assert.deepEqual(again, { kind: 'done', archived: 0 })
+
+    // 未知清单种类必须报错，而不是静默什么都不做。
+    await assert.rejects(() => access.archiveAll('nope'), (error) => error?.code === 'unknown-kind')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

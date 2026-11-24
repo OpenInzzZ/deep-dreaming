@@ -214,9 +214,23 @@ export function apply(ctx, config = {}) {
       case 'update': return access.update(args.id, args).then(markChanged)
       case 'complete': return access.complete(args.id, args).then(markChanged)
       case 'archive': return access.archive(args.id).then(markChanged)
+      case 'archiveAll': return access.archiveAll(args.kind).then(markChanged)
       case 'remove': return access.remove(args.id).then(markChanged)
       case 'import': return access.importFile(args).then(markChanged)
-      case 'export': return args?.write === true ? access.refreshMirrors() : access.view().then((view) => ({ written: [], summary: view.summary }))
+      case 'export': {
+        // `write` 重写三份镜像；`json` 额外导出一份 board.json 快照（备份 /
+        // 人工排障 / 交给别的工具）。两者都没有时只回报路径与计数。
+        const written = []
+        let summary
+        if (args?.write === true) {
+          const outcome = await access.refreshMirrors()
+          written.push(...outcome.written)
+          summary = outcome.summary
+        }
+        if (args?.json === true) written.push(await access.exportJson())
+        if (summary === undefined) summary = (await access.view()).summary
+        return { written, summary, paths: access.paths }
+      }
       case 'probe': return { ok: true, paths: access.paths, config: current() }
       default: {
         const error = new Error(`unknown endpoint: ${endpoint}`)
