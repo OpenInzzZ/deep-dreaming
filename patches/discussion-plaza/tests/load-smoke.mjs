@@ -58,7 +58,7 @@ try {
 
 const host = await import(pathToFileURL(join(import.meta.dirname, '..', 'lib', 'index.js')).href)
 const { createStore } = host
-const { createGroup, joinGroup, appendMessage } = await import(pathToFileURL(join(import.meta.dirname, '..', 'lib', 'store.js')).href)
+const { createGroup, joinGroup, appendMessage, archiveGroup } = await import(pathToFileURL(join(import.meta.dirname, '..', 'lib', 'store.js')).href)
 const { parseDoc } = await import(pathToFileURL(join(import.meta.dirname, '..', 'lib', 'protocol.js')).href)
 
 let passed = 0
@@ -452,6 +452,22 @@ try {
 
       // 长期讨论组：只能由人类标记/结束；Agent 的关组提议必须被拒绝。
       const flowStore = createStore({ rootDir: join(root, 'flow') })
+
+      // 归档是人类的整理动作：plaza_list 默认隐藏归档组，includeArchived 才返回；
+      // 按 id 的 plaza_read 始终可读。
+      const archived = await archiveGroup(flowStore.paths, id, true)
+      assert.equal(archived.changed, true)
+      assert.equal(archived.group.archived, true)
+      const hiddenList = await byName.get('plaza_list').execute({ includeClosed: true }, execFor(A))
+      validate('plaza_list', hiddenList)
+      assert.equal(hiddenList.groups.some((entry) => entry.id === id), false, '归档组默认不出现在 plaza_list')
+      const archivedList = await byName.get('plaza_list').execute({ includeArchived: true }, execFor(A))
+      validate('plaza_list', archivedList)
+      assert.ok(archivedList.groups.some((entry) => entry.id === id && entry.archived === true))
+      const archivedRead = await byName.get('plaza_read').execute({ id, sinceSeq: 0 }, execFor(A))
+      validate('plaza_read', archivedRead)
+      assert.ok(archivedRead.messages.length > 0, '归档组仍可按 id 读取')
+
       const standing = await createGroup(flowStore.paths, {
         title: '长期议题',
         by: { sessionId: 's-a', name: 'A', workspace: 'alpha' },
@@ -575,7 +591,7 @@ try {
     }
   })
 
-  await test('view / create / detail / unlock / remove-participant / set-standing / close-standing / probe 端点可用', async () => {
+  await test('view / create / detail / unlock / remove-participant / set-standing / close-standing / archive / probe 端点可用', async () => {
     const { ctx, routes } = harness()
     const fiber = await mount(ctx, { rootDir: join(root, 'route-endpoints') })
     try {
@@ -677,6 +693,37 @@ try {
       assert.equal(longDetail.body.value.group.standing, true)
       assert.equal(longDetail.body.value.group.status, 'closed')
       assert.ok(longDetail.body.value.markdown.includes('结束长期讨论'))
+
+      // 归档：只有已关闭组可归档；view 会带出归档标记（面板自己按开关过滤）。
+      const archivedRoute = await callRoute(route, {
+        url: '/discussion-plaza/archive',
+        headers: HOME_HEADERS,
+        body: JSON.stringify({ args: { id: longId, archived: true } }),
+      })
+      assert.equal(archivedRoute.status, 200, JSON.stringify(archivedRoute.body))
+      assert.equal(archivedRoute.body.value.archived, true)
+      assert.equal(archivedRoute.body.value.changed, true)
+      const viewWithArchived = await callRoute(route, { url: '/discussion-plaza/view', headers: HOME_HEADERS, body: '{"args":{}}' })
+      assert.ok(viewWithArchived.body.value.groups.some((entry) => entry.id === longId && entry.archived === true))
+      const unarchived = await callRoute(route, {
+        url: '/discussion-plaza/archive',
+        headers: HOME_HEADERS,
+        body: JSON.stringify({ args: { id: longId, archived: false } }),
+      })
+      assert.equal(unarchived.body.value.archived, false)
+      const badArchive = await callRoute(route, {
+        url: '/discussion-plaza/archive',
+        headers: HOME_HEADERS,
+        body: JSON.stringify({ args: { id: longId, archived: 'yes' } }),
+      })
+      assert.equal(badArchive.status, 400)
+      const openArchive = await callRoute(route, {
+        url: '/discussion-plaza/archive',
+        headers: HOME_HEADERS,
+        body: JSON.stringify({ args: { id, archived: true } }),
+      })
+      assert.equal(openArchive.status, 400)
+      assert.equal(openArchive.body.error.code, 'not-closed')
     } finally {
       await fiber.dispose()
     }
@@ -696,6 +743,7 @@ try {
         assert.ok(text.includes(name), `guidance must mention ${name}`)
       }
       assert.ok(text.includes('所有工作区'), 'guidance must say the plaza is cross-workspace')
+      assert.ok(text.includes('includeArchived'), 'guidance must explain archived groups are hidden by default')
     } finally {
       await fiber.dispose()
     }
@@ -778,7 +826,7 @@ try {
     }
   })
 
-  await test('落盘文档自洽（validateGroup 无问题）', async () => {
+  await test('库与镜像自洽（validateGroup 无问题）', async () => {
     const store = createStore({ rootDir: join(root, 'flow') })
     const { listGroupIds, readGroupFile } = await import(pathToFileURL(join(import.meta.dirname, '..', 'lib', 'store.js')).href)
     const { validateGroup } = await import(pathToFileURL(join(import.meta.dirname, '..', 'lib', 'protocol.js')).href)

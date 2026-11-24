@@ -295,7 +295,8 @@ if (!canRender) {
       calls.push({ url, init, body: init?.body })
       const key = Object.keys(routes).find((candidate) => url.startsWith(candidate))
       if (key === undefined) throw new Error(`unexpected fetch ${url}`)
-      return { ok: true, status: 200, json: async () => ({ ok: true, value: routes[key] }) }
+      const value = typeof routes[key] === 'function' ? routes[key](init) : routes[key]
+      return { ok: true, status: 200, json: async () => ({ ok: true, value }) }
     }
     return { calls, restore: () => { globalThis.fetch = original } }
   }
@@ -433,6 +434,91 @@ if (!canRender) {
     }
   })
 
+  await checkAsync('closed groups offer 归档 / 取消归档 and the list hides archived by default', async () => {
+    const closed = {
+      ...VIEW.groups[0],
+      id: 'dg_abcde_333333',
+      title: '已关闭的组',
+      status: 'closed',
+      statusLabel: '已关闭',
+      writing: false,
+      standing: false,
+      participants: [],
+      participantCount: 0,
+      messageCount: 3,
+      archived: false,
+    }
+    const archivedGroup = {
+      ...closed,
+      id: 'dg_abcde_444444',
+      title: '已归档的组',
+      messageCount: 1,
+      archived: true,
+      archivedAt: '2026-11-20T06:00:00.000Z',
+    }
+    const closedView = {
+      groups: [closed, archivedGroup],
+      counts: { open: 0, closing: 0, closed: 2, writing: 0, total: 2 },
+      invalid: [],
+      paths: VIEW.paths,
+    }
+    const detailFor = (id) => ({
+      group: id === archivedGroup.id ? archivedGroup : closed,
+      messages: [],
+      markdown: id === archivedGroup.id ? '# 已归档的组' : '# 已关闭的组',
+      path: `C:/plaza/groups/${id}.md`,
+    })
+    const io = installFetch({
+      '/discussion-plaza/view': closedView,
+      '/discussion-plaza/detail': (init) => detailFor(JSON.parse(init.body).args.id),
+      '/discussion-plaza/archive': (init) => {
+        const args = JSON.parse(init.body).args
+        return { id: args.id, archived: args.archived, changed: true }
+      },
+    })
+    const mounted = mount(mainEntry.component, { t })
+    try {
+      // 默认只显示未归档的已关闭组。
+      await waitFor(() => mounted.container.querySelectorAll('.dp-row').length === 1, 'one visible row')
+      assert.ok(mounted.container.textContent.includes('已关闭的组'))
+      assert.equal(mounted.container.textContent.includes('已归档的组'), false, 'archived row must be hidden by default')
+
+      // 已关闭组详情出现「归档」按钮；点击后按 id + archived:true 调宿主路由。
+      mounted.container.querySelector('.dp-row').dispatchEvent(new shell.window.MouseEvent('click', { bubbles: true }))
+      await waitFor(() => mounted.container.querySelector('.dp-side') !== null, 'closed detail')
+      const archiveButton = [...mounted.container.querySelectorAll('.dp-side button')]
+        .find((button) => button.textContent === '归档')
+      assert.ok(archiveButton !== undefined, 'closed group must offer 归档')
+      archiveButton.dispatchEvent(new shell.window.MouseEvent('click', { bubbles: true }))
+      await waitFor(() => io.calls.some((entry) => entry.url === '/discussion-plaza/archive'), 'archive request')
+      const archiveCall = io.calls.find((entry) => entry.url === '/discussion-plaza/archive')
+      assert.deepEqual(JSON.parse(archiveCall.body), { args: { id: closed.id, archived: true } })
+
+      // 勾「显示已归档」后归档行出现并带标记；详情提供「取消归档」。
+      const toggle = mounted.container.querySelector('.dp-head .dp-check input')
+      assert.ok(toggle !== null, 'show-archived checkbox')
+      toggle.click()
+      await waitFor(() => mounted.container.querySelectorAll('.dp-row').length === 2, 'archived row visible')
+      const archivedRow = [...mounted.container.querySelectorAll('.dp-row')]
+        .find((row) => row.textContent.includes('已归档的组'))
+      assert.ok(archivedRow !== undefined)
+      assert.ok(archivedRow.textContent.includes('已归档'), 'archived row badge')
+      archivedRow.dispatchEvent(new shell.window.MouseEvent('click', { bubbles: true }))
+      await waitFor(() => mounted.container.querySelector('.dp-side')?.textContent.includes('已归档的组') === true, 'archived detail')
+      assert.ok(mounted.container.querySelector('.dp-side').textContent.includes('归档于'), 'archived-at line')
+      const unarchiveButton = [...mounted.container.querySelectorAll('.dp-side button')]
+        .find((button) => button.textContent === '取消归档')
+      assert.ok(unarchiveButton !== undefined, 'archived group must offer 取消归档')
+      unarchiveButton.dispatchEvent(new shell.window.MouseEvent('click', { bubbles: true }))
+      await waitFor(() => io.calls.filter((entry) => entry.url === '/discussion-plaza/archive').length === 2, 'unarchive request')
+      const unarchiveCall = io.calls.filter((entry) => entry.url === '/discussion-plaza/archive')[1]
+      assert.deepEqual(JSON.parse(unarchiveCall.body), { args: { id: archivedGroup.id, archived: false } })
+    } finally {
+      mounted.unmount()
+      io.restore()
+    }
+  })
+
   await checkAsync('a detail render error shows an error instead of a blank page', async () => {
     const brokenGroup = { ...DETAIL.group };
     Object.defineProperty(brokenGroup, 'title', { get() { throw new Error('boom') } });
@@ -537,7 +623,7 @@ if (!canRender) {
       const setter = Object.getOwnPropertyDescriptor(shell.window.HTMLInputElement.prototype, 'value').set
       setter.call(input, '新议题')
       input.dispatchEvent(new shell.window.Event('input', { bubbles: true }))
-      const checkbox = mounted.container.querySelector('.dp-check input')
+      const checkbox = mounted.container.querySelector('.dp-form .dp-check input')
       assert.ok(checkbox !== null, 'standing checkbox')
       checkbox.click()
       const form = mounted.container.querySelector('.dp-form')

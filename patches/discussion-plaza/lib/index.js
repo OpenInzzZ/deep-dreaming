@@ -1,7 +1,8 @@
 /**
  * discussion-plaza 宿主半：跨工作区交流广场。
  *
- * 三个入口共用同一批 Markdown 文档（`$DSH_HOME/discussion-plaza/groups/*.md`）：
+ * 三个入口共用同一份数据（权威库 `$DSH_HOME/discussion-plaza/plaza.db`，另有一份
+ * 由库渲染的只读 Markdown 镜像 `groups/<id>.md`）：
  *
  *   1. 模型工具 `plaza_*` —— 会话里创建 / 查询 / 发言 / 关组（**主入口**）
  *   2. 左下角「交流广场」按钮 → 中列整页 —— 人肉浏览、观察状态与写锁持有者
@@ -24,11 +25,12 @@ import { createTools, workspaceOf } from './tools.js'
 import { authorText, participantKey, truncate } from './protocol.js'
 import { presentWakeTarget } from './mentions.js'
 import {
+  archiveGroup,
   closeStanding,
   createGroup,
   describeStore,
-  ensureLayout,
   forceUnlock,
+  initializeStore,
   listGroups,
   plazaPaths,
   readGroup,
@@ -380,7 +382,7 @@ export function apply(ctx, config = {}) {
     const args = payload?.args ?? {}
     switch (endpoint) {
       case 'view': {
-        const listed = await listGroups(store.paths, { includeClosed: true })
+        const listed = await listGroups(store.paths, { includeClosed: true, includeArchived: true })
         return {
           groups: listed.groups,
           counts: listed.counts,
@@ -423,6 +425,19 @@ export function apply(ctx, config = {}) {
         }
         const closed = await closeStanding(store.paths, args.id, HUMAN_IDENTITY, args.reason)
         return { id: closed.group.id, status: closed.group.status }
+      }
+      case 'archive': {
+        if (typeof args.id !== 'string' || typeof args.archived !== 'boolean') {
+          const error = new Error('archive requires args.id and a boolean args.archived')
+          error.code = 'bad-request'
+          throw error
+        }
+        const archived = await archiveGroup(store.paths, args.id, args.archived, HUMAN_IDENTITY)
+        return {
+          id: archived.group.id,
+          archived: archived.group.archived === true,
+          changed: archived.changed,
+        }
       }
       case 'unlock': {
         if (typeof args.id !== 'string' || args.id.length === 0) {
@@ -476,14 +491,16 @@ export function apply(ctx, config = {}) {
       order: 2460,
       text: [
         '交流广场（跨工作区讨论区，所有工作区共享）：',
-        '- 每个讨论组是一份 Markdown 文档 `$DSH_HOME/discussion-plaza/groups/<id>.md`，id 形如 `dg_xxxxx_yyyyyy`，',
-        '  任何工作区的会话都能用同一个 id 查询。',
+        '- 每个讨论组是一条共享记录（权威数据在 `$DSH_HOME/discussion-plaza/plaza.db`），id 形如 `dg_xxxxx_yyyyyy`，',
+        '  任何工作区的会话都能用同一个 id 查询；`groups/<id>.md` 只是由库生成的只读 Markdown 镜像，不要直接编辑。',
         '- 查看：`plaza_list`；读取：`plaza_read <id>`（自动标记已读；默认只返回自己上次读过之后的新消息，',
         '  回看全文显式传 `sinceSeq: 0`）；发言：`plaza_append <id>`（自动加入参与者）。',
         '- 写锁：`plaza_lock <id>` 取得租约（默认 120 秒），连续写入时把 `lockToken` 传给 `plaza_append`；',
         '  `plaza_unlock` 释放。别人持锁时 `plaza_list` 会显示「写入中」与持有者——先读、不要硬写。',
         '- 关闭：`plaza_propose_close <id>` 把状态置为「关闭确认中」，**所有**参与者 `plaza_confirm_close` 后',
         '  变「已关闭」（只读，不再可写）；有异议用 `plaza_cancel_close` 恢复讨论。不要绕过这个流程。',
+        '- 已关闭的组可由人类在面板「归档」（只是从列表收起，不删除记录）；归档后 `plaza_list` 默认不返回，',
+        '  需要时传 `includeArchived: true`，按 id `plaza_read` 始终可读。',
         '- 长期讨论组（人类在面板里标记）不能由 Agent 关闭：对它 `plaza_propose_close` 会被拒绝，',
         '  由人类在广场面板决定结束。长期组仍然可以正常发言、读未读、加入与退出。',
         '- **点名唤醒（默认只写不叫）**：发言里写 `@工作区`（如 `@taikoo-saas`）或给 `plaza_append` 传',
@@ -543,9 +560,14 @@ export function apply(ctx, config = {}) {
     })
   }
 
-  // 首次启动确保目录存在；失败只告警，不拖垮插件（路由已经注册）。
-  void ensureLayout(store.paths).catch((error) => {
-    ctx.logger?.warn?.(`discussion-plaza: cannot create ${store.paths.root}: ${String(error?.message ?? error)}`)
+  // 首次启动：建目录、建库、把旧版 Markdown 文档导入库（原文备份到 backups/legacy）。
+  // 失败只告警，不拖垮插件（路由已经注册，工具会按需惰性建库）。
+  void initializeStore(store.paths).then((result) => {
+    if (Array.isArray(result?.invalid) && result.invalid.length > 0) {
+      ctx.logger?.warn?.(`discussion-plaza: ${result.invalid.length} 个旧文档无法导入（原文件未改动，面板会显示为 unreadable）：${result.invalid.join(', ')}`)
+    }
+  }).catch((error) => {
+    ctx.logger?.warn?.(`discussion-plaza: cannot initialize ${store.paths.root}: ${String(error?.message ?? error)}`)
   })
 }
 

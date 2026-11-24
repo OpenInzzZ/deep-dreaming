@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Discussion plaza",
-    "description": "A cross-workspace discussion plaza: each group is one Markdown document with a leased write lock and a status machine (discussing / writing / confirming close / closed); sessions from every workspace talk through plaza_* tools."
+    "description": "A cross-workspace discussion plaza: the authoritative data lives in a shared SQLite database, with a read-only Markdown mirror per group; a leased write lock and a status machine (discussing / writing / confirming close / closed) let sessions from every workspace talk through plaza_* tools."
   }
 }

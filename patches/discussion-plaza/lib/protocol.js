@@ -1,22 +1,30 @@
 /**
  * discussion-plaza 的协议层（纯逻辑，不碰文件系统、不碰 Cordis）。
  *
- * 一个讨论组 = `groups/<id>.md` 一份 Markdown 文档：
+ * **权威数据在 SQLite 里**（见 `db.js`）：一个讨论组是 `groups` 一行 +
+ * `participants` / `messages` 若干行。`groups/<id>.md` 是由库渲染的**只读镜像**，
+ * 给人读、grep、备份用，不再被解析回数据：
  *
  *   ---
- *   { …元数据 JSON… }        ← 两个 `---` 之间是合法 YAML（JSON 是 YAML 子集），
- *   ---                         所以 Markdown 工具与外部 YAML 解析器都能读
+ *   { …元数据 JSON… }
+ *   ---
  *   # 标题
  *
  *   ## 1 · 2026-11-20 13:40:12 · workspace · name
  *   正文…
  *
- * **元数据**（id / 状态 / 参与者 / 关闭投票）在 front matter；**正文**在 body，
- * 消息只存在于 body（不重复存一份），靠 `## <seq> · <时间> · <作者>` 的标题识别。
- * 这样"文档就是唯一真相"：人读、模型读、工具读的是同一份文本。
+ * 本文件保留两部分：
  *
- * 解析消息时按 seq **严格递增**匹配：正文里恰好出现一行长得像消息标题的文本
- * （比如模型在代码块里引用了格式）不会把后面的内容截走，因为它的 seq 对不上。
+ * 1. **状态机与归一化**：创建 / 发言 / 加入退出 / 关闭确认 / 长期组 / 未读，
+ *    全部是 `group → group` 的纯函数，不关心数据从哪来。
+ * 2. **渲染与旧文档解析**：`renderDoc` / `renderBody` 生成镜像；`parseDoc` /
+ *    `parseMessages` **只用于把旧版 Markdown 文档导入 SQLite**。
+ *
+ * 旧格式的根本问题（迁移原因）：消息边界靠正文里的
+ * `## <seq> · <时间> · <作者>` 推断。正文里只要出现**下一条序号**的同形标题
+ * （模型引用格式、贴日志），一条消息就会被劈成两条、后面真正的消息被并进来。
+ * `parseMessages` 已经尽量防御（跳过代码块、要求 seq 严格递增），但这是文本协议
+ * 无法彻底消除的歧义；导入时原始文档会先备份到 `backups/legacy/`。
  *
  * 状态机：
  *
@@ -56,9 +64,17 @@ export const MAX_TITLE_LENGTH = 120
 export const MAX_NAME_LENGTH = 40
 export const MAX_WORKSPACE_LENGTH = 60
 
-/** 单条消息 / 单份文档的字节上限（防止一个模型把 100MB 塞进 front matter 旁的正文）。 */
+/** 单条消息的字节上限（防止一个模型把 100MB 塞进正文）。 */
 export const MAX_MESSAGE_BYTES = 256 * 1024
-export const MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
+
+/**
+ * Markdown 镜像的单文件上限。
+ *
+ * 库本身没有这个上限（长期讨论组可以一直写）；超过它只是**不再刷新镜像**，
+ * 数据仍在 `plaza.db` 里，面板与 `plaza_read` 走库。镜像不是权威数据，
+ * 所以宁可跳过，也不为了写一份人读副本把一次 append 拖成 100MB 磁盘写。
+ */
+export const MAX_MIRROR_BYTES = 4 * 1024 * 1024
 
 /** 一个讨论组的参与者上限；超过说明用法错了，而不是需要继续扩容。 */
 export const MAX_PARTICIPANTS = 32
@@ -267,6 +283,11 @@ export function normalizeGroup(raw, messages = []) {
     if (participants.length >= MAX_PARTICIPANTS) break
   }
   const status = STATUSES.includes(source.status) ? source.status : STATUS_OPEN
+  // `messageCount` 让「只带最后一条消息」的列表视图仍能算出未读数：消息全量
+  // 存在库里，但 `plaza_list` 不需要为每个组搬一遍全部正文。
+  const messageCount = Number.isInteger(source.messageCount) && source.messageCount >= messages.length
+    ? source.messageCount
+    : messages.length
   return {
     version: DOC_VERSION,
     id,
@@ -287,7 +308,11 @@ export function normalizeGroup(raw, messages = []) {
     lastWriteAt: typeof source.lastWriteAt === 'string' ? source.lastWriteAt : undefined,
     participants,
     close: normalizeClose(source.close),
+    // 归档是「已关闭」之后的人类整理动作，只影响列表展示；`archivedAt` 是可选的审计时间。
+    archived: source.archived === true,
+    archivedAt: typeof source.archivedAt === 'string' ? source.archivedAt : undefined,
     messages,
+    messageCount,
   }
 }
 
@@ -346,11 +371,14 @@ export function renderMessage(message) {
  * @param group - 扁平讨论组对象（含 `messages`）。
  */
 export function renderBody(group) {
+  const archived = group.archived === true
+    ? ` · 已归档${typeof group.archivedAt === 'string' ? `于 ${formatStamp(group.archivedAt)}` : ''}`
+    : ''
   const header = [
     `# ${group.title}`,
     '',
     `> 讨论组 \`${group.id}\` · 状态：${STATUS_LABEL[group.status]} · ` +
-      `参与者 ${group.participants.length} 位 · 更新于 ${formatStamp(group.updatedAt)}`,
+      `参与者 ${group.participants.length} 位 · 更新于 ${formatStamp(group.updatedAt)}${archived}`,
   ].join('\n')
   const body = group.messages.map(renderMessage).join('\n\n')
   return `${header}\n${body.length > 0 ? `\n${body}\n` : ''}`
@@ -362,7 +390,7 @@ export function renderBody(group) {
  */
 export function renderDoc(group) {
   const { messages, ...meta } = group
-  const front = JSON.stringify({ ...meta, messageCount: messages.length }, null, 2)
+  const front = JSON.stringify({ ...meta, messageCount: lastSeq(group) }, null, 2)
   return `---\n${front}\n---\n\n${renderBody(group)}`
 }
 
@@ -392,9 +420,11 @@ export function parseDoc(text) {
   return { group, messages }
 }
 
-/** 最后一条消息的序号（也是消息总数）。 */
+/** 最后一条消息的序号（也是消息总数）。列表视图只带最后一条消息，靠 `messageCount`。 */
 export function lastSeq(group) {
-  return group.messages.length
+  return Number.isInteger(group?.messageCount) && group.messageCount > group.messages.length
+    ? group.messageCount
+    : group.messages.length
 }
 
 /**
@@ -479,7 +509,13 @@ export function pushSystem(group, text, stamp) {
     author: SYSTEM_AUTHOR,
     body,
   }
-  return { ...group, messages: [...group.messages, message], updatedAt: stamp, lastWriteAt: stamp }
+  return {
+    ...group,
+    messages: [...group.messages, message],
+    messageCount: message.seq,
+    updatedAt: stamp,
+    lastWriteAt: stamp,
+  }
 }
 
 /**
@@ -556,6 +592,7 @@ export function planAppend(group, identity, body, stamp) {
     ...group,
     participants: nextParticipants,
     messages: [...group.messages, message],
+    messageCount: message.seq,
     updatedAt: stamp,
     lastWriteAt: stamp,
   }
@@ -803,6 +840,30 @@ export function planHumanClose(group, actor, reason, stamp) {
 }
 
 /**
+ * 人类归档 / 取消归档一个**已关闭**的讨论组。
+ *
+ * 归档只是「从列表里收起来」的展示状态：不写系统消息、不改 `updatedAt`
+ * （那是内容更新时间），因为已关闭的组是只读的，归档不应在讨论记录里追加内容。
+ * 未关闭的组不能归档；归档可随时撤销，`archivedAt` 只在归档期间存在。
+ * @param group - 讨论组。
+ * @param archived - true = 归档，false = 取消归档。
+ * @param stamp - 时间戳。
+ */
+export function planArchive(group, archived, stamp) {
+  if (group.status !== STATUS_CLOSED) {
+    throw plazaError('not-closed', `讨论组 ${group.id} 还没关闭，不能归档；请先走完关闭流程`)
+  }
+  const on = archived === true
+  if ((group.archived === true) === on) return { group, changed: false }
+  if (on) {
+    return { group: { ...group, archived: true, archivedAt: stamp }, changed: true }
+  }
+  const next = { ...group, archived: false }
+  delete next.archivedAt
+  return { group: next, changed: true }
+}
+
+/**
  * 标记已读到第 `uptoSeq` 条。
  * @param group - 讨论组。
  * @param actor - 读者（身份对象，或工作区/sessionId 组成的 key）。
@@ -843,6 +904,8 @@ export function summarizeGroup(group, lock, options = {}) {
     status: group.status,
     statusLabel: STATUS_LABEL[group.status],
     standing: group.standing === true,
+    archived: group.archived === true,
+    ...(typeof group.archivedAt === 'string' ? { archivedAt: group.archivedAt } : {}),
     writing: lock !== undefined,
     participants: group.participants.map((entry) => ({
       key: entry.key,
@@ -853,7 +916,7 @@ export function summarizeGroup(group, lock, options = {}) {
       ...(entry.vote === null || entry.vote === undefined ? {} : { vote: entry.vote }),
     })),
     participantCount: group.participants.length,
-    messageCount: group.messages.length,
+    messageCount: lastSeq(group),
     createdAt: group.createdAt,
     updatedAt: group.updatedAt,
     youAreParticipant: participant !== undefined,
@@ -901,6 +964,9 @@ export function validateGroup(group) {
   if (!GROUP_ID_PATTERN.test(group.id)) problems.push('id 非法')
   if (!STATUSES.includes(group.status)) problems.push('status 非法')
   if (typeof group.standing !== 'boolean') problems.push('standing 非法')
+  if (group.archived === true && group.status !== STATUS_CLOSED) {
+    problems.push('归档状态只允许出现在已关闭的讨论组上')
+  }
   if (group.status === STATUS_CLOSING && group.close === null) problems.push('关闭确认中却缺少 close 记录')
   if (group.status === STATUS_CLOSED && (group.close === null || typeof group.close.closedAt !== 'string')) {
     problems.push('已关闭却缺少 close.closedAt')

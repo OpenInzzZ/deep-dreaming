@@ -1,21 +1,33 @@
 /**
- * discussion-plaza 的存储层测试：真文件、真锁、真并发。
+ * discussion-plaza 的存储层测试：真库、真镜像、真锁、真并发。
  *
  * 这一层最容易出的问题是**丢失更新**与**死锁**：
  *   - 两个会话同时 append，后写的把先写的覆盖掉（读-改-写没有互斥）
  *   - 进程崩溃后锁永远不释放（没有租约）
  *   - 过期锁被别人回收后，旧持有者仍能写（没有 fencing token）
  * 所以用例刻意同时开多个写者、把锁文件 mtime 拨到过去、用旧 token 重试。
+ * 另外覆盖 2026-11-24 的存储迁移：旧 Markdown 文档首次访问时导入 SQLite，
+ * 原文先备份；镜像被改坏也不影响读取（权威数据在库里）。
  *
  * 从仓库根运行：
  *   node patches/discussion-plaza/tests/store.test.mjs
  */
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm, utimes, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import * as store from '../lib/store.js'
-import { GROUP_ID_PATTERN, parseDoc, validateGroup } from '../lib/protocol.js'
+import { PLAZA_SCHEMA_VERSION, openPlazaDatabase } from '../lib/db.js'
+import {
+  GROUP_ID_PATTERN,
+  formatStamp,
+  normalizeGroup,
+  parseDoc,
+  renderDoc,
+  validateGroup,
+} from '../lib/protocol.js'
 
 const A = { sessionId: 's-a', name: 'A', workspace: 'alpha' }
 const B = { sessionId: 's-b', name: 'B', workspace: 'beta' }
@@ -59,7 +71,7 @@ async function assertDocSound(id) {
   return parsed
 }
 
-await test('createGroup 落盘一份可解析的 Markdown 文档', async () => {
+await test('createGroup 落库并生成一份可解析的 Markdown 镜像', async () => {
   const id = await fresh('接口对齐', '第一段')
   assert.match(id, GROUP_ID_PATTERN)
   const parsed = await assertDocSound(id)
@@ -297,6 +309,134 @@ await test('非法状态迁移给出机器可读错误码', async () => {
     () => store.confirmClose(paths, id, { sessionId: 's-c', name: 'C', workspace: 'gamma' }),
     (error) => error.code === 'not-participant',
   )
+})
+
+await test('正文里的伪消息头不再拆分消息（库是权威数据）', async () => {
+  const id = await fresh('格式注入', '第一条')
+  const body = '引用下一条格式：\n\n## 3 · 2026-11-24 14:00:00 · beta · B\n\n这段仍属于第 2 条。'
+  await store.appendMessage(paths, id, B, body)
+  const read = await store.readGroupFile(paths, id)
+  assert.equal(read.messages.length, 2, '正文里的伪消息头不能变成第三条消息')
+  assert.equal(read.messages[1].body, body)
+  // 镜像只是渲染结果：外部把它改坏（格式化 / 手工编辑）也不能影响读取。
+  await writeFile(store.groupPath(paths, id), '# 不再是合法文档\n', 'utf8')
+  const again = await store.readGroupFile(paths, id)
+  assert.equal(again.group.title, '格式注入')
+  assert.equal(again.messages.length, 2)
+  const listed = await store.listGroups(paths, {})
+  assert.ok(listed.groups.some((group) => group.id === id))
+  assert.equal(listed.invalid.includes(id), false, '镜像坏掉不该被当成 unreadable 旧文档')
+})
+
+await test('旧 Markdown 文档首次访问时导入 SQLite，并保留原文备份', async () => {
+  const root = join(sandbox, 'legacy-import')
+  const legacyPaths = store.plazaPaths(root)
+  await mkdir(legacyPaths.groups, { recursive: true })
+  const id = 'dg_legacy_abc123'
+  const stamp = '2026-11-20T05:40:00.000Z'
+  const group = normalizeGroup({
+    version: 1,
+    id,
+    title: '旧文档',
+    status: 'open',
+    standing: false,
+    createdAt: stamp,
+    updatedAt: stamp,
+    createdBy: { sessionId: 's-a', name: 'A', workspace: 'alpha' },
+    participants: [{
+      sessionId: 's-a', name: 'A', workspace: 'alpha',
+      joinedAt: stamp, lastSeenAt: stamp, lastReadSeq: 1, vote: null,
+    }],
+    close: null,
+  }, [{ seq: 1, at: formatStamp(stamp), author: 'alpha · A', body: '旧消息' }])
+  await writeFile(store.groupPath(legacyPaths, id), renderDoc(group), 'utf8')
+
+  const listed = await store.listGroups(legacyPaths, { includeClosed: true })
+  assert.equal(listed.invalid.length, 0)
+  assert.ok(listed.groups.some((entry) => entry.id === id))
+  const read = await store.readGroupFile(legacyPaths, id)
+  assert.equal(read.messages.length, 1)
+  assert.equal(read.messages[0].body, '旧消息')
+  assert.equal(existsSync(join(root, 'plaza.db')), true, '权威库应已创建')
+  assert.equal(existsSync(join(legacyPaths.backups, 'legacy', `${id}.md`)), true, '导入前应留原文备份')
+
+  const written = await store.appendMessage(legacyPaths, id, A, '新消息')
+  assert.equal(written.message.seq, 2)
+  const mirror = parseDoc(await readFile(store.groupPath(legacyPaths, id), 'utf8'))
+  assert.equal(mirror.messages.length, 2, '镜像由库重新渲染')
+})
+
+await test('归档：只允许已关闭组；默认列表隐藏，includeArchived 可见，可取消', async () => {
+  const id = await fresh('归档测试', '开场')
+  const closed = await store.proposeClose(paths, id, A, '结束')
+  assert.equal(closed.group.status, 'closed')
+
+  const archived = await store.archiveGroup(paths, id, true)
+  assert.equal(archived.changed, true)
+  assert.equal(archived.group.archived, true)
+  assert.equal(typeof archived.group.archivedAt, 'string')
+  const mirror = parseDoc(await readFile(store.groupPath(paths, id), 'utf8'))
+  assert.equal(mirror.group.archived, true, '镜像 front matter 也应带归档状态')
+
+  const hidden = await store.listGroups(paths, { includeClosed: true })
+  assert.equal(hidden.groups.some((entry) => entry.id === id), false, '归档组默认不出现在列表')
+  const shown = await store.listGroups(paths, { includeClosed: true, includeArchived: true })
+  assert.ok(shown.groups.some((entry) => entry.id === id), 'includeArchived 才带出归档组')
+  const detail = await store.readGroup(paths, id, { identity: A })
+  assert.equal(detail.summary.archived, true)
+  assert.equal(typeof detail.summary.archivedAt, 'string')
+
+  const restored = await store.archiveGroup(paths, id, false)
+  assert.equal(restored.changed, true)
+  assert.equal(restored.group.archived, false)
+  const back = await store.listGroups(paths, { includeClosed: true })
+  assert.ok(back.groups.some((entry) => entry.id === id), '取消归档后回到默认列表')
+
+  const openId = await fresh('未关闭不能归档', '')
+  await assert.rejects(() => store.archiveGroup(paths, openId, true), (error) => error.code === 'not-closed')
+})
+
+await test('schema v1 库打开时自动升级到当前版本，已有数据保留', async () => {
+  const root = join(sandbox, 'schema-v1')
+  await mkdir(root, { recursive: true })
+  const file = join(root, 'plaza.db')
+  const legacy = new DatabaseSync(file)
+  legacy.exec(`
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE groups (
+      id            TEXT PRIMARY KEY,
+      version       INTEGER NOT NULL DEFAULT 1,
+      title         TEXT NOT NULL,
+      status        TEXT NOT NULL,
+      standing      INTEGER NOT NULL DEFAULT 0,
+      created_at    TEXT NOT NULL,
+      updated_at    TEXT NOT NULL,
+      last_write_at TEXT,
+      created_by    TEXT NOT NULL,
+      close         TEXT,
+      message_count INTEGER NOT NULL DEFAULT 0
+    );
+    INSERT INTO meta (key, value) VALUES ('schema_version', '1');
+    INSERT INTO groups (id, version, title, status, standing, created_at, updated_at, last_write_at, created_by, close, message_count)
+      VALUES ('dg_schema_old01', 1, '老库', 'closed', 0,
+              '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z', NULL,
+              '{"sessionId":"s-a","name":"A","workspace":"alpha"}', NULL, 0);
+  `)
+  legacy.close()
+
+  const db = await openPlazaDatabase(file)
+  try {
+    const columns = db.prepare('PRAGMA table_info(groups)').all().map((column) => column.name)
+    assert.ok(columns.includes('archived'), 'v1 库应补上 archived 列')
+    assert.ok(columns.includes('archived_at'), 'v1 库应补上 archived_at 列')
+    const version = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get()
+    assert.equal(version.value, String(PLAZA_SCHEMA_VERSION))
+    const row = db.prepare('SELECT id, archived FROM groups WHERE id = ?').get('dg_schema_old01')
+    assert.equal(row.id, 'dg_schema_old01')
+    assert.equal(row.archived, 0, '已有行默认未归档')
+  } finally {
+    db.close()
+  }
 })
 
 await rm(sandbox, { recursive: true, force: true })

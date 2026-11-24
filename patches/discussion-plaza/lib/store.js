@@ -3,17 +3,24 @@
  *
  * 磁盘布局（默认 `$DSH_HOME/discussion-plaza`）：
  *
- *   groups/<id>.md   每个讨论组一份 Markdown 文档（权威数据，见 protocol.js）
- *   locks/<id>.lock  写锁（带租约的 JSON 锁文件）
+ *   plaza.db             权威数据（SQLite，见 db.js：groups / participants / messages）
+ *   groups/<id>.md       由库渲染的**只读 Markdown 镜像**（人读、grep、备份用）
+ *   locks/<id>.lock      写锁（带租约的 JSON 锁文件）
+ *   backups/legacy/      旧版 Markdown 文档首次导入前的原始副本
  *
- * 两个设计点：
+ * 三个设计点：
  *
- * 1. **锁是文件，不是内存队列。** 同一台机器上可能同时有多个 DSH 宿主进程
+ * 1. **权威数据是库，不是文档。** 旧版把消息边界写进 Markdown 标题，正文里
+ *    出现"下一条序号"的同形标题就会劈开消息；整份文档的 front matter 一坏，
+ *    整组就读不出来。库把元数据/参与者/消息拆成行，追加是行级 INSERT，
+ *    `plaza_list` 也不再解析所有文档。镜像只是渲染结果，从不反解析回数据。
+ * 2. **锁是文件，不是内存队列。** 同一台机器上可能同时有多个 DSH 宿主进程
  *    （桌面端 + 一份 CLI/测试进程），而不同工作区的会话可以同时写同一个讨论组。
  *    内存 Promise 链只在一个进程内成立，所以这里用 `link()` 原子创建锁文件：
  *    `open('wx')` 在写入过程中会短暂产生半份 JSON，`link` 则是在文件内容完整
- *    之后才原子出现。
- * 2. **租约 + token（fencing）。** 锁带 TTL，租约过期自动回收 —— 进程崩溃不会
+ *    之后才原子出现。SQLite 只负责存储，串行化仍由这把锁负责（保留 `plaza_lock`
+ *    的长写语义与 fencing token）。
+ * 3. **租约 + token（fencing）。** 锁带 TTL，租约过期自动回收 —— 进程崩溃不会
  *    留下永久的「写入中」。持有者在过期后不能再用旧 token 写（见 `withGroupLock`），
  *    避免"以为还持有锁"的陈旧写入覆盖别人。
  */
@@ -23,8 +30,8 @@ import { dirname, join, resolve } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import {
   GROUP_ID_PATTERN,
-  MAX_DOCUMENT_BYTES,
   MAX_MESSAGE_BYTES,
+  MAX_MIRROR_BYTES,
   STATUS_CLOSED,
   STATUS_CLOSING,
   STATUS_OPEN,
@@ -38,6 +45,7 @@ import {
   parseDoc,
   participantKey,
   planAppend,
+  planArchive,
   planCancelClose,
   planConfirmClose,
   planHumanClose,
@@ -55,6 +63,15 @@ import {
   authorText,
   formatStamp,
 } from './protocol.js'
+import {
+  PLAZA_DB_FILE,
+  insertGroup,
+  listDatabaseIds,
+  openPlazaDatabase,
+  readGroupRow,
+  readGroupRows,
+  writeGroup,
+} from './db.js'
 
 /** 默认写锁租约（秒）。太短会在模型思考时过期，太长会让崩溃后的「写入中」赖着不走。 */
 export const DEFAULT_LOCK_TTL_MS = 120_000
@@ -89,12 +106,14 @@ export function resolvePlazaRoot(configured) {
 export function plazaPaths(root) {
   return {
     root,
+    db: join(root, PLAZA_DB_FILE),
     groups: join(root, 'groups'),
     locks: join(root, 'locks'),
+    backups: join(root, 'backups'),
   }
 }
 
-/** 讨论组文档路径。 */
+/** 讨论组镜像路径。 */
 export function groupPath(paths, id) {
   return join(paths.groups, `${id}.md`)
 }
@@ -108,6 +127,7 @@ export function lockPath(paths, id) {
 export async function ensureLayout(paths) {
   await mkdir(paths.groups, { recursive: true })
   await mkdir(paths.locks, { recursive: true })
+  await mkdir(paths.backups, { recursive: true })
 }
 
 /** 校验 id；非法 id 直接当作找不到（同时挡住 `../` 之类的路径穿越）。 */
@@ -192,7 +212,6 @@ function unreadableLock(id, info) {
     expired: false,
   }
 }
-
 
 /**
  * 原子写文本：先写同目录临时文件再 rename。
@@ -479,41 +498,30 @@ export async function forceUnlock(paths, id) {
 }
 
 // ---------------------------------------------------------------------------
-// 讨论组文档
+// 讨论组存储
 // ---------------------------------------------------------------------------
 
 /**
- * 读讨论组。
- * @param paths - 路径集合。
- * @param id - 讨论组 id。
+ * 最近一次镜像写入失败 / 被跳过的原因（诊断用，按广场根目录记）。
+ *
+ * 镜像不是权威数据，所以写失败不能回滚已经提交到库里的发言；但也不能静默：
+ * `/discussion-plaza/probe` 会带出来，测试也会读文件本身。
  */
-export async function readGroupFile(paths, id) {
-  assertGroupId(id)
-  const text = await readFileMaybe(groupPath(paths, id))
-  if (text === undefined) throw plazaError('group-not-found', `没有 id 为 ${id} 的讨论组`)
-  const parsed = parseDoc(text)
-  if (parsed.group.id !== id) {
-    throw plazaError('group-corrupt', `文件名 ${id} 与文档里的 id ${parsed.group.id} 不一致`)
+const mirrorIssues = new Map()
+
+/** 打开库并执行一次操作；每次打开都保证 schema 存在（与 todo-board 同形）。 */
+async function withDatabase(paths, operation) {
+  await ensureLayout(paths)
+  const db = await openPlazaDatabase(paths.db)
+  try {
+    return await operation(db)
+  } finally {
+    db.close()
   }
-  return parsed
 }
 
-/**
- * 落盘讨论组。
- * @param paths - 路径集合。
- * @param group - 讨论组。
- */
-export async function saveGroupFile(paths, group) {
-  const text = renderDoc(group)
-  if (byteLength(text) > MAX_DOCUMENT_BYTES) {
-    throw plazaError('group-too-large', `讨论组文档超过 ${MAX_DOCUMENT_BYTES} 字节，请另开一个讨论组`)
-  }
-  await writeTextAtomic(groupPath(paths, group.id), text)
-  return text
-}
-
-/** 列出全部讨论组 id（按文件名排序）。 */
-export async function listGroupIds(paths) {
+/** 目录里现存的 `<id>.md`（镜像或尚未导入的旧文档）。 */
+async function listLegacyDocIds(paths) {
   let names
   try {
     names = await readdir(paths.groups)
@@ -529,33 +537,181 @@ export async function listGroupIds(paths) {
 }
 
 /**
- * 列出讨论组摘要。
- * @param paths - 路径集合。
- * @param options - `{ identity, includeClosed, status, query, mine, limit }`。
+ * 把一份旧的 Markdown 文档备份到 `backups/legacy/<id>.md`。
+ *
+ * 只在首次导入时写；`wx` 保证同一 id 的原始副本不会被覆盖。备份失败就让导入
+ * 失败 —— 否则之后镜像重写会把唯一一份原始文档覆盖掉，得不偿失。
+ * @returns 是否新写了备份（已存在返回 false）
  */
-export async function listGroups(paths, options = {}) {
-  const ids = await listGroupIds(paths)
-  const all = []
+async function backupLegacyText(paths, id, text) {
+  const dir = join(paths.backups, 'legacy')
+  await mkdir(dir, { recursive: true })
+  try {
+    await writeFile(join(dir, `${id}.md`), text, { encoding: 'utf8', flag: 'wx' })
+    return true
+  } catch (error) {
+    if (error?.code === 'EEXIST') return false
+    throw error
+  }
+}
+
+/**
+ * 导入单份旧文档：解析 → 备份原文 → 入库。
+ * @returns `{ inserted, group }`；id 与文件名不一致 / 解析失败会抛错。
+ */
+async function importLegacyGroup(paths, db, id, text) {
+  const parsed = parseDoc(text)
+  if (parsed.group.id !== id) {
+    throw plazaError('group-corrupt', `文件名 ${id} 与文档里的 id ${parsed.group.id} 不一致`)
+  }
+  await backupLegacyText(paths, id, text)
+  return { inserted: insertGroup(db, parsed.group), group: parsed.group }
+}
+
+/**
+ * 把目录里尚未入库的旧 Markdown 文档导入库。
+ *
+ * 正常运行时目录里的 `.md` 都是镜像（id 已在库里），这里只做 `readdir` + 集合差；
+ * 只有真正的旧文档才会被解析一次。解析失败的 id 返回在 `invalid` 里（面板会显示），
+ * 原文件保持不动，不删不改。
+ * @returns `{ imported, invalid }`
+ */
+async function importLegacyGroups(paths, db) {
+  const ids = await listLegacyDocIds(paths)
+  if (ids.length === 0) return { imported: 0, invalid: [] }
+  const known = new Set(listDatabaseIds(db))
   const invalid = []
+  let imported = 0
   for (const id of ids) {
+    if (known.has(id)) continue
     try {
-      const { group } = await readGroupFile(paths, id)
-      const lock = await readLock(paths, id)
-      all.push(summarizeGroup(group, lock !== undefined && !lock.expired ? lock : undefined, {
-        identity: options.identity,
-        path: groupPath(paths, id),
-      }))
+      const text = await readFileMaybe(groupPath(paths, id))
+      if (text === undefined) continue
+      const result = await importLegacyGroup(paths, db, id, text)
+      if (result.inserted) imported += 1
+      known.add(id)
     } catch {
       invalid.push(id)
     }
   }
-  const counts = { open: 0, closing: 0, closed: 0, writing: 0, total: all.length }
-  for (const group of all) {
+  return { imported, invalid }
+}
+
+/**
+ * 启动时初始化：建目录、建库、导入旧文档。
+ * 失败不阻塞插件（路由已经注册），由调用方记录告警。
+ * @param paths - 路径集合。
+ */
+export async function initializeStore(paths) {
+  return withDatabase(paths, async (db) => {
+    const result = await importLegacyGroups(paths, db)
+    return { ...describeStore(paths), ...result }
+  })
+}
+
+/**
+ * 写 Markdown 镜像（best-effort）。
+ *
+ * 库已经提交成功，镜像写不进去只记诊断，不让调用方以为发言失败。超过
+ * `MAX_MIRROR_BYTES` 时跳过：长期组的数据仍在库里，面板和 `plaza_read` 走库。
+ * @returns 是否写入
+ */
+async function writeMirror(paths, group, text) {
+  if (byteLength(text) > MAX_MIRROR_BYTES) {
+    mirrorIssues.set(paths.root, {
+      id: group.id,
+      at: nowIso(),
+      reason: `镜像超过 ${MAX_MIRROR_BYTES} 字节，已跳过（权威数据在 plaza.db）`,
+    })
+    return false
+  }
+  try {
+    await writeTextAtomic(groupPath(paths, group.id), text)
+    const issue = mirrorIssues.get(paths.root)
+    if (issue !== undefined && issue.id === group.id) mirrorIssues.delete(paths.root)
+    return true
+  } catch (error) {
+    mirrorIssues.set(paths.root, { id: group.id, at: nowIso(), reason: String(error?.message ?? error) })
+    return false
+  }
+}
+
+/**
+ * 读讨论组（完整消息）。
+ *
+ * 库里有就直接读；没有但目录里有一份旧 `.md` 时按旧格式导入（先备份），
+ * 这样从旧版本升级后第一读不会失败。
+ * @param paths - 路径集合。
+ * @param id - 讨论组 id。
+ */
+export async function readGroupFile(paths, id) {
+  assertGroupId(id)
+  const fromDb = await withDatabase(paths, (db) => readGroupRow(db, id))
+  if (fromDb !== undefined) return fromDb
+  const text = await readFileMaybe(groupPath(paths, id))
+  if (text === undefined) throw plazaError('group-not-found', `没有 id 为 ${id} 的讨论组`)
+  return withDatabase(paths, async (db) => {
+    const result = await importLegacyGroup(paths, db, id, text)
+    if (result.inserted) {
+      const stored = readGroupRow(db, id)
+      if (stored !== undefined) return stored
+    }
+    // 另一个进程抢先插入了同一个 id：以库为准。
+    return readGroupRow(db, id) ?? { group: result.group, messages: result.group.messages }
+  })
+}
+
+/**
+ * 落库一个讨论组，并刷新 Markdown 镜像。
+ * @param paths - 路径集合。
+ * @param group - 讨论组（含完整 messages）。
+ */
+export async function saveGroupFile(paths, group) {
+  const { messageCount } = await withDatabase(paths, (db) => writeGroup(db, group))
+  const next = messageCount === group.messageCount ? group : { ...group, messageCount }
+  const text = renderDoc(next)
+  await writeMirror(paths, next, text)
+  return text
+}
+
+/** 列出全部讨论组 id（库 + 目录里尚未导入的旧文档，按 id 排序）。 */
+export async function listGroupIds(paths) {
+  const stored = await withDatabase(paths, (db) => listDatabaseIds(db))
+  const files = await listLegacyDocIds(paths)
+  return [...new Set([...stored, ...files])].sort()
+}
+
+/**
+ * 列出讨论组摘要。
+ *
+ * 只从库里读标量行、参与者和每组最后一条消息，不再解析整份 Markdown；目录里
+ * 还没入库的旧文档会在这一步导入（解析失败的进 `invalid`）。
+ * @param paths - 路径集合。
+ * @param options - `{ identity, includeClosed, status, query, mine, limit, standing }`。
+ */
+export async function listGroups(paths, options = {}) {
+  const loaded = await withDatabase(paths, async (db) => {
+    const { invalid } = await importLegacyGroups(paths, db)
+    return { groups: readGroupRows(db), invalid }
+  })
+  const all = []
+  for (const group of loaded.groups) {
+    const lock = await readLock(paths, group.id)
+    all.push(summarizeGroup(group, lock !== undefined && !lock.expired ? lock : undefined, {
+      identity: options.identity,
+      path: groupPath(paths, group.id),
+    }))
+  }
+  const counts = { open: 0, closing: 0, closed: 0, writing: 0, total: 0 }
+  // 归档只影响展示：默认不进入列表与计数，只有 `includeArchived: true` 才带出来。
+  const visible = options.includeArchived === true ? all : all.filter((group) => group.archived !== true)
+  counts.total = visible.length
+  for (const group of visible) {
     if (counts[group.status] !== undefined) counts[group.status] += 1
     if (group.writing === true) counts.writing += 1
   }
   const needle = typeof options.query === 'string' ? options.query.trim().toLowerCase() : ''
-  let groups = all.filter((group) => {
+  let groups = visible.filter((group) => {
     if (options.includeClosed !== true && group.status === STATUS_CLOSED) return false
     if (STATUSES.includes(options.status) && group.status !== options.status) return false
     if (options.standing === true && group.standing !== true) return false
@@ -579,7 +735,7 @@ export async function listGroups(paths, options = {}) {
   })
   const limit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : groups.length
   groups = groups.slice(0, limit)
-  return { groups, counts, invalid, paths }
+  return { groups, counts, invalid: loaded.invalid, paths }
 }
 
 /**
@@ -587,6 +743,8 @@ export async function listGroups(paths, options = {}) {
  *
  * 人类（`by.sessionId === 'human'`）创建时不自动成为参与者 —— 人类是观察者，
  * 不能因为自己忘了确认就把讨论组卡在关闭确认中。
+ *
+ * id 冲突由库主键兜底（两个进程同时建组时后插入的那个返回 false 并换 id 重试）。
  * @param paths - 路径集合。
  * @param input - `{ title, intro, by, now }`。
  */
@@ -597,44 +755,44 @@ export async function createGroup(paths, input) {
   const by = normalizeParticipant(input?.by)
   if (by === undefined) throw plazaError('identity-required', '创建讨论组需要调用方身份')
   const stamp = nowIso(input?.now)
-  const taken = new Set(await listGroupIds(paths))
-  let lastError
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const id = createGroupId(taken, Date.parse(stamp))
-    const intro = normalizeBody(input?.intro)
-    if (byteLength(intro) > MAX_MESSAGE_BYTES) {
-      throw plazaError('message-too-large', `开场消息超过上限 ${MAX_MESSAGE_BYTES} 字节`)
-    }
-    const isHuman = by.sessionId === 'human'
-    const participants = isHuman
-      ? []
-      : [normalizeParticipant({ ...by, joinedAt: stamp, lastSeenAt: stamp, lastReadSeq: intro.length > 0 ? 1 : 0, vote: null })]
-    const messages = intro.length > 0
-      ? [{ seq: 1, at: formatStamp(stamp), author: authorText(by), body: intro }]
-      : []
-    const group = normalizeGroup({
-      version: 1,
-      id,
-      title,
-      status: STATUS_OPEN,
-      standing: input?.standing === true,
-      createdAt: stamp,
-      updatedAt: stamp,
-      createdBy: by,
-      participants,
-      close: null,
-    }, messages)
-    const text = renderDoc(group)
-    try {
-      await writeFile(groupPath(paths, id), text, { encoding: 'utf8', flag: 'wx' })
-      return { group, path: groupPath(paths, id) }
-    } catch (error) {
-      if (error?.code !== 'EEXIST') throw error
-      taken.add(id)
-      lastError = error
-    }
+  const intro = normalizeBody(input?.intro)
+  if (byteLength(intro) > MAX_MESSAGE_BYTES) {
+    throw plazaError('message-too-large', `开场消息超过上限 ${MAX_MESSAGE_BYTES} 字节`)
   }
-  throw plazaError('id-collision', `连续 ${8} 次生成的讨论组 id 都已被占用`, { cause: String(lastError?.message ?? '') })
+  const isHuman = by.sessionId === 'human'
+  const participants = isHuman
+    ? []
+    : [normalizeParticipant({ ...by, joinedAt: stamp, lastSeenAt: stamp, lastReadSeq: intro.length > 0 ? 1 : 0, vote: null })]
+  const messages = intro.length > 0
+    ? [{ seq: 1, at: formatStamp(stamp), author: authorText(by), body: intro }]
+    : []
+  const taken = new Set(await listGroupIds(paths))
+  return withDatabase(paths, async (db) => {
+    let lastError
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const id = createGroupId(taken, Date.parse(stamp))
+      const group = normalizeGroup({
+        version: 1,
+        id,
+        title,
+        status: STATUS_OPEN,
+        standing: input?.standing === true,
+        createdAt: stamp,
+        updatedAt: stamp,
+        createdBy: by,
+        participants,
+        close: null,
+        messageCount: messages.length,
+      }, messages)
+      if (insertGroup(db, group)) {
+        await writeMirror(paths, group, renderDoc(group))
+        return { group, path: groupPath(paths, id) }
+      }
+      taken.add(id)
+      lastError = new Error(`讨论组 id ${id} 已被占用`)
+    }
+    throw plazaError('id-collision', `连续 ${8} 次生成的讨论组 id 都已被占用`, { cause: String(lastError?.message ?? '') })
+  })
 }
 
 /**
@@ -861,6 +1019,29 @@ export async function closeStanding(paths, id, operator = { sessionId: 'human', 
 }
 
 /**
+ * 人类归档 / 取消归档一个已关闭的讨论组。
+ *
+ * 只改展示状态（`archived` / `archivedAt`），不追加消息、不改 `updatedAt`：
+ * 已关闭的组是只读的，归档不应在讨论记录里留下内容。未关闭的组会被
+ * `planArchive` 以 `not-closed` 拒绝；重复归档/取消是幂等 no-op。
+ * @param paths - 路径集合。
+ * @param id - 讨论组 id。
+ * @param archived - true = 归档，false = 取消归档。
+ * @param operator - 操作者（人类）。
+ */
+export async function archiveGroup(paths, id, archived, operator = { sessionId: 'human', name: '人类', workspace: '本机' }) {
+  const result = await withGroupLock(paths, id, operator, {
+    purpose: archived === true ? 'archive' : 'unarchive',
+  }, async () => {
+    const { group } = await readGroupFile(paths, id)
+    const planned = planArchive(group, archived === true, nowIso())
+    if (planned.changed) await saveGroupFile(paths, planned.group)
+    return planned
+  })
+  return result.value
+}
+
+/**
  * 读取一个讨论组（含摘要与锁信息）。
  * @param paths - 路径集合。
  * @param id - 讨论组 id。
@@ -880,5 +1061,13 @@ export async function readGroup(paths, id, options = {}) {
 
 /** 存储布局探测（面板/诊断用）。 */
 export function describeStore(paths) {
-  return { root: paths.root, groups: paths.groups, locks: paths.locks }
+  const issue = mirrorIssues.get(paths.root)
+  return {
+    root: paths.root,
+    db: paths.db,
+    groups: paths.groups,
+    locks: paths.locks,
+    backups: paths.backups,
+    ...(issue === undefined ? {} : { mirrorIssue: issue }),
+  }
 }

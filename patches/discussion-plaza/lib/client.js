@@ -90,6 +90,7 @@ const CSS = [
   '.dp-row-main{flex:1 1 auto;min-width:0}',
   '.dp-row-title{font-size:13px;line-height:20px;word-break:break-word;margin:0}',
   '.dp-standing{display:inline-block;margin-right:5px;padding:0 5px;border-radius:6px;background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-foreground);font-size:10px;line-height:15px;vertical-align:1px}',
+  '.dp-archived{display:inline-block;margin-right:5px;padding:0 5px;border-radius:6px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-tertiary);font-size:10px;line-height:15px;vertical-align:1px}',
   '.dp-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}',
   '.dp-check{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary);cursor:pointer;user-select:none}',
   '.dp-check input{accent-color:var(--dsw-alias-brand-primary)}',
@@ -123,7 +124,7 @@ const zh = {
   label: '交流广场',
   title: '打开跨工作区交流广场：讨论组、Agent 写入状态与关闭确认',
   panelTitle: '交流广场',
-  sub: '跨工作区讨论区 · 每个讨论组是一份 Markdown 文档',
+  sub: '跨工作区讨论区 · 数据在共享库，Markdown 镜像只读',
   refresh: '重新读取',
   create: '新建讨论组',
   createTitle: '新建讨论组',
@@ -147,10 +148,18 @@ const zh = {
   endStandingConfirm: '确认结束（只读）',
   endStandingHint: '长期讨论组只能由人类结束；Agent 的关闭提议会被拒绝',
   createStanding: '创建为长期讨论组',
+  showArchived: '显示已归档',
+  archive: '归档',
+  unarchive: '取消归档',
+  archived: '已归档',
+  archivedShort: '已归档',
+  archiveHint: '从列表收起这个已关闭的讨论组；记录不删除，可随时取消归档',
+  archivedAt: '归档于',
+  emptyArchived: '没有未归档的讨论组；勾选「显示已归档」查看归档记录。',
   participants: '参与者',
   messages: '消息',
   updated: '更新',
-  groupPath: '文档',
+  groupPath: '镜像',
   detailLoading: '正在读取…',
   copyLabel: '复制',
   copiedLabel: '已复制',
@@ -180,7 +189,7 @@ const en = {
   label: 'Plaza',
   title: 'Open the cross-workspace discussion plaza: groups, agent write status and close confirmations',
   panelTitle: 'Discussion plaza',
-  sub: 'Cross-workspace discussions · each group is one Markdown document',
+  sub: 'Cross-workspace discussions · shared database, read-only Markdown mirror',
   refresh: 'Reload',
   create: 'New group',
   createTitle: 'New discussion group',
@@ -204,10 +213,18 @@ const en = {
   endStandingConfirm: 'Confirm end (read-only)',
   endStandingHint: 'Only the human can end a long-term group; agent close proposals are refused',
   createStanding: 'Create as a long-term group',
+  showArchived: 'Show archived',
+  archive: 'Archive',
+  unarchive: 'Unarchive',
+  archived: 'Archived',
+  archivedShort: 'Archived',
+  archiveHint: 'Hide this closed group from the list; the record is kept and can be unarchived anytime',
+  archivedAt: 'Archived at',
+  emptyArchived: 'No active groups; tick "Show archived" to see archived records.',
   participants: 'Participants',
   messages: 'Messages',
   updated: 'Updated',
-  groupPath: 'Document',
+  groupPath: 'Mirror',
   detailLoading: 'Loading…',
   copyLabel: 'Copy',
   copiedLabel: 'Copied',
@@ -393,6 +410,7 @@ function GroupRow({ group, selected, onOpen, t }) {
       jsx('span', { className: 'dp-chip', 'data-status': meta.key, children: meta.label }, 'chip'),
       jsxs('div', { className: 'dp-row-main', children: [
         jsxs('p', { className: 'dp-row-title', children: [
+          group.archived === true ? jsx('span', { className: 'dp-archived', children: t('archivedShort') }, 'archived') : null,
           group.standing === true ? jsx('span', { className: 'dp-standing', children: t('standingShort') }, 'standing') : null,
           group.title,
         ] }, 'title'),
@@ -416,9 +434,10 @@ function GroupRow({ group, selected, onOpen, t }) {
  * @param props.onRemove - 移出参与者。
  * @param props.onStanding - 标记/取消长期讨论组。
  * @param props.onEndStanding - 人类结束长期讨论组。
+ * @param props.onArchive - 归档/取消归档已关闭的讨论组。
  * @param props.t - 本地化函数。
  */
-function DetailPane({ detail, loading, busy, onClose, onUnlock, onRemove, onStanding, onEndStanding, t }) {
+function DetailPane({ detail, loading, busy, onClose, onUnlock, onRemove, onStanding, onEndStanding, onArchive, t }) {
   const [confirmEnd, setConfirmEnd] = useState(false);
   if (detail === null) return null;
   const group = detail.group;
@@ -503,6 +522,7 @@ function DetailPane({ detail, loading, busy, onClose, onUnlock, onRemove, onStan
         jsx('p', { className: 'dp-row-id', children: group.id }, 'id'),
       ] }, 'titles'),
       group.standing === true ? jsx('span', { className: 'dp-standing', children: t('standingShort') }, 'standing') : null,
+      group.archived === true ? jsx('span', { className: 'dp-archived', children: t('archivedShort') }, 'archived') : null,
       jsx('span', { className: 'dp-chip', 'data-status': meta.key, children: meta.label }, 'status'),
       jsx('button', {
         type: 'button', className: 'dp-icon-btn', title: t('closePane'), 'aria-label': t('closePane'),
@@ -512,7 +532,21 @@ function DetailPane({ detail, loading, busy, onClose, onUnlock, onRemove, onStan
     ] }, 'head'),
     jsxs('div', { className: 'dp-side-body', children: [
       group.status === 'closed'
-        ? jsx('p', { className: 'dp-kv', children: t('readonly') }, 'readonly')
+        ? jsxs('div', { className: 'dp-section', children: [
+          jsx('p', { className: 'dp-kv', children: t('readonly') }, 'readonly'),
+          group.archived === true && typeof group.archivedAt === 'string'
+            ? jsx('p', { className: 'dp-kv', children: `${t('archivedAt')} ${shortTime(group.archivedAt)}` }, 'archived-at')
+            : null,
+          jsxs('div', { className: 'dp-actions', children: [
+            jsx('button', {
+              type: 'button', className: 'dp-small-btn', disabled: busy ? true : undefined,
+              title: t('archiveHint'),
+              onClick: () => onArchive(group.id, group.archived !== true),
+              children: group.archived === true ? t('unarchive') : t('archive'),
+            }, 'archive'),
+          ] }, 'actions'),
+          jsx('p', { className: 'dp-kv', children: t('archiveHint') }, 'hint'),
+        ] }, 'archive-section')
         : null,
       standingSection,
       jsxs('div', { className: 'dp-section', children: [
@@ -585,6 +619,7 @@ function PlazaPage({ t }) {
   const [title, setTitle] = useState('');
   const [intro, setIntro] = useState('');
   const [formStanding, setFormStanding] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
   const alive = useRef(true);
   const selectedRef = useRef(selectedId);
   selectedRef.current = selectedId;
@@ -696,14 +731,32 @@ function PlazaPage({ t }) {
       .finally(() => { setBusy(false); });
   };
 
+  /** 人类归档 / 取消归档已关闭的讨论组（只是展示状态，不删除记录）。 */
+  const archive = (id, archived) => {
+    if (busy) return;
+    setBusy(true);
+    void Promise.resolve()
+      .then(() => call('archive', { id, archived }))
+      .then(() => Promise.all([loadView(), loadDetail(id)]))
+      .catch((cause) => { setError(String(cause?.message ?? cause)); })
+      .finally(() => { setBusy(false); });
+  };
+
   const groups = view !== null && Array.isArray(view.groups) ? view.groups : [];
-  const counts = view?.counts ?? {};
+  const visibleGroups = showArchived ? groups : groups.filter((group) => group.archived !== true);
 
   return jsxs('div', { className: 'dp-page', children: [
     jsxs('header', { className: 'dp-head', children: [
       jsx('h1', { className: 'dp-title', children: t('panelTitle') }, 'title'),
-      jsx('span', { className: 'dp-sub', children: `${t('sub')} · ${counts.total ?? groups.length}` }, 'sub'),
+      jsx('span', { className: 'dp-sub', children: `${t('sub')} · ${visibleGroups.length}` }, 'sub'),
       jsx('span', { className: 'dp-grow' }, 'grow'),
+      jsxs('label', { className: 'dp-check', title: t('archiveHint'), children: [
+        jsx('input', {
+          type: 'checkbox', checked: showArchived,
+          onChange: (event) => setShowArchived(event.target.checked),
+        }, 'box'),
+        t('showArchived'),
+      ] }, 'show-archived'),
       jsx('button', {
         type: 'button', className: 'dp-icon-btn', title: t('refresh'), 'aria-label': t('refresh'),
         onClick: () => { void loadView(); },
@@ -743,9 +796,12 @@ function PlazaPage({ t }) {
       : null,
     error.length > 0 ? jsx('p', { className: 'dp-error', role: 'alert', children: error }, 'error') : null,
     jsxs('div', { className: 'dp-body', children: [
-      jsx('div', { className: 'dp-list', children: groups.length === 0
-        ? jsx('p', { className: 'dp-empty', children: view === null ? t('detailLoading') : t('empty') }, 'empty')
-        : groups.map((group) => jsx(GroupRow, {
+      jsx('div', { className: 'dp-list', children: visibleGroups.length === 0
+        ? jsx('p', {
+          className: 'dp-empty',
+          children: view === null ? t('detailLoading') : (groups.length > 0 ? t('emptyArchived') : t('empty')),
+        }, 'empty')
+        : visibleGroups.map((group) => jsx(GroupRow, {
           group,
           selected: group.id === selectedId,
           onOpen: (target) => setSelectedId(target.id),
@@ -771,6 +827,7 @@ function PlazaPage({ t }) {
             onRemove: remove,
             onStanding: toggleStanding,
             onEndStanding: endStanding,
+            onArchive: archive,
             t,
           }, 'detail-' + detail.group.id)),
     ] }, 'body'),

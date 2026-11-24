@@ -48,7 +48,7 @@ deep-dreaming/
 │   ├── queue-reorder/             # Drag-to-reorder queued messages (decorates the shipped queue dock, never shadows it)
 │   ├── temp-session/              # New Session row shortcut for ad-hoc temp sessions
 │   ├── todo-board/                # Cross-project todo / done / feature-branch board (agent tools + sidebar row/main page + in-page detail column; SQLite truth via `node:sqlite`, Markdown mirrors, explicit JSON export)
-│   ├── discussion-plaza/          # Cross-workspace discussion plaza: one Markdown doc per group + leased write lock + all-participant close confirmation + human-marked long-term groups + @mention wake (agent tools + bottom-left button with active-group badge + main page)
+│   ├── discussion-plaza/          # Cross-workspace discussion plaza: shared SQLite truth + read-only Markdown mirror per group + leased write lock + all-participant close confirmation + human-marked long-term groups + human archive of closed groups + @mention wake (agent tools + bottom-left button with active-group badge + main page)
 │   └── whale-background/          # Whale-girl background image in chat area
 ├── assets/                        # Brand asset synced to ~/.dsh/assets (whale favicon; no patch owns it)
 ├── archive/                       # Retired material, kept read-only (see archive/README.md)

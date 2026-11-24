@@ -2,7 +2,7 @@
  * discussion-plaza 的纯逻辑测试（不碰文件系统、不碰 Cordis）。
  *
  * 覆盖的是这个补丁最容易写错、且错了不会报错的地方：
- *   - Markdown 文档的渲染 / 解析往返（front matter 是 JSON，消息头带 seq）
+ *   - Markdown 镜像的渲染 / 旧文档解析往返（front matter 是 JSON，消息头带 seq）；
  *   - 消息解析的两个防御：代码块里的伪标题、seq 对不上的伪标题
  *   - 关闭状态机（提议 / 确认 / 撤回 / 退出 / 失联宽限）
  *   - 未读计数、参与者身份、集合上限与 id 格式
@@ -31,6 +31,7 @@ import {
   parseMessages,
   pendingConfirmations,
   planAppend,
+  planArchive,
   planCancelClose,
   planConfirmClose,
   planHumanClose,
@@ -311,6 +312,33 @@ test('长期讨论组：人类标记，Agent 关组被拒，人类可直接结�
   // 关闭确认中不能改长期标记
   const closing = planProposeClose(makeGroup([A, B]), A, '结束', T1).group
   assert.throws(() => planSetStanding(closing, true, HUMAN, T2), (error) => error.code === 'close-pending')
+})
+
+test('归档：只允许已关闭组；归档/取消幂等且不写讨论消息', () => {
+  // 未关闭（open / closing）都不能归档。
+  assert.throws(() => planArchive(makeGroup([A]), true, T1), (error) => error.code === 'not-closed')
+  const closing = planProposeClose(makeGroup([A, B]), A, '结束', T1).group
+  assert.throws(() => planArchive(closing, true, T2), (error) => error.code === 'not-closed')
+
+  const closed = planHumanClose(planSetStanding(makeGroup([A]), true, HUMAN, T1).group, HUMAN, '收尾', T2).group
+  const messagesBefore = closed.messages.length
+  const archived = planArchive(closed, true, T3)
+  assert.equal(archived.changed, true)
+  assert.equal(archived.group.archived, true)
+  assert.equal(archived.group.archivedAt, T3)
+  assert.equal(archived.group.messages.length, messagesBefore, '归档不追加讨论消息')
+  assert.equal(archived.group.updatedAt, closed.updatedAt, '归档不改内容更新时间')
+  assert.equal(planArchive(archived.group, true, T3).changed, false, '重复归档是 no-op')
+
+  const summary = summarizeGroup(archived.group, undefined, { identity: A })
+  assert.equal(summary.archived, true)
+  assert.equal(summary.archivedAt, T3)
+
+  const restored = planArchive(archived.group, false, T3)
+  assert.equal(restored.changed, true)
+  assert.equal(restored.group.archived, false)
+  assert.equal('archivedAt' in restored.group, false, '取消归档后不再保留归档时间')
+  assert.equal(planArchive(restored.group, false, T3).changed, false, '重复取消是 no-op')
 })
 
 test('summarizeGroup 带出长期标记', () => {

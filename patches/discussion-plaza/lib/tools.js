@@ -80,6 +80,8 @@ const GROUP_SCHEMA = {
     status: { type: 'string', enum: ['open', 'closing', 'closed'] },
     statusLabel: { type: 'string', description: '讨论中 / 关闭确认中 / 已关闭' },
     standing: { type: 'boolean', description: '长期讨论组（由人类标记；Agent 不能关闭它）' },
+    archived: { type: 'boolean', description: '已被人类归档（只可能是已关闭组；plaza_list 默认不返回）' },
+    archivedAt: { type: 'string', description: '归档时间（仅 archived:true 时存在）' },
     writing: { type: 'boolean', description: '当前是否有 Agent 持有写锁（写入中）' },
     lock: LOCK_SCHEMA,
     participants: { type: 'array', items: PARTICIPANT_SCHEMA },
@@ -113,7 +115,7 @@ const GROUP_SCHEMA = {
         cancelReason: { type: 'string' },
       },
     },
-    path: { type: 'string', description: '讨论组 Markdown 文档的绝对路径' },
+    path: { type: 'string', description: '讨论组 Markdown 镜像的绝对路径（由库渲染，只读）' },
   },
 }
 
@@ -250,11 +252,12 @@ export function createTools(store, hooks = {}) {
     {
       name: 'plaza_create',
       description:
-        'Create a discussion group in the cross-workspace discussion plaza. Every group is one Markdown document under ' +
-        '~/.dsh/discussion-plaza/groups/<id>.md and is visible from every workspace. The returned id is the stable key other ' +
-        'sessions query with plaza_read / plaza_append. Use this when you need to discuss something with an agent in another ' +
-        'workspace (or leave a durable, shared discussion record). Status starts open; closing needs every participant to confirm. ' +
-        'A long-term (standing) group is marked by the human in the plaza panel, not by this tool; agents cannot close one.',
+        'Create a discussion group in the cross-workspace discussion plaza. Every group is a shared record in the plaza SQLite ' +
+        'database, with a read-only Markdown mirror under ~/.dsh/discussion-plaza/groups/<id>.md, and is visible from every workspace. ' +
+        'The returned id is the stable key other sessions query with plaza_read / plaza_append. Use this when you need to discuss ' +
+        'something with an agent in another workspace (or leave a durable, shared discussion record). Status starts open; closing ' +
+        'needs every participant to confirm. A long-term (standing) group is marked by the human in the plaza panel, not by this ' +
+        'tool; agents cannot close one.',
       parameters: {
         type: 'object',
         properties: {
@@ -273,7 +276,7 @@ export function createTools(store, hooks = {}) {
         },
         render: (_args, value) => text(
           `Created discussion group ${value?.group?.id} 「${value?.group?.title}」.\n` +
-          `Document: ${value?.path}\n` +
+          `Mirror: ${value?.path}\n` +
           `Share the id: other workspaces call plaza_read ${value?.group?.id} then plaza_append ${value?.group?.id}.\n` +
           `Closing: plaza_propose_close → every participant plaza_confirm_close (plaza_cancel_close reopens).`,
         ),
@@ -293,12 +296,13 @@ export function createTools(store, hooks = {}) {
       description:
         'List discussion groups in the shared plaza (every workspace sees the same board). Start here to discover what other ' +
         'workspaces are discussing, or to find groups where you have unread messages or a pending close confirmation. ' +
-        'Long-term (standing) groups are listed first and carry standing: true. Closed groups are omitted unless includeClosed is true. ' +
-        'Read-only.',
+        'Long-term (standing) groups are listed first and carry standing: true. Closed groups are omitted unless includeClosed is true; ' +
+        'archived (human-tidied) closed groups are omitted unless includeArchived is true (it implies includeClosed). Read-only.',
       parameters: {
         type: 'object',
         properties: {
           includeClosed: { type: 'boolean', description: 'Include closed (read-only) groups; default false' },
+          includeArchived: { type: 'boolean', description: 'Include archived closed groups (implies includeClosed); default false' },
           status: { type: 'string', enum: ['open', 'closing', 'closed'], description: 'Only this status' },
           standing: { type: 'boolean', description: 'Only long-term (human-marked standing) groups' },
           mine: { type: 'boolean', description: 'Only groups this session participates in' },
@@ -321,7 +325,7 @@ export function createTools(store, hooks = {}) {
               },
             },
             groups: { type: 'array', items: GROUP_SCHEMA },
-            invalid: { type: 'array', items: { type: 'string' }, description: 'Unreadable/corrupt group files (ids)' },
+            invalid: { type: 'array', items: { type: 'string' }, description: 'Legacy Markdown files that could not be imported into the plaza database (ids)' },
           },
         },
         render: (_args, value) => {
@@ -332,6 +336,7 @@ export function createTools(store, hooks = {}) {
           if (groups.length === 0) return text(`${head}\nNo groups matched. Use plaza_create to start one.`)
           const lines = groups.map((group) => {
             const flags = [group.statusLabel]
+            if (group.archived === true) flags.unshift('已归档')
             if (group.standing === true) flags.unshift('长期')
             if (group.writing === true) flags.push(`写入中${group.lock?.holder === undefined ? '' : ` · ${personLabel(group.lock.holder)}`}`)
             if (group.yourUnread > 0) flags.push(`${group.yourUnread} 条未读`)
@@ -345,7 +350,8 @@ export function createTools(store, hooks = {}) {
         const identity = identityOf(exec)
         const listed = await listGroups(paths, {
           identity,
-          includeClosed: args?.includeClosed === true,
+          includeClosed: args?.includeClosed === true || args?.includeArchived === true,
+          includeArchived: args?.includeArchived === true,
           status: args?.status,
           standing: args?.standing === true,
           mine: args?.mine === true,
@@ -365,14 +371,14 @@ export function createTools(store, hooks = {}) {
         'Read one discussion group by id (the same id works from any workspace). Returns the status, participants, close state and ' +
         'messages. Reading marks the group as read for this session (markRead defaults to true), which clears the unread notice. ' +
         'By default only messages newer than your last read are returned (pass sinceSeq: 0 to get the full history; useful for a ' +
-        'long-lived group). Pass includeDoc to get the raw Markdown document too.',
+        'long-lived group). Pass includeDoc to get the rendered Markdown mirror too.',
       parameters: {
         type: 'object',
         properties: {
           id: { type: 'string', description: 'Discussion group id (dg_…)' },
           sinceSeq: { type: 'integer', description: 'Only return messages with seq greater than this' },
           markRead: { type: 'boolean', description: 'Mark read for this session; default true' },
-          includeDoc: { type: 'boolean', description: 'Include the full Markdown document; default false' },
+          includeDoc: { type: 'boolean', description: 'Include the rendered Markdown mirror; default false' },
         },
         required: ['id'],
       },
@@ -574,7 +580,7 @@ export function createTools(store, hooks = {}) {
       name: 'plaza_append',
       description:
         'Append a message to a discussion group. This is the normal way to talk: the message becomes the next numbered section of ' +
-        'the group Markdown document, attributed to your workspace/session. Appending auto-joins you as a participant. Refused while ' +
+        'the next numbered message (seq) in the group, attributed to your workspace/session. Appending auto-joins you as a participant. Refused while ' +
         'the group is in close confirmation (plaza_confirm_close / plaza_cancel_close) or closed. Without lockToken it takes a short ' +
         'transient write lock; with lockToken (from plaza_lock) it writes under your held lock and extends the lease. ' +
         'MENTION WAKE — REQUIRED to actually notify another agent: a message with no @workspace and no wake argument is only appended ' +
@@ -630,7 +636,7 @@ export function createTools(store, hooks = {}) {
             (requested && mentions.length === 0 ? '\nNo participant matched the wake targets (check workspace / key / name).' : '') +
             // 没 @、也没给 wake：按设计只写不叫。明确回一句，避免模型/人以为对方已被通知到
             // （2026-11-23 的真实案例：回执只有 Wrote，两边都以为唤醒了）。
-            (!wakeGiven && mentions.length === 0 ? '\nWARNING: no one was woken — the body has no @workspace and no wake argument, so this message only reached the group document.' : '') +
+            (!wakeGiven && mentions.length === 0 ? '\nWARNING: no one was woken — the body has no @workspace and no wake argument, so this message only reached the group.' : '') +
             (wake.length > 0 ? `\nWake: ${wake.map((entry) => `${nameOf(entry)} → ${entry.status}`).join(' · ')}.` : ''));
         },
       },
