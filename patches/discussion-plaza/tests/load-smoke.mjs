@@ -120,10 +120,28 @@ function harness(options = {}) {
     info() {},
     debug() {},
   })
-  // 点名唤醒用：live agent 的桩（status + followup）。没有注册的会话就是 offline。
+  // 点名唤醒用：live agent 的桩（status + followup）。没有注册的会话就是 offline；
+  // resumable 里放一个「磁盘上的会话」，模拟 agents.resume() 把它加载回来。
   const liveAgents = new Map()
+  const resumable = new Map()
   ctx.provide('agents', {
     get(id) { return liveAgents.get(id) },
+    async resume(options) {
+      const id = options?.resumeSessionId
+      const agent = resumable.get(id)
+      if (agent === undefined) {
+        const error = new Error(`no persisted session ${id}`)
+        error.code = 'session-not-found'
+        throw error
+      }
+      liveAgents.set(id, agent)
+      return {
+        agent,
+        async dispose() {
+          if (liveAgents.get(id) === agent) liveAgents.delete(id)
+        },
+      }
+    },
   })
   if (options.skipWebServer !== true) {
     ctx.provide('webServer', {
@@ -136,7 +154,7 @@ function harness(options = {}) {
       },
     })
   }
-  return { ctx, routes, sections, tools, warnings, liveAgents }
+  return { ctx, routes, sections, tools, warnings, liveAgents, resumable }
 }
 
 /**
@@ -251,7 +269,7 @@ try {
 
   await test('Config 的字段都是 volatile（否则设置页没有表单）', () => {
     const dict = host.Config.dict ?? {}
-    for (const key of ['rootDir', 'tools', 'promptSection', 'notify', 'wakeOnMention', 'lockTtlSec', 'closeGraceMin']) {
+    for (const key of ['rootDir', 'tools', 'promptSection', 'notify', 'wakeOnMention', 'wakeResume', 'lockTtlSec', 'closeGraceMin']) {
       assert.ok(Object.hasOwn(dict, key), `Config must declare ${key}`)
       assert.equal(dict[key].meta?.volatile, true, `${key} must be .volatile()`)
     }
@@ -315,7 +333,7 @@ try {
   })
 
   await test('真实执行一遍：创建 → 加入 → 发言 → 加锁写 → 关组，返回值逐个过 output schema', async () => {
-    const { ctx, tools, liveAgents } = harness()
+    const { ctx, tools, liveAgents, resumable } = harness()
     const fiber = await mount(ctx, { rootDir: join(root, 'flow') })
     try {
       const byName = new Map(tools.map((tool) => [tool.name, tool]))
@@ -393,9 +411,19 @@ try {
       assert.equal(busyWake.wake[0].status, 'busy')
       assert.equal(followed.length, 1, 'a running agent must not be woken again')
       liveAgents.delete('s-b')
+      // 未加载且磁盘上也没有可恢复的会话：resume 失败，回执 resume-failed（不伪造成功）。
       const offlineWake = await byName.get('plaza_append').execute({ id, body: '离线点名', wake: ['beta'] }, execFor(A))
       validate('plaza_append', offlineWake)
-      assert.equal(offlineWake.wake[0].status, 'offline')
+      assert.equal(offlineWake.wake[0].status, 'resume-failed')
+
+      // 未加载但磁盘上有会话（wakeResume 默认开）：先 agents.resume 再 followup，回执 resumed。
+      const resumedAgent = { status: 'idle', followup(message) { followed.push(message) } }
+      resumable.set('s-b', resumedAgent)
+      const resumedWake = await byName.get('plaza_append').execute({ id, body: '未加载的 B 请 @beta 看一下', wake: ['beta'] }, execFor(A))
+      validate('plaza_append', resumedWake)
+      assert.equal(resumedWake.wake[0].status, 'resumed')
+      assert.equal(followed.length, 2)
+      assert.equal(liveAgents.get('s-b'), resumedAgent, 'resume 之后会话应当已经加载')
 
       const lock = await byName.get('plaza_lock').execute({ id, ttlSec: 120, purpose: '汇总' }, execFor(A))
       validate('plaza_lock', lock)
@@ -437,6 +465,24 @@ try {
       validate('plaza_list', standingList)
       assert.deepEqual(standingList.groups.map((entry) => entry.id), [standing.group.id])
       assert.equal(standingList.groups[0].standing, true)
+    } finally {
+      await fiber.dispose()
+    }
+  })
+
+  await test('wakeResume:false 时未加载会话保持 offline，不尝试 resume', async () => {
+    const { ctx, tools, liveAgents, resumable } = harness()
+    const fiber = await mount(ctx, { rootDir: join(root, 'wake-no-resume'), wakeResume: false })
+    try {
+      const byName = new Map(tools.map((tool) => [tool.name, tool]))
+      const created = await byName.get('plaza_create').execute({ title: '关闭自动恢复', intro: '开场' }, execFor(A))
+      const id = created.group.id
+      await byName.get('plaza_join').execute({ id }, execFor(B))
+      // B 的会话在磁盘上（resumable 有），但没加载；关掉 wakeResume 时不应该 resume。
+      resumable.set('s-b', { status: 'idle', followup() {} })
+      const result = await byName.get('plaza_append').execute({ id, body: '点名但不开自动恢复', wake: ['beta'] }, execFor(A))
+      assert.equal(result.wake[0].status, 'offline')
+      assert.equal(liveAgents.get('s-b'), undefined, 'wakeResume:false must not load the session')
     } finally {
       await fiber.dispose()
     }

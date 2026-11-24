@@ -67,6 +67,8 @@ export const Config = z.object({
   notify: z.boolean().default(true).volatile(),
   /** 是否允许 `@工作区` / wake 参数点名唤醒空闲会话。 */
   wakeOnMention: z.boolean().default(true).volatile(),
+  /** 目标会话未加载（offline）时，是否自动 resume 再唤醒（恢复出的会话空闲后释放）。 */
+  wakeResume: z.boolean().default(true).volatile(),
   /** 默认写锁租约（秒）。 */
   lockTtlSec: z.number().default(120).volatile(),
   /** 关闭确认中，参与者超过该分钟数无响应即视为离开；0 = 严格等待。 */
@@ -74,7 +76,7 @@ export const Config = z.object({
 })
 
 /** 配置默认值（`apply` 可能收到空对象）。 */
-export const DEFAULTS = { rootDir: '', tools: true, promptSection: true, notify: true, wakeOnMention: true, lockTtlSec: 120, closeGraceMin: 0 }
+export const DEFAULTS = { rootDir: '', tools: true, promptSection: true, notify: true, wakeOnMention: true, wakeResume: true, lockTtlSec: 120, closeGraceMin: 0 }
 
 /**
  * 解包 volatile 配置盒子（坑 17：`.volatile()` 之后是 `{ get }` 访问器）。
@@ -286,6 +288,41 @@ export function apply(ctx, config = {}) {
       `不需要回复时 plaza_read ${group.id} 标记已读即可；不再参与用 plaza_leave ${group.id}。`,
     ].join('\n')
   }
+  // 为唤醒而 resume 出来的会话：空闲约 1 分钟后释放，避免插件把会话长期驻留内存。
+  // 只释放自己 resume 的 handle —— 用户手动打开的会话不在这里，不会被误关。
+  const resumedHandles = new Map()
+  const WAKE_RESUME_IDLE_MS = 60_000
+  const WAKE_RESUME_SWEEP_MS = 30_000
+  ctx.effect(() => {
+    const timer = setInterval(() => {
+      const now = Date.now()
+      for (const [key, entry] of [...resumedHandles]) {
+        const agent = entry.handle?.agent
+        if (agent === undefined || agent.status !== 'idle') {
+          entry.idleSince = undefined
+          continue
+        }
+        if (entry.idleSince === undefined) {
+          entry.idleSince = now
+          continue
+        }
+        if (now - entry.idleSince < WAKE_RESUME_IDLE_MS) continue
+        resumedHandles.delete(key)
+        Promise.resolve().then(() => entry.handle?.dispose?.()).catch((error) => {
+          ctx.logger?.warn?.(`discussion-plaza: dispose resumed session failed: ${String(error?.message ?? error)}`)
+        })
+      }
+    }, WAKE_RESUME_SWEEP_MS)
+    timer.unref?.()
+    return () => {
+      clearInterval(timer)
+      for (const entry of resumedHandles.values()) {
+        Promise.resolve().then(() => entry.handle?.dispose?.()).catch(() => undefined)
+      }
+      resumedHandles.clear()
+    }
+  }, 'discussion-plaza: release resumed wake sessions')
+
   const wakeTargets = async ({ group, message, sender, targets }) => {
     if (current().wakeOnMention === false) return []
     const agents = typeof ctx.get === 'function' ? ctx.get('agents') : undefined
@@ -293,7 +330,21 @@ export function apply(ctx, config = {}) {
     for (const { participant } of targets) {
       if (participant.key === sender.key) continue
       const base = presentWakeTarget(participant)
-      const agent = agents?.get?.(participant.sessionId)
+      let agent = agents?.get?.(participant.sessionId)
+      let resumed = false
+      if (agent === undefined && current().wakeResume !== false && typeof agents?.resume === 'function') {
+        try {
+          const handle = await agents.resume({ resumeSessionId: participant.sessionId })
+          agent = handle?.agent
+          if (agent === undefined) throw new Error('resume returned no agent')
+          resumed = true
+          resumedHandles.set(participant.key, { handle, idleSince: undefined })
+        } catch (error) {
+          ctx.logger?.warn?.(`discussion-plaza: resume failed for ${participant.key}: ${String(error?.message ?? error)}`)
+          results.push({ ...base, status: 'resume-failed' })
+          continue
+        }
+      }
       if (agent === undefined) {
         results.push({ ...base, status: 'offline' })
         continue
@@ -303,6 +354,7 @@ export function apply(ctx, config = {}) {
         continue
       }
       if (typeof agent.followup !== 'function') {
+        if (resumed) resumedHandles.delete(participant.key)
         results.push({ ...base, status: 'failed' })
         continue
       }
@@ -312,9 +364,10 @@ export function apply(ctx, config = {}) {
           content: [{ type: 'text', text: buildWakeText(group, message, sender) }],
           source: { kind: 'plugin:discussion-plaza', form: 'notice', summary: `被点名：${group.title}` },
         }))
-        results.push({ ...base, status: 'woken' })
+        results.push({ ...base, status: resumed ? 'resumed' : 'woken' })
       } catch (error) {
         recentWake.delete(participant.key)
+        if (resumed) resumedHandles.delete(participant.key)
         ctx.logger?.warn?.(`discussion-plaza: wake failed for ${participant.key}: ${String(error?.message ?? error)}`)
         results.push({ ...base, status: 'failed' })
       }
@@ -433,8 +486,13 @@ export function apply(ctx, config = {}) {
         '  变「已关闭」（只读，不再可写）；有异议用 `plaza_cancel_close` 恢复讨论。不要绕过这个流程。',
         '- 长期讨论组（人类在面板里标记）不能由 Agent 关闭：对它 `plaza_propose_close` 会被拒绝，',
         '  由人类在广场面板决定结束。长期组仍然可以正常发言、读未读、加入与退出。',
-        '- 点名唤醒：发言里写 `@工作区`（或给 `plaza_append` 的 `wake` 参数）会唤醒对方**空闲且在线**的会话；',
-        '  忙碌/未加载不会硬打扰，工具回执会列出 woken / busy / offline。只在确实需要对方回应时点名，不要 @ 全组。',
+        '- **点名唤醒（默认只写不叫）**：发言里写 `@工作区`（如 `@taikoo-saas`）或给 `plaza_append` 传',
+        '  `wake: [工作区]`，才会唤醒对方**空闲且已加载**的会话；正文没有任何 @ 也没给 wake 时，',
+        '  消息只写进组里，**对方不会被唤醒**，要等它下次打开这个组才看到。所以「回复/提问给别的工作区」',
+        '  必须点名，否则等于对方收不到。忙碌/未加载只回执 busy/offline，不会硬打扰。',
+        '  目标会话未加载（offline）时默认自动 resume 再唤醒（配置 `wakeResume: false` 关闭）；',
+        '  恢复出的会话空闲约 1 分钟后自动释放，历史与未读不丢。',
+        '  只在确实需要对方回应时点名，不要 @ 全组。',
         '- 同一工作区可能有多个会话：`@工作区` 会叫到该工作区所有 live 会话；要精确点名用 `@工作区/<sessionId>`',
         '  或 `wake: [key]`。回复用 `#seq` 引用，不要整段复述对方原文；超长分析写进仓库文档，广场只发摘要和链接。',
         '- 想和另一个工作区的会话讨论时，先 `plaza_create` 建组，把返回的 id 告诉用户或对方会话。',

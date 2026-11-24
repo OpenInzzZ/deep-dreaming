@@ -60,10 +60,21 @@ test('@key 与 @名称 都能命中', () => {
 test('提及边界：@alpha 不误中 @alphabet / @alphax', () => {
   assert.equal(hasMention('@alphabet', 'alpha'), false)
   assert.equal(hasMention('@alphax', 'alpha'), false)
+  assert.equal(hasMention('@alpha2', 'alpha'), false)
   assert.equal(hasMention('@alpha 你好', 'alpha'), true)
   assert.equal(hasMention('@alpha，你好', 'alpha'), true)
   assert.equal(hasMention('@alpha。', 'alpha'), true)
   assert.equal(hasMention('@alpha', 'alpha'), true)
+})
+
+test('提及边界：中文紧跟也算点名，但斜杠前缀不算', () => {
+  // 模型写中文时经常不带空格：`@taikoo-saas请看` 之前会被判成"没点名"，
+  // 回执没有任何 Mentioned/Wake 行，看起来就像唤醒功能坏了（2026-11-23 修复）。
+  assert.equal(hasMention('@alpha你好', 'alpha'), true)
+  assert.equal(hasMention('@beta请看这个', 'beta'), true)
+  // 斜杠是参与者 key（工作区/sessionId）的组成部分，`@beta` 不能误中 `@beta/s-b`。
+  assert.equal(hasMention('@beta/s-b', 'beta'), false)
+  assert.equal(hasMention('@beta/s-b 你好', 'beta/s-b'), true)
 })
 
 test('发送者自己不会被点名唤醒', () => {

@@ -135,8 +135,8 @@ const WAKE_TARGET_SCHEMA = {
     name: { type: 'string' },
     status: {
       type: 'string',
-      enum: ['woken', 'busy', 'offline', 'failed', 'skipped'],
-      description: 'woken=已用 followup 唤醒；busy=会话在跑；offline=会话未加载；failed=投递失败；skipped=超出单次唤醒上限',
+      enum: ['woken', 'resumed', 'busy', 'offline', 'resume-failed', 'failed', 'skipped'],
+      description: 'woken=已用 followup 唤醒；resumed=会话原本未加载，已自动 resume 后唤醒；busy=会话在跑；offline=会话未加载且未开启自动恢复；resume-failed=自动恢复失败；failed=投递失败；skipped=超出单次唤醒上限',
     },
   },
 }
@@ -577,13 +577,15 @@ export function createTools(store, hooks = {}) {
         'the group Markdown document, attributed to your workspace/session. Appending auto-joins you as a participant. Refused while ' +
         'the group is in close confirmation (plaza_confirm_close / plaza_cancel_close) or closed. Without lockToken it takes a short ' +
         'transient write lock; with lockToken (from plaza_lock) it writes under your held lock and extends the lease. ' +
-        'MENTION WAKE: write @workspace (or pass wake:[...]) to wake that participant — only idle, live sessions are woken via followup; ' +
-        'busy or unloaded sessions are skipped and reported. Omit both to leave the message for their next turn.',
+        'MENTION WAKE — REQUIRED to actually notify another agent: a message with no @workspace and no wake argument is only appended ' +
+        'to the group; nobody is woken, the other side sees it when it next reads the group. To wake someone, put @workspace in the ' +
+        'body (e.g. "@taikoo-saas 请确认…"; punctuation or CJK text may follow immediately) or pass wake:["<workspace>"]. Only idle, ' +
+        'loaded sessions are woken via followup; busy or unloaded sessions are reported as busy/offline. Pass wake:[] to write silently.',
       parameters: {
         type: 'object',
         properties: {
           id: { type: 'string' },
-          body: { type: 'string', description: 'Markdown message body; use @workspace to mention (and wake) a participant' },
+          body: { type: 'string', description: 'Markdown body. Prefix the addressee\'s workspace with @ to wake it (e.g. "@taikoo-saas 请确认…"); without @workspace (or wake:[...]) nobody is woken' },
           lockToken: { type: 'string', description: 'Optional token from plaza_lock' },
           waitMs: { type: 'integer', description: 'How long to wait for a busy lock (default 1500ms)' },
           wake: {
@@ -619,12 +621,16 @@ export function createTools(store, hooks = {}) {
           const wake = Array.isArray(value?.wake) ? value.wake : []
           const labeled = labelsFor([...mentions, ...wake])
           const nameOf = (entry) => labeled.get(entry?.key) ?? personLabel(entry)
-          const requested = Array.isArray(args?.wake) && args.wake.length > 0
+          const wakeGiven = Array.isArray(args?.wake)
+          const requested = wakeGiven && args.wake.length > 0
           return text(`Wrote #${value?.message?.seq} to ${value?.group?.id} 「${value?.group?.title}」` +
             `${value?.joined === true ? ' (joined as participant)' : ''}. ` +
             `Status: ${value?.group?.statusLabel}${value?.lockHeld === true ? ' · write lock still held' : ''}.` +
             (mentions.length > 0 ? `\nMentioned: ${mentions.map(nameOf).join(', ')}.` : '') +
             (requested && mentions.length === 0 ? '\nNo participant matched the wake targets (check workspace / key / name).' : '') +
+            // 没 @、也没给 wake：按设计只写不叫。明确回一句，避免模型/人以为对方已被通知到
+            // （2026-11-23 的真实案例：回执只有 Wrote，两边都以为唤醒了）。
+            (!wakeGiven && mentions.length === 0 ? '\nWARNING: no one was woken — the body has no @workspace and no wake argument, so this message only reached the group document.' : '') +
             (wake.length > 0 ? `\nWake: ${wake.map((entry) => `${nameOf(entry)} → ${entry.status}`).join(' · ')}.` : ''));
         },
       },

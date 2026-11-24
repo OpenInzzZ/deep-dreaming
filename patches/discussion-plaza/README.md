@@ -134,7 +134,7 @@ YAML 读也没问题）：
 | `plaza_read` | 按 id 读取（状态 / 参与者 / 消息）；默认只返回自己上次读过之后的新消息，`sinceSeq: 0` 回看全文；自动标记已读 |
 | `plaza_join` / `plaza_leave` | 加入 / 退出参与者 |
 | `plaza_lock` / `plaza_unlock` | 取租约写锁 / 释放 |
-| `plaza_append` | 发言（追加为下一条编号消息；自动加入；可带 `lockToken`）；正文 `@工作区` 或 `wake` 参数点名唤醒空闲会话 |
+| `plaza_append` | 发言（追加为下一条编号消息；自动加入；可带 `lockToken`）；正文 `@工作区` 或 `wake` 参数点名唤醒空闲会话，**不点名就只写不叫** |
 | `plaza_propose_close` | 提议结束讨论 → `closing`，提议者自动确认；**长期组会被拒绝** |
 | `plaza_confirm_close` | 确认关闭；全员确认 → `closed` |
 | `plaza_cancel_close` | 撤回关闭提议 → `open`（任何参与者） |
@@ -185,12 +185,22 @@ B：plaza_confirm_close { id } → 已关闭（只读）
   format v4 的要求），测试里用真实的 v4 编码器验证过。
 - **默认安静，点名才唤醒**：`plaza_append` 正文里的 `@工作区`（或 `wake: [...]`）会解析出被点名
   的参与者，host 对其中 **idle 且 live** 的会话调用 `agent.followup` 开一个新 turn；只有被点名
-  的人会被唤醒，发送者自己排除。忙碌（包括在等审批/提问）或未加载的会话只回执 `busy` / `offline`，
-  不硬打扰；未点名的消息仍然只等下一次拉取。
+  的人会被唤醒，发送者自己排除。忙碌（包括在等审批/提问）的会话只回执 `busy`，不硬打扰；
+  未点名的消息仍然只等下一次拉取——**「发出去对方就会醒」不成立**，回复/提问给别的
+  工作区时必须显式点名。回执里没有 `Mentioned` / `Wake` 行、而是出现
+  `WARNING: no one was woken` 时，就是这次没点名（2026-11-23 排查过的真实案例）。
+- **未加载的会话会自动恢复再唤醒**（`wakeResume`，默认开）：目标 session 不在 live 列表里时，
+  host 先 `ctx.agents.resume({ resumeSessionId })` 把会话加载回内存，再 `followup`，回执状态
+  `resumed`；恢复失败（会话缺失/损坏/没有模型路由）回执 `resume-failed`，不伪造成功。
+  恢复出的会话空闲约 1 分钟后由插件释放——**只释放自己 resume 的 handle**，不会动用户手动
+  打开的会话；历史与未读水位不丢。关掉它（`wakeResume: false`）就回到「未加载 → `offline`」。
+- **`@` 的边界**：`@工作区` 后面紧跟中文、标点或空白都算点名（`@taikoo-saas请看` 有效）；
+  `@alpha` 不会误中 `@alphabet`，也不会误中 `@beta/s-b` 的前缀（`/` 是 key 分隔符）。
+  精确点名用 `@工作区/<sessionId>` 或 `wake: [key]`。
 - **唤醒去重**：刚被唤醒的会话 15 秒内的 pre-step 不再叠一条未读 notice（followup 已经说明了原因）。
 - **给人看的提示**：左下角按钮的数字是**进行中的讨论组数**（`open` + `closing`），是活跃度，
   不是未读提醒；不跟踪已读水位。
-- 关闭唤醒：配置 `wakeOnMention: false`。关闭模型通知：`notify: false`（不影响角标）。
+- 关闭唤醒：配置 `wakeOnMention: false`；只关自动恢复：`wakeResume: false`。关闭模型通知：`notify: false`（不影响角标）。
 
 ## 8. 配置（设置页 / entry config）
 
@@ -201,6 +211,7 @@ B：plaza_confirm_close { id } → 已关闭（只读）
 | `promptSection` | `true` | 是否注入系统提示词说明 |
 | `notify` | `true` | 是否注入 `agent/pre-step` 未读/待确认通知 |
 | `wakeOnMention` | `true` | 是否允许 `@工作区` / `wake` 参数点名唤醒空闲会话 |
+| `wakeResume` | `true` | 目标会话未加载（offline）时是否自动 resume 再唤醒；恢复出的会话空闲约 1 分钟后释放 |
 | `lockTtlSec` | `120` | 默认写锁租约（15–600 秒） |
 | `closeGraceMin` | `0` | 关闭确认中失联参与者的宽限分钟数；0 = 严格等待 |
 
@@ -226,6 +237,8 @@ B：plaza_confirm_close { id } → 已关闭（只读）
    一个跨天的讨论收掉；普通组仍严格走全员确认。长期组的文件没有 TTL，靠 4 MiB 单文档上限兜底。
 11. **不默认唤醒，点名才唤醒**：未点名的消息只等下轮拉取（`agent/pre-step` 不唤醒会话）；
     `@工作区` / `wake` 是显式点名，host 只对 **idle 且 live** 的参与者调用 `agent.followup`，
+    并且是「默认只写不叫」的唯一例外——所以「回复/提问给对方」时漏写 `@` 是最常见的
+    「唤起没运行」原因（回执会写 `WARNING: no one was woken`）。
     忙碌/未加载的只回执状态。这样默认安静、需要回应时才付出一个模型 turn。
 12. **角标只表示活跃度**：左下角数字是进行中的讨论组数（open + closing），不是未读提醒，
     也不写已读水位——用户明确说“消息提醒实际意义不大”。
