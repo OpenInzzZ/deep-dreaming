@@ -86,14 +86,18 @@ Git、`grep` 全都还能用，镜像就是普通 Markdown 文件）。
 
 - 三个标签页：待办 / 已办 / 功能分支（就是三种清单，各自带条数；没有「全部」）
 - 搜索框过滤标题、项目与正文
-- 每条按 tab 内的 `#N` 编号（与 Markdown 镜像里的编号同源），一次平铺、不按项目分组，
-  项目只作为来源标签留在行内元信息里
+- 每行行首有**两列数字**，语义不同，别混着读：
+  - **位置序号**（`1` `2` `3`…，小号浅色、不带 `#`）：这一份可见列表里的第几条，
+    切 tab 或搜索收窄后会重新从 1 排；
+  - **引用编号**（`#15`…，大号）：创建时分配的稳定编号，与 Markdown 镜像里的编号
+    同源，删除/完成后不回填（允许空洞），搜索与切 tab 都不影响它。
+  编号列表一次平铺、不按项目分组，项目只作为来源标签留在行内元信息里
 - 行内勾选完成、归档
 - 「已办」tab 顶部有**一键归档**：两段式按钮（第一下进入确认态，5 秒内再点一次才执行），
   一次把该 tab 所有条目软删除（`archived: true`）。条目仍留在 `board.db` 里，可用
   `workboard_list includeArchived: true` 查回，**不是物理删除**；切 tab 或 5 秒无操作
   自动退出确认态，避免误触清空整页
-- 点**整行任意位置**（标题、元信息、序号都行）在整页右侧的详情栏打开这条事项的渲染版详情（见下）
+- 点**整行任意位置**（标题、元信息、序号、引用编号都行）在整页右侧的详情栏打开这条事项的渲染版详情（见下）
 - 底部可新增；行上有未办事项时，侧栏 glyph 右上角带一颗点
 
 这对座位是宿主的 `sidebar.panellist`（导航行）+ `main`（整页），两者的 id 与 key
@@ -297,7 +301,7 @@ patches/todo-board/node_modules → ~/.dsh/profiles/node_modules
 ```powershell
 node patches/todo-board/tests/core.test.mjs         # 53 项：store / markdown / import / 详情 / 稳定编号 / 手动整理 / SQLite 迁移 / /workboard 命令
 node patches/todo-board/tests/load-smoke.mjs        # 31 项：真实 Cordis + 真实 schema 校验 + 命令座位 + archiveAll 端点
-node patches/todo-board/tests/client-contract.mjs   # 32 项：侧栏导航行 + 中列整页 + 页内详情栏（整行点击、拖拽宽度、一键归档）
+node patches/todo-board/tests/client-contract.mjs   # 33 项：侧栏导航行 + 中列整页 + 页内详情栏（整行点击、拖拽宽度、一键归档）
 ```
 
 三个脚本各自覆盖一个**静默失败面**：
@@ -322,7 +326,8 @@ node patches/todo-board/tests/client-contract.mjs   # 32 项：侧栏导航行 +
   `main panel "x" is not registered`）、**不再探测 `sidebarRight`**（整页面板期间它没有
   on-screen session，`openTab` 必抛 `no session surface is mounted`；`inject` 只能是
   `['slots','locale']`、动态 `ctx.inject` 一次都不调）、zh/en 字典键集一致，以及**真渲染**
-  （侧栏 glyph 的未办点、整页的计数与三个 tab、`#N` 序号、不再按项目分组、功能分支标记写成
+  （侧栏 glyph 的未办点、整页的计数与三个 tab、**位置序号列与 `#N` 引用编号分开**（搜索收窄后
+  位置从 1 重排、`#N` 不动）、不再按项目分组、功能分支标记写成
   「无Nacos」而不是「无NACOS」、空态、错误信封变成 `role="alert"`、`POST /todo-board/view`
   的 `{ args }` 请求体、已办 tab 的一键归档两段式确认（第一下不发请求、第二下才
   `POST /todo-board/archiveAll` 且 `args.kind === 'done'`）、点整行任意位置（标题 / 元信息 /

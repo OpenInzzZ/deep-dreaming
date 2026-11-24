@@ -430,6 +430,54 @@ if (!canRender) {
     }
   })
 
+  // 3c-a. 行首两列：位置序号与稳定引用编号 `#N` 必须分开显示。
+  // 位置随当前可见列表（切 tab / 搜索）重排，`#N` 不动 —— 两条序列挤在一列
+  // 正是"第 1 行写着 #15"那种读起来怪的地方。
+  const NUMBERED = {
+    items: [
+      { id: 'tb_t_15', kind: 'todo', number: 15, title: '甲', project: 'p', sections: {} },
+      { id: 'tb_t_29', kind: 'todo', number: 29, title: '乙', project: 'p', sections: {} },
+      { id: 'tb_t_31', kind: 'todo', number: 31, title: '丙', project: 'p', sections: {} },
+    ],
+    summary: { counts: { todo: 3, done: 0, branch: 0 } },
+  }
+
+  await checkAsync('the position column stays separate from the stable #N', async () => {
+    const fetchStub = installFetch(NUMBERED)
+    const view = mount(page, { t })
+    try {
+      await waitFor(() => view.container.querySelectorAll('.tb-row').length === 3, 'three todo rows')
+
+      // 位置：1 / 2 / 3 连续；引用编号：镜像里那一组稳定号（允许空洞）。
+      assert.deepEqual(
+        [...view.container.querySelectorAll('.tb-index')].map((node) => node.textContent),
+        ['1', '2', '3'],
+        'the position column counts the visible list from 1',
+      )
+      assert.deepEqual(
+        [...view.container.querySelectorAll('.tb-num')].map((node) => node.textContent),
+        ['#15', '#29', '#31'],
+        'the stable numbers keep their gaps',
+      )
+      // 位置列是装饰性的：读屏不该把"第几行"再念一遍。
+      assert.equal(view.container.querySelector('.tb-index').getAttribute('aria-hidden'), 'true')
+
+      // 搜索收窄成一条：位置列从 1 重新数，`#N` 仍是它自己的 31。
+      const search = view.container.querySelector('.tb-search')
+      const setValue = Object.getOwnPropertyDescriptor(shell.window.HTMLInputElement.prototype, 'value').set
+      setValue.call(search, '丙')
+      search.dispatchEvent(new shell.window.Event('input', { bubbles: true }))
+      await waitFor(() => view.container.querySelectorAll('.tb-row').length === 1, 'the filtered row')
+      assert.equal(view.container.querySelector('.tb-index').textContent, '1',
+        'filtering re-numbers the visible list from 1')
+      assert.equal(view.container.querySelector('.tb-num').textContent, '#31',
+        'filtering never touches the reference number')
+    } finally {
+      view.unmount()
+      fetchStub.restore()
+    }
+  })
+
   // 3c-b. 切到「功能分支」tab：模块名与三件硬交付物都要出现，序号按各自 tab 编。
   await checkAsync('the branch tab shows the module meta and keeps Nacos casing', async () => {
     const fetchStub = installFetch(VIEW)

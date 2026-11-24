@@ -175,9 +175,18 @@ const CSS = [
    */
   '@media (max-width:860px){.tb-body{position:relative}.tb-side{position:absolute;inset:0 0 0 auto;width:min(92%,420px);z-index:2;background:var(--dsw-alias-bg-layer-1);padding:10px 12px 18px 14px}.tb-side-resize{display:none}}',
   '.tb-empty{padding:28px 0;text-align:center;color:var(--dsw-alias-label-tertiary);font-size:13px}',
+  /*
+   * 行首有两列数字，语义不同，不要合并：
+   * `tb-index` 是这份可见列表里的位置（1 起，切 tab / 搜索后重排），
+   * `tb-num` 是创建时分配的稳定引用编号（`#N`，与镜像同源，允许空洞）。
+   * 位置序号刻意做得更小、更淡、不带 `#`：这样"第几条"和"引用哪一条"一眼分得开，
+   * 不会再把 `#15` 误读成列表的第 15 行。
+   * `user-select:none`: 复制标题时不该把这列粘进去。
+   */
+  '.tb-index{flex:none;min-width:20px;margin-top:2px;text-align:right;font-family:var(--ds-font-family-code);font-size:11px;line-height:17px;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-caption);user-select:none}',
   '.tb-row{display:flex;align-items:flex-start;gap:10px;padding:9px 10px;border-radius:10px;border:1px solid transparent;cursor:pointer}',
   /*
-   * 序号：对齐 Markdown 一级标题的字号（主题里 `--dsw-font-markdown-h1` 是
+   * 引用编号 `#N`：对齐 Markdown 一级标题的字号（主题里 `--dsw-font-markdown-h1` 是
    * 700 21px/30px，见 ui-theme/src/styles/gradient-shadow-text.css:65），这样它
    * 才是行首的视觉锚点，而不是一行小灰字。行高收到 26px 是为了不让每条行被
    * 撑高太多；`tabular-nums` 让 #1 / #10 / #100 的数字位对齐。
@@ -366,19 +375,20 @@ function hasTextSelection() {
 }
 
 /**
- * 一条事项：标题行 + 元信息 + 动作。
+ * 一条事项：序号列 + 引用编号 + 状态 + 标题行 + 元信息 + 动作。
  *
  * 正文不在这里展开 —— 点这一条的任意位置会在整页右侧的详情栏里渲染同一份 Markdown，
  * 因为事项正文里本来就写着 `**背景**`、表格、代码块与反引号路径，用 `white-space:
  * pre-wrap` 当纯文本陈列等于把这些语法原样丢给用户看。
  * @param props.item - 事项。
+ * @param props.index - 在当前可见列表里的位置（1 起，仅用于显示）。
  * @param props.selected - 是否正开着它的详情。
  * @param props.onComplete - 完成回调。
  * @param props.onArchive - 归档回调。
  * @param props.onOpen - 打开详情回调。
  * @param props.t - 本地化函数。
  */
-function ItemRow({ item, selected, onComplete, onArchive, onOpen, t }) {
+function ItemRow({ item, index, selected, onComplete, onArchive, onOpen, t }) {
   const sections = item.sections ?? {};
   const names = Object.keys(sections);
   const badge = item.kind === 'done' ? '✅' : (item.kind === 'branch' ? (item.module ?? '分支') : (item.status || 'TODO'));
@@ -398,7 +408,10 @@ function ItemRow({ item, selected, onComplete, onArchive, onOpen, t }) {
       onOpen(item);
     },
     children: [
-      // 序号：创建时分配的稳定编号（删除/完成后不回填，允许空洞），
+      // 位置序号：当前可见列表里的第几条（切 tab / 搜索后会重新从 1 排）。
+      // 与右边那个 `#N` 是两种东西：一个讲"排第几"，一个讲"引用哪一条"。
+      jsx('span', { className: 'tb-index', 'aria-hidden': 'true', children: String(index) }, 'index'),
+      // 引用编号：创建时分配的稳定编号（删除/完成后不回填，允许空洞），
       // 与 Markdown 镜像里的编号同源（`item.number`）。
       jsx('span', { className: 'tb-num', title: '#' + String(item.number ?? '?'), children: '#' + String(item.number ?? '?') }, 'num'),
       jsx('span', { className: 'tb-badge', 'data-kind': item.kind, children: badge }, 'badge'),
@@ -679,8 +692,10 @@ function BoardPage({ t }) {
     jsxs('div', { className: 'tb-body', ref: bodyRef, children: [
       jsx('div', { className: 'tb-list', children: rows.length === 0
         ? jsx('p', { className: 'tb-empty', children: view === null ? t('busy') : t('empty') }, 'empty')
-        : rows.map((item) => jsx(ItemRow, {
+        : rows.map((item, index) => jsx(ItemRow, {
             item,
+            // 序号按**可见列表**数：这个位置会随切 tab / 搜索重排，`#N` 不会。
+            index: index + 1,
             selected: item.id === selectedId,
             t,
             onOpen,
