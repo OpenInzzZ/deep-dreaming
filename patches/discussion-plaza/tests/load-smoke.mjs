@@ -58,7 +58,7 @@ try {
 
 const host = await import(pathToFileURL(join(import.meta.dirname, '..', 'lib', 'index.js')).href)
 const { createStore } = host
-const { createGroup, joinGroup, appendMessage, archiveGroup } = await import(pathToFileURL(join(import.meta.dirname, '..', 'lib', 'store.js')).href)
+const { createGroup, joinGroup, appendMessage, archiveGroup, proposeClose } = await import(pathToFileURL(join(import.meta.dirname, '..', 'lib', 'store.js')).href)
 const { parseDoc } = await import(pathToFileURL(join(import.meta.dirname, '..', 'lib', 'protocol.js')).href)
 
 let passed = 0
@@ -591,7 +591,7 @@ try {
     }
   })
 
-  await test('view / create / detail / unlock / remove-participant / set-standing / close-standing / archive / probe 端点可用', async () => {
+  await test('view / create / detail / unlock / remove-participant / set-standing / close / archive / probe 端点可用', async () => {
     const { ctx, routes } = harness()
     const fiber = await mount(ctx, { rootDir: join(root, 'route-endpoints') })
     try {
@@ -679,7 +679,7 @@ try {
       assert.equal(badStanding.status, 400)
 
       const closeLong = await callRoute(route, {
-        url: '/discussion-plaza/close-standing',
+        url: '/discussion-plaza/close',
         headers: HOME_HEADERS,
         body: JSON.stringify({ args: { id: longId, reason: '收尾' } }),
       })
@@ -693,6 +693,47 @@ try {
       assert.equal(longDetail.body.value.group.standing, true)
       assert.equal(longDetail.body.value.group.status, 'closed')
       assert.ok(longDetail.body.value.markdown.includes('结束长期讨论'))
+
+      // 人工结束普通组：关闭确认中跳过剩余确认直接关闭；已关闭再关是 group-closed。
+      const normalCreated = await callRoute(route, {
+        url: '/discussion-plaza/create',
+        headers: HOME_HEADERS,
+        body: JSON.stringify({ args: { title: '普通议题', intro: '开场' } }),
+      })
+      assert.equal(normalCreated.status, 200)
+      const normalId = normalCreated.body.value.id
+      // 两个参与者：提议后才会停在 closing（单参与者提议会立即关闭）。
+      await joinGroup(store.paths, normalId, { sessionId: 's-b', name: 'B', workspace: 'beta' })
+      await joinGroup(store.paths, normalId, { sessionId: 's-c', name: 'C', workspace: 'gamma' })
+      await proposeClose(store.paths, normalId, { sessionId: 's-b', name: 'B', workspace: 'beta' }, '结论已定')
+      const normalClose = await callRoute(route, {
+        url: '/discussion-plaza/close',
+        headers: HOME_HEADERS,
+        body: JSON.stringify({ args: { id: normalId } }),
+      })
+      assert.equal(normalClose.status, 200, JSON.stringify(normalClose.body))
+      assert.equal(normalClose.body.value.status, 'closed')
+      const normalDetail = await callRoute(route, {
+        url: '/discussion-plaza/detail',
+        headers: HOME_HEADERS,
+        body: JSON.stringify({ args: { id: normalId } }),
+      })
+      assert.equal(normalDetail.body.value.group.status, 'closed')
+      assert.ok(normalDetail.body.value.markdown.includes('人工结束讨论'))
+      const closeAgain = await callRoute(route, {
+        url: '/discussion-plaza/close',
+        headers: HOME_HEADERS,
+        body: JSON.stringify({ args: { id: normalId } }),
+      })
+      assert.equal(closeAgain.status, 400)
+      assert.equal(closeAgain.body.error.code, 'group-closed')
+      const badClose = await callRoute(route, {
+        url: '/discussion-plaza/close',
+        headers: HOME_HEADERS,
+        body: JSON.stringify({ args: {} }),
+      })
+      assert.equal(badClose.status, 400)
+      assert.equal(badClose.body.error.code, 'bad-request')
 
       // 归档：只有已关闭组可归档；view 会带出归档标记（面板自己按开关过滤）。
       const archivedRoute = await callRoute(route, {

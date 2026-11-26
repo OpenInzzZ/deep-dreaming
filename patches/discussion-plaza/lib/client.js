@@ -144,8 +144,11 @@ const zh = {
   standingShort: '长期',
   markStanding: '标记为长期讨论组',
   unmarkStanding: '取消长期标记',
+  endSection: '结束讨论',
+  endGroup: '人工结束讨论',
+  endGroupConfirm: '确认结束（只读）',
+  endGroupHint: '人工结束会跳过参与者确认，立即关闭为只读；仅人类可操作',
   endStanding: '结束长期讨论',
-  endStandingConfirm: '确认结束（只读）',
   endStandingHint: '长期讨论组只能由人类结束；Agent 的关闭提议会被拒绝',
   createStanding: '创建为长期讨论组',
   showArchived: '显示已归档',
@@ -209,8 +212,11 @@ const en = {
   standingShort: 'Long-term',
   markStanding: 'Mark as long-term group',
   unmarkStanding: 'Remove long-term mark',
+  endSection: 'End discussion',
+  endGroup: 'End discussion manually',
+  endGroupConfirm: 'Confirm end (read-only)',
+  endGroupHint: 'A manual end skips participant confirmations and closes the group as read-only; human-only action',
   endStanding: 'End long-term discussion',
-  endStandingConfirm: 'Confirm end (read-only)',
   endStandingHint: 'Only the human can end a long-term group; agent close proposals are refused',
   createStanding: 'Create as a long-term group',
   showArchived: 'Show archived',
@@ -433,11 +439,11 @@ function GroupRow({ group, selected, onOpen, t }) {
  * @param props.onUnlock - 解除写锁。
  * @param props.onRemove - 移出参与者。
  * @param props.onStanding - 标记/取消长期讨论组。
- * @param props.onEndStanding - 人类结束长期讨论组。
+ * @param props.onEndGroup - 人类人工结束讨论组（任何未关闭组）。
  * @param props.onArchive - 归档/取消归档已关闭的讨论组。
  * @param props.t - 本地化函数。
  */
-function DetailPane({ detail, loading, busy, onClose, onUnlock, onRemove, onStanding, onEndStanding, onArchive, t }) {
+function DetailPane({ detail, loading, busy, onClose, onUnlock, onRemove, onStanding, onEndGroup, onArchive, t }) {
   const [confirmEnd, setConfirmEnd] = useState(false);
   if (detail === null) return null;
   const group = detail.group;
@@ -468,21 +474,34 @@ function DetailPane({ detail, loading, busy, onClose, onUnlock, onRemove, onStan
           onClick: () => onStanding(group.id, group.standing !== true),
           children: group.standing === true ? t('unmarkStanding') : t('markStanding'),
         }, 'toggle'),
-        group.standing === true
-          ? jsx('button', {
-            type: 'button', className: 'dp-small-btn', disabled: busy ? true : undefined,
-            title: t('endStandingHint'),
-            onClick: () => {
-              if (confirmEnd) { setConfirmEnd(false); onEndStanding(group.id); }
-              else setConfirmEnd(true);
-            },
-            children: confirmEnd ? t('endStandingConfirm') : t('endStanding'),
-          }, 'end')
-          : null,
       ] }, 'actions'),
-      group.standing === true ? jsx('p', { className: 'dp-kv', children: t('endStandingHint') }, 'hint') : null,
     ] }, 'standing-section')
     : null;
+
+  // 人工结束：任何未关闭的组都能由人类直接关闭（跳过参与者确认）。
+  // 长期组仍是唯一 Agent 关不掉的组；这里只是把「结束」入口泛化到普通组与
+  // 关闭确认中的组，避免失联参与者把讨论组卡在 closing。
+  const endSection = group.status === 'closed'
+    ? null
+    : (() => {
+      const endLabel = group.standing === true ? t('endStanding') : t('endGroup');
+      const endHint = group.standing === true ? t('endStandingHint') : t('endGroupHint');
+      return jsxs('div', { className: 'dp-section', children: [
+        jsx('h3', { className: 'dp-section-title', children: t('endSection') }, 'title'),
+        jsxs('div', { className: 'dp-actions', children: [
+          jsx('button', {
+            type: 'button', className: 'dp-small-btn', disabled: busy ? true : undefined,
+            title: endHint,
+            onClick: () => {
+              if (confirmEnd) { setConfirmEnd(false); onEndGroup(group.id); }
+              else setConfirmEnd(true);
+            },
+            children: confirmEnd ? t('endGroupConfirm') : endLabel,
+          }, 'end'),
+        ] }, 'actions'),
+        jsx('p', { className: 'dp-kv', children: endHint }, 'hint'),
+      ] }, 'end-section');
+    })();
 
   // 同一工作区可能有多个会话，显示名会完全相同；补短 session 后缀区分。
   const displayLabel = (person) => {
@@ -549,6 +568,7 @@ function DetailPane({ detail, loading, busy, onClose, onUnlock, onRemove, onStan
         ] }, 'archive-section')
         : null,
       standingSection,
+      endSection,
       jsxs('div', { className: 'dp-section', children: [
         jsx('h3', { className: 'dp-section-title', children: t('participants') }, 'title'),
         ...(people.length > 0 ? people : [jsx('p', { className: 'dp-kv', children: '—' }, 'none')]),
@@ -720,12 +740,12 @@ function PlazaPage({ t }) {
       .finally(() => { setBusy(false); });
   };
 
-  /** 人类结束长期讨论组（直接关闭，只读）。 */
-  const endStanding = (id) => {
+  /** 人类人工结束讨论组（任何未关闭组；直接关闭，只读）。 */
+  const endGroup = (id) => {
     if (busy) return;
     setBusy(true);
     void Promise.resolve()
-      .then(() => call('close-standing', { id }))
+      .then(() => call('close', { id }))
       .then(() => Promise.all([loadView(), loadDetail(id)]))
       .catch((cause) => { setError(String(cause?.message ?? cause)); })
       .finally(() => { setBusy(false); });
@@ -826,7 +846,7 @@ function PlazaPage({ t }) {
             onUnlock: unlock,
             onRemove: remove,
             onStanding: toggleStanding,
-            onEndStanding: endStanding,
+            onEndGroup: endGroup,
             onArchive: archive,
             t,
           }, 'detail-' + detail.group.id)),

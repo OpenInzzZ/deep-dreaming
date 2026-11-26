@@ -264,7 +264,7 @@ await test('人类强制解除写锁 / 移除参与者', async () => {
   await store.releaseLock(paths, id, lock.token).catch(() => undefined)
 })
 
-await test('长期讨论组：人类标记/取消、列表置顶、Agent 关闭被拒、人类结束', async () => {
+await test('长期讨论组：人类标记/取消、列表置顶、Agent 关闭被拒、人类人工结束', async () => {
   const id = await fresh('长期组', '开场')
   const marked = await store.setStanding(paths, id, true, HUMAN)
   assert.equal(marked.changed, true)
@@ -272,11 +272,33 @@ await test('长期讨论组：人类标记/取消、列表置顶、Agent 关闭�
   const listed = await store.listGroups(paths, {})
   assert.equal(listed.groups[0].id, id, '长期讨论组应排在最前')
   await assert.rejects(() => store.proposeClose(paths, id, A, '结束'), (error) => error.code === 'standing-group')
-  const closed = await store.closeStanding(paths, id, HUMAN, '收尾')
+  const closed = await store.humanClose(paths, id, HUMAN, '收尾')
   assert.equal(closed.group.status, 'closed')
   assert.equal(closed.group.close.closedReason, 'human')
   assert.equal(closed.group.standing, true)
   await assertDocSound(id)
+
+  // 普通组同样可以人工结束：open 直接关，closing 跳过剩余确认。
+  const openId = await fresh('普通组人工结束', '开场')
+  await store.joinGroup(paths, openId, B)
+  const openClosed = await store.humanClose(paths, openId, HUMAN, '口头拍板')
+  assert.equal(openClosed.group.status, 'closed')
+  assert.equal(openClosed.group.close.closedReason, 'human')
+  assert.equal(openClosed.group.close.by, '本机/human')
+  await assertDocSound(openId)
+
+  const closingId = await fresh('关闭确认中人工结束', '开场')
+  await store.joinGroup(paths, closingId, B)
+  await store.proposeClose(paths, closingId, A, '结论已定')
+  const forced = await store.humanClose(paths, closingId, HUMAN)
+  assert.equal(forced.group.status, 'closed')
+  assert.equal(forced.group.close.by, 'alpha/s-a', '人工结束保留原提议者记录')
+  assert.equal(forced.group.close.reason, '结论已定')
+  assert.equal(forced.group.close.closedReason, 'human')
+  await assertDocSound(closingId)
+  const readBack = await store.readGroup(paths, closingId)
+  assert.ok(readBack.markdown.includes('人工结束讨论'), '镜像里要留下人工结束的审计消息')
+  await assert.rejects(() => store.humanClose(paths, closingId, HUMAN), (error) => error.code === 'group-closed')
 
   const other = await fresh('普通组', '')
   await store.setStanding(paths, other, true, HUMAN)

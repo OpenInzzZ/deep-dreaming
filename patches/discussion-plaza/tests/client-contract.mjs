@@ -489,6 +489,9 @@ if (!canRender) {
       const archiveButton = [...mounted.container.querySelectorAll('.dp-side button')]
         .find((button) => button.textContent === '归档')
       assert.ok(archiveButton !== undefined, 'closed group must offer 归档')
+      const endButton = [...mounted.container.querySelectorAll('.dp-side button')]
+        .find((button) => button.textContent === '人工结束讨论' || button.textContent === '结束长期讨论')
+      assert.equal(endButton, undefined, 'a closed group must not offer a human end action')
       archiveButton.dispatchEvent(new shell.window.MouseEvent('click', { bubbles: true }))
       await waitFor(() => io.calls.some((entry) => entry.url === '/discussion-plaza/archive'), 'archive request')
       const archiveCall = io.calls.find((entry) => entry.url === '/discussion-plaza/archive')
@@ -581,7 +584,7 @@ if (!canRender) {
     io = installFetch({
       '/discussion-plaza/view': VIEW,
       '/discussion-plaza/detail': standingDetail,
-      '/discussion-plaza/close-standing': { id: 'dg_abcde_111111', status: 'closed' },
+      '/discussion-plaza/close': { id: 'dg_abcde_111111', status: 'closed' },
     })
     mounted = mount(mainEntry.component, { t })
     try {
@@ -594,14 +597,56 @@ if (!canRender) {
       end.dispatchEvent(new shell.window.MouseEvent('click', { bubbles: true }))
       await waitFor(() => [...mounted.container.querySelectorAll('.dp-side button')]
         .some((button) => button.textContent === '确认结束（只读）'), 'confirm-end button')
-      assert.equal(io.calls.some((entry) => entry.url === '/discussion-plaza/close-standing'), false,
+      assert.equal(io.calls.some((entry) => entry.url === '/discussion-plaza/close'), false,
         'the first click must not close the group')
       const confirm = [...mounted.container.querySelectorAll('.dp-side button')]
         .find((button) => button.textContent === '确认结束（只读）')
       confirm.dispatchEvent(new shell.window.MouseEvent('click', { bubbles: true }))
-      await waitFor(() => io.calls.some((entry) => entry.url === '/discussion-plaza/close-standing'), 'close-standing request')
+      await waitFor(() => io.calls.some((entry) => entry.url === '/discussion-plaza/close'), 'close request')
       assert.deepEqual(
-        JSON.parse(io.calls.find((entry) => entry.url === '/discussion-plaza/close-standing').body),
+        JSON.parse(io.calls.find((entry) => entry.url === '/discussion-plaza/close').body),
+        { args: { id: 'dg_abcde_111111' } },
+      )
+    } finally {
+      mounted.unmount()
+      io.restore()
+    }
+  })
+
+  await checkAsync('any open group offers a two-step 人工结束 that skips participant confirmations', async () => {
+    const normalGroup = {
+      ...VIEW.groups[0],
+      status: 'open',
+      statusLabel: '讨论中',
+      standing: false,
+      close: undefined,
+    }
+    const normalDetail = { group: normalGroup, messages: [], markdown: '# 接口对齐\n\n正文', path: 'C:/plaza/groups/dg_abcde_111111.md' }
+    const io = installFetch({
+      '/discussion-plaza/view': VIEW,
+      '/discussion-plaza/detail': normalDetail,
+      '/discussion-plaza/close': { id: 'dg_abcde_111111', status: 'closed' },
+    })
+    const mounted = mount(mainEntry.component, { t })
+    try {
+      await waitFor(() => mounted.container.querySelectorAll('.dp-row').length === 2, 'rows')
+      mounted.container.querySelector('.dp-row').dispatchEvent(new shell.window.MouseEvent('click', { bubbles: true }))
+      await waitFor(() => mounted.container.querySelector('.dp-side') !== null, 'side')
+      const side = mounted.container.querySelector('.dp-side')
+      assert.ok(side.textContent.includes('人工结束会跳过参与者确认'), 'the risk must be explained next to the button')
+      const end = [...side.querySelectorAll('button')].find((button) => button.textContent === '人工结束讨论')
+      assert.ok(end !== undefined, 'manual-end button on a normal open group')
+      end.dispatchEvent(new shell.window.MouseEvent('click', { bubbles: true }))
+      await waitFor(() => [...mounted.container.querySelectorAll('.dp-side button')]
+        .some((button) => button.textContent === '确认结束（只读）'), 'confirm-end button')
+      assert.equal(io.calls.some((entry) => entry.url === '/discussion-plaza/close'), false,
+        'the first click must not close the group')
+      const confirm = [...mounted.container.querySelectorAll('.dp-side button')]
+        .find((button) => button.textContent === '确认结束（只读）')
+      confirm.dispatchEvent(new shell.window.MouseEvent('click', { bubbles: true }))
+      await waitFor(() => io.calls.some((entry) => entry.url === '/discussion-plaza/close'), 'close request')
+      assert.deepEqual(
+        JSON.parse(io.calls.find((entry) => entry.url === '/discussion-plaza/close').body),
         { args: { id: 'dg_abcde_111111' } },
       )
     } finally {

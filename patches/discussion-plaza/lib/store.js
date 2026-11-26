@@ -1002,14 +1002,14 @@ export async function setStanding(paths, id, standing, operator = { sessionId: '
 }
 
 /**
- * 人类结束长期讨论组（直接关闭，只读）。
+ * 人类人工结束讨论组：任何未关闭的组都直接关闭（只读），跳过参与者确认。
  * @param paths - 路径集合。
  * @param id - 讨论组 id。
  * @param operator - 人类身份。
  * @param reason - 结束原因。
  */
-export async function closeStanding(paths, id, operator = { sessionId: 'human', name: '人类', workspace: '本机' }, reason) {
-  const result = await withGroupLock(paths, id, operator, { purpose: 'close-standing' }, async () => {
+export async function humanClose(paths, id, operator = { sessionId: 'human', name: '人类', workspace: '本机' }, reason) {
+  const result = await withGroupLock(paths, id, operator, { purpose: 'close' }, async () => {
     const { group } = await readGroupFile(paths, id)
     const planned = planHumanClose(group, operator, reason, nowIso())
     await saveGroupFile(paths, planned.group)

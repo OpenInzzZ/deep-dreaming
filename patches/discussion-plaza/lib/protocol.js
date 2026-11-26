@@ -32,6 +32,9 @@
  *     ▲                        │
  *     └────cancel_close────────┘
  *
+ * 人类在广场面板里可以**人工结束**任何未关闭的组（`planHumanClose`），
+ * open / closing 都直接进入 closed，跳过参与者确认。
+ *
  * `writing`（Agent 写入中）**不是**文档字段：它由锁文件的存在与租约推导
  * （见 `store.js`），所以进程崩溃不会留下永久的「写入中」。
  */
@@ -816,26 +819,33 @@ export function planSetStanding(group, standing, actor, stamp) {
 }
 
 /**
- * 人类结束长期讨论组：直接关闭（只读），无需 Agent 确认。
+ * 人类**人工结束**讨论组：直接关闭（只读），跳过参与者确认。
  *
- * 这是长期组唯一的关闭方式 —— Agent 的 `plaza_propose_close` 对长期组会抛
- * `standing-group`。普通讨论组不能走这条路径（必须全员确认）。
+ * 人类是广场的最终裁决者：普通组、关闭确认中、长期组都可以由人类在面板里
+ * 人工结束。Agent 仍必须走 `planProposeClose` + 全员确认；长期组更是连
+ * `planProposeClose` 都会被拒绝（`standing-group`）。
+ *
+ * 关闭确认中的人工结束**保留原提议记录**（`close.by` / `close.at` /
+ * `close.reason` 仍指向提议者），只补 `closedAt` / `closedReason: 'human'`，
+ * 再写一条系统消息说明是谁跳过了剩余确认；讨论中直接结束时，`close.by`
+ * 就是人类自己，并记录本次原因。
  * @param group - 讨论组。
  * @param actor - 人类身份。
- * @param reason - 结束原因。
+ * @param reason - 结束原因（可选）。
  * @param stamp - 时间戳。
  */
 export function planHumanClose(group, actor, reason, stamp) {
   if (group.status === STATUS_CLOSED) throw plazaError('group-closed', `讨论组 ${group.id} 已关闭`)
-  if (group.standing !== true) {
-    throw plazaError('not-standing', `讨论组 ${group.id} 不是长期讨论组；普通讨论组必须走全员确认关闭流程`)
-  }
   const text = oneLine(reason)
-  let next = closeGroup({
-    ...group,
-    close: { by: participantKey(actor), at: stamp, reason: text },
-  }, stamp, 'human')
-  next = pushSystem(next, `${authorText(actor)} 决定结束长期讨论，讨论组已关闭（只读）${text.length > 0 ? `（${text}）` : ''}`, stamp)
+  // closing 的 close 记录属于提议者，人工结束不改写它；open 时才由人类补一条。
+  const base = group.status === STATUS_CLOSING && group.close !== null
+    ? group
+    : { ...group, close: { by: participantKey(actor), at: stamp, reason: text } }
+  let next = closeGroup(base, stamp, 'human')
+  const label = group.standing === true
+    ? '决定结束长期讨论'
+    : '人工结束讨论（跳过参与者确认）'
+  next = pushSystem(next, `${authorText(actor)} ${label}，讨论组已关闭（只读）${text.length > 0 ? `（${text}）` : ''}`, stamp)
   return { group: next }
 }
 

@@ -302,16 +302,38 @@ test('长期讨论组：人类标记，Agent 关组被拒，人类可直接结�
   const closed = planHumanClose(marked.group, HUMAN, '项目收尾', T3)
   assert.equal(closed.group.status, STATUS_CLOSED)
   assert.equal(closed.group.standing, true)
+  assert.equal(closed.group.close.by, '本机/human')
   assert.equal(closed.group.close.closedReason, 'human')
   assert.ok(closed.group.messages.some((message) => message.body.includes('结束长期讨论')))
   // 取消标记
   const unmarked = planSetStanding(marked.group, false, HUMAN, T2)
   assert.equal(unmarked.group.standing, false)
-  // 普通组不能走人类直接结束
-  assert.throws(() => planHumanClose(makeGroup([A]), HUMAN, '', T1), (error) => error.code === 'not-standing')
   // 关闭确认中不能改长期标记
   const closing = planProposeClose(makeGroup([A, B]), A, '结束', T1).group
   assert.throws(() => planSetStanding(closing, true, HUMAN, T2), (error) => error.code === 'close-pending')
+})
+
+test('人工结束：普通组 open / closing 都能被人类直接关闭，已关闭不能再关', () => {
+  // open：人类自己补 close 记录，审计消息写明跳过参与者确认。
+  const forced = planHumanClose(makeGroup([A]), HUMAN, '口头拍板', T1).group
+  assert.equal(forced.status, STATUS_CLOSED)
+  assert.equal(forced.close.by, '本机/human')
+  assert.equal(forced.close.reason, '口头拍板')
+  assert.equal(forced.close.closedReason, 'human')
+  assert.ok(forced.messages.some((message) => message.body.includes('人工结束讨论') && message.body.includes('口头拍板')))
+  assert.deepEqual(validateGroup(forced), [])
+  assert.throws(() => planHumanClose(forced, HUMAN, '', T2), (error) => error.code === 'group-closed')
+
+  // closing：保留原提议者的 close 记录，只补 closedAt / closedReason，剩余确认不再等待。
+  const closing = planProposeClose(makeGroup([A, B]), A, '结论已定', T1).group
+  assert.equal(pendingConfirmations(closing).length, 1)
+  const ended = planHumanClose(closing, HUMAN, undefined, T2).group
+  assert.equal(ended.status, STATUS_CLOSED)
+  assert.equal(ended.close.by, 'alpha/s-a')
+  assert.equal(ended.close.reason, '结论已定')
+  assert.equal(ended.close.closedReason, 'human')
+  assert.ok(ended.messages.some((message) => message.body.includes('跳过参与者确认')))
+  assert.deepEqual(validateGroup(ended), [])
 })
 
 test('归档：只允许已关闭组；归档/取消幂等且不写讨论消息', () => {

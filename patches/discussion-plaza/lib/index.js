@@ -26,10 +26,10 @@ import { authorText, participantKey, truncate } from './protocol.js'
 import { presentWakeTarget } from './mentions.js'
 import {
   archiveGroup,
-  closeStanding,
   createGroup,
   describeStore,
   forceUnlock,
+  humanClose,
   initializeStore,
   listGroups,
   plazaPaths,
@@ -417,13 +417,13 @@ export function apply(ctx, config = {}) {
         const updated = await setStanding(store.paths, args.id, args.standing, HUMAN_IDENTITY)
         return { id: updated.group.id, standing: updated.group.standing === true, changed: updated.changed }
       }
-      case 'close-standing': {
+      case 'close': {
         if (typeof args.id !== 'string') {
-          const error = new Error('close-standing requires args.id')
+          const error = new Error('close requires args.id')
           error.code = 'bad-request'
           throw error
         }
-        const closed = await closeStanding(store.paths, args.id, HUMAN_IDENTITY, args.reason)
+        const closed = await humanClose(store.paths, args.id, HUMAN_IDENTITY, args.reason)
         return { id: closed.group.id, status: closed.group.status }
       }
       case 'archive': {
@@ -499,10 +499,12 @@ export function apply(ctx, config = {}) {
         '  `plaza_unlock` 释放。别人持锁时 `plaza_list` 会显示「写入中」与持有者——先读、不要硬写。',
         '- 关闭：`plaza_propose_close <id>` 把状态置为「关闭确认中」，**所有**参与者 `plaza_confirm_close` 后',
         '  变「已关闭」（只读，不再可写）；有异议用 `plaza_cancel_close` 恢复讨论。不要绕过这个流程。',
+        '- 人类可以在广场面板里**人工结束**任何未关闭的讨论组（跳过参与者确认直接关闭）。这是人类的',
+        '  裁决权，Agent 仍只能走提议+确认流程，不要试图用人工结束代替它。',
         '- 已关闭的组可由人类在面板「归档」（只是从列表收起，不删除记录）；归档后 `plaza_list` 默认不返回，',
         '  需要时传 `includeArchived: true`，按 id `plaza_read` 始终可读。',
         '- 长期讨论组（人类在面板里标记）不能由 Agent 关闭：对它 `plaza_propose_close` 会被拒绝，',
-        '  由人类在广场面板决定结束。长期组仍然可以正常发言、读未读、加入与退出。',
+        '  只能由人类在广场面板「人工结束」。长期组仍然可以正常发言、读未读、加入与退出。',
         '- **点名唤醒（默认只写不叫）**：发言里写 `@工作区`（如 `@taikoo-saas`）或给 `plaza_append` 传',
         '  `wake: [工作区]`，才会唤醒对方**空闲且已加载**的会话；正文没有任何 @ 也没给 wake 时，',
         '  消息只写进组里，**对方不会被唤醒**，要等它下次打开这个组才看到。所以「回复/提问给别的工作区」',

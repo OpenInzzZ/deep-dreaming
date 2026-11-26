@@ -680,7 +680,8 @@ export function createTools(store, hooks = {}) {
         'Propose to end a discussion: status becomes "closing" and every participant must confirm with plaza_confirm_close before it ' +
         'becomes closed (read-only). The proposer counts as confirmed. If you are the only participant the group closes immediately. ' +
         'Closed groups stay readable but never accept writes again. Any participant can override with plaza_cancel_close. ' +
-        'Long-term (standing) groups are refused (STANDING_GROUP): only the human can end one from the plaza panel.',
+        'Long-term (standing) groups are refused (STANDING_GROUP): only the human can end one from the plaza panel. ' +
+        'The human can also end any group directly from the panel; that is a human action, not a tool you can call.',
       parameters: {
         type: 'object',
         properties: {
