@@ -32,6 +32,7 @@ deep-dreaming/
 │   ├── migrate-icon-names.mjs    # 把 `…Outline16/14` 图标名迁移到 0.2.0-rc.2 的 `…OutlineRegular/Medium`
 │   ├── migrate-mnemon-to-mneme.mjs # 把 dsh-mnemon 各工作区图谱转换成 dsh-mneme 单库(幂等、可回滚、支持 --dry-run)
 │   ├── migrate-mnemon-to-mneme.test.mjs # 上面的类型映射/标题剥离/幂等键等纯逻辑测试
+│   ├── promote-imported-memories.mjs # 导入行转正/退回(source: imported ↔ mnemon),先备份、bump 镜像代数并重渲染镜像
 │   ├── verify-plugin-meta.mjs    # 复刻官方 readPluginMeta,证明「设置 → 内置插件」会显示我们的标题/描述
 │   ├── verify-bundle-rows.mjs    # 校验每个补丁的 dsh.bundle 声明与包内 cordis.patch.yml 行结构
 │   ├── run-tests.mjs             # 跑完整个测试矩阵(npm test)
@@ -636,6 +637,34 @@ constraint×8`;其中 112 条 pitfall + 8 条 constraint 共 **120 行受编码�
 
 > 迁移**只写 `~/.dsh/memory/memory.db`**,mnemon 的库**保持只读**、原样保留。
 > 想撤销:`store.deleteBySharePackId(<某工作区的 packId>)` 逐工作区删干净。
+
+#### 导入行转正:279 行并入本库巩固范围(2026-11-24)
+
+迁移按默认 `--source imported` 落库,所以这 279 行在面板里带「来自 mnemon」徽标、
+落在「外来」档,并且被 mneme 的行池整体剔出巩固链路 —— 判据是 `isImportedRow()`
+(精确等于 `source === "imported"`):dream / sleep / organize / `saveWithDedupe` /
+自动画像事实都会先剔掉它们。这些其实是本机上一代记忆库的数据,不是别人分享的原文,
+所以 2026-11-24 用 `scripts/promote-imported-memories.mjs` 把 `source` 一列改成
+`mnemon`(迁移脚本 `--source mnemon` 的一等行取值):
+
+```powershell
+node scripts/promote-imported-memories.mjs         # 干跑:列出 279 行的包/类型/工作区分布
+node scripts/promote-imported-memories.mjs --apply # 先 VACUUM INTO 备份,再改一列
+node scripts/promote-imported-memories.mjs --to imported --apply   # 退回「外来」档
+```
+
+只动 `source` 一列。身份两列(`share_pack_id` / `share_external_id`)保留 → 迁移脚本
+重跑仍零新增;需要时仍可用 `store.deleteBySharePackId(packId)` 按包撤回(面板的撤销
+入口在「外来」区,转正后不再从面板进入)。`from-mnemon` 标签与
+`created_at` / `updated_at` 原样保留 → 溯源与排序不变。脚本在同一个事务里改库、
+bump `mirror_state.generation` 并置 dirty,再用 `service.recoverMirror()` 重渲染十个
+镜像;运行中的宿主按代数失效注入 / BM25 缓存,所以**不用重启**。实测:279 行更新
+(`imported` 归零)、镜像 `来源` 行 imported 279 → 0 / mnemon 0 → 279、库总计 2521 行
+与 279 个包号不变。备份在 `~/.dsh/memory/backups/memory-before-source-*-*.db`。
+
+口径提醒:面板的「沉淀」档是 `deposited=only`(receipt_chain 里被 autoDream 真正
+巩固过的行 ∪ `source='dream'` 直写),转正只是让这些行**进入候选池**,要等下一次
+dream 轮次处理过后才会出现在「沉淀」里;「外来」档则当场清空。
 
 **迁移之后的收尾(2026-11-17 当天完成)。** 数据到位、并且确认 mneme 侧无恙(311 行 /
 `mirror_state` 干净 / 8 个镜像文件齐全 / `/api/dsh-mneme/health` 的 `active_rows` 与
